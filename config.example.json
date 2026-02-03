@@ -1,0 +1,30 @@
+{
+    "PORT": 3456,
+    "HOST": "127.0.0.1",
+    "API_TIMEOUT_MS": 600000,
+    "Providers": [
+        {
+            "name": "deepseek",
+            "api_base_url": "https://api.deepseek.com",
+            "api_key": "sk-xxx",
+            "models": [
+                "deepseek-reasoner",
+                "deepseek-chat"
+            ]
+        },
+        {
+            "name": "openrouter",
+            "api_base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-xxx",
+            "models": [
+                "theminimax/minimax-m2.1"
+            ]
+        }
+    ],
+    "Router": {
+        "default": "deepseek,deepseek-reasoner",
+        "background": "deepseek,deepseek-chat",
+        "longContext": "openrouter,theminimax/minimax-m2.1",
+        "longContextThreshold": 60000
+    }
+}
