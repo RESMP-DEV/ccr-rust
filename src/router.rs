@@ -11,7 +11,7 @@ use tracing::{error, info, trace, warn};
 
 use crate::config::Config;
 use crate::metrics::{
-    record_failure, record_pre_request_tokens, record_request, record_request_duration,
+    record_failure, record_pre_request_tokens, record_rate_limit_hit, record_request, record_request_duration,
     record_usage, sync_ewma_gauge, verify_token_usage,
 };
 use crate::ratelimit::RateLimitTracker;
@@ -20,6 +20,36 @@ use crate::sse::StreamVerifyCtx;
 use crate::transformer::{TransformerChain, TransformerRegistry};
 
 const MAX_RETRIES: usize = 3;
+
+/// Extract rate limit information from upstream response headers.
+fn extract_rate_limit_headers(
+    resp: &reqwest::Response,
+) -> (Option<u32>, Option<std::time::Instant>) {
+    let remaining = resp
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    let reset_at = resp
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|ts| {
+            std::time::Instant::now()
+                + std::time::Duration::from_secs(
+                    ts.saturating_sub(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    ),
+                )
+        });
+
+    (remaining, reset_at)
+}
 
 /// Error type for try_request that distinguishes rate limits from other errors.
 #[derive(Debug)]
@@ -61,6 +91,7 @@ pub struct AppState {
     pub transformer_registry: Arc<TransformerRegistry>,
     pub active_streams: Arc<AtomicUsize>,
     pub ratelimit_tracker: Arc<RateLimitTracker>,
+    pub shutdown_timeout: u64,
 }
 
 // ============================================================================
@@ -125,21 +156,26 @@ struct OpenAIRequest {
 }
 
 /// OpenAI message format.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Default)]
 struct OpenAIMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
 }
 
 /// OpenAI non-streaming response.
 #[derive(Debug, Deserialize)]
 struct OpenAIResponse {
     id: String,
+    #[allow(dead_code)] // TODO: Log for debugging
     object: String,
+    #[allow(dead_code)] // TODO: Include in response headers
     created: i64,
+    #[allow(dead_code)] // TODO: Validate model matches requested
     model: String,
     choices: Vec<OpenAIChoice>,
     usage: Option<OpenAIUsage>,
@@ -147,6 +183,7 @@ struct OpenAIResponse {
 
 #[derive(Debug, Deserialize)]
 struct OpenAIChoice {
+    #[allow(dead_code)] // TODO: Use for multi-choice selection
     index: u32,
     message: OpenAIResponseMessage,
     finish_reason: Option<String>,
@@ -154,6 +191,7 @@ struct OpenAIChoice {
 
 #[derive(Debug, Deserialize, Clone)]
 struct OpenAIResponseMessage {
+    #[allow(dead_code)] // TODO: Validate response role
     role: String,
     #[serde(default)]
     content: Option<String>,
@@ -168,6 +206,7 @@ struct OpenAIUsage {
     #[serde(default)]
     completion_tokens: u64,
     #[serde(default)]
+    #[allow(dead_code)] // TODO: Track token breakdown for analytics
     prompt_tokens_details: Option<serde_json::Value>,
 }
 
@@ -175,7 +214,9 @@ struct OpenAIUsage {
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamChunk {
     id: String,
+    #[allow(dead_code)] // TODO: Log stream type for debugging
     object: String,
+    #[allow(dead_code)] // TODO: Track stream latency
     created: i64,
     model: String,
     choices: Vec<OpenAIStreamChoice>,
@@ -184,6 +225,7 @@ struct OpenAIStreamChunk {
 
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamChoice {
+    #[allow(dead_code)] // TODO: Support multi-stream selection
     index: u32,
     delta: OpenAIDelta,
     finish_reason: Option<String>,
@@ -192,6 +234,7 @@ struct OpenAIStreamChoice {
 #[derive(Debug, Deserialize, Default)]
 struct OpenAIDelta {
     #[serde(default)]
+    #[allow(dead_code)] // TODO: First chunk role validation
     role: Option<String>,
     #[serde(default)]
     content: Option<String>,
@@ -313,6 +356,7 @@ fn translate_request_anthropic_to_openai(
                 role: "system".to_string(),
                 content: Some(system_content),
                 reasoning_content: None,
+                tool_call_id: None,
             });
         }
     }
@@ -325,6 +369,49 @@ fn translate_request_anthropic_to_openai(
             r => r,
         };
 
+        // Handle tool_result blocks in user messages
+        if let Some(arr) = msg.content.as_array() {
+            for block in arr {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                    // Extract content and tool_use_id from tool_result block
+                    let tool_content = block.get("content").and_then(|c| {
+                        // Content can be a string or an object with type "text"
+                        if let Some(s) = c.as_str() {
+                            Some(s.to_string())
+                        } else if let Some(obj) = c.as_object() {
+                            obj.get("text").and_then(|t| t.as_str()).map(String::from)
+                        } else if let Some(arr) = c.as_array() {
+                            // Handle array of content items in tool_result
+                            let mut result = String::new();
+                            for item in arr {
+                                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                    result.push_str(text);
+                                } else if let Some(text) = item.as_str() {
+                                    result.push_str(text);
+                                }
+                            }
+                            Some(result)
+                        } else {
+                            None
+                        }
+                    });
+
+                    let tool_call_id = block
+                        .get("tool_use_id")
+                        .and_then(|id| id.as_str())
+                        .map(String::from);
+
+                    messages.push(OpenAIMessage {
+                        role: "tool".to_string(),
+                        content: tool_content,
+                        tool_call_id,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
+        // Handle regular message content
         let content = normalize_message_content(&msg.content);
 
         if !content.is_empty() || role != "user" {
@@ -332,6 +419,7 @@ fn translate_request_anthropic_to_openai(
                 role: role.to_string(),
                 content: Some(content),
                 reasoning_content: None,
+                tool_call_id: None,
             });
         }
     }
@@ -631,6 +719,7 @@ pub async fn handle_messages(
                 tier_name,
                 local_estimate,
                 &state.active_streams,
+                state.ratelimit_tracker.clone(),
             )
             .await
             {
@@ -640,8 +729,6 @@ pub async fn handle_messages(
                     record_request(tier_name);
                     record_request_duration(tier_name, total_duration);
                     sync_ewma_gauge(&state.ewma_tracker);
-                    // Reset rate limit state on success
-                    state.ratelimit_tracker.record_success(tier_name);
                     info!(
                         "Success on {} after {:.2}s (attempt {:.3}s)",
                         tier_name, total_duration, attempt_duration
@@ -658,6 +745,7 @@ pub async fn handle_messages(
                         retry_after
                     );
                     record_failure(tier_name, "rate_limited");
+                    record_rate_limit_hit(tier_name);
                     // Record 429 for backoff tracking
                     state.ratelimit_tracker.record_429(tier_name, retry_after);
                     // Skip remaining retries for this tier - move to next
@@ -708,7 +796,8 @@ async fn try_request(
     tier: &str,
     tier_name: &str,
     local_estimate: u64,
-    active_streams: &Arc<AtomicUsize>,
+    _active_streams: &Arc<AtomicUsize>,
+    ratelimit_tracker: Arc<RateLimitTracker>,
 ) -> Result<Response, TryRequestError> {
     let provider = config.resolve_provider(tier).ok_or_else(|| {
         TryRequestError::Other(anyhow::anyhow!("Provider not found for tier: {}", tier))
@@ -799,9 +888,12 @@ async fn try_request(
     // Handle streaming vs non-streaming
     if request.stream.unwrap_or(false) {
         // For streaming, we need to translate the SSE events
+        let rate_limit_info = extract_rate_limit_headers(&resp);
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
             local_estimate,
+            ratelimit_tracker: Some(ratelimit_tracker.clone()),
+            rate_limit_info: Some(rate_limit_info),
         };
         Ok(
             stream_response_translated(
@@ -814,6 +906,9 @@ async fn try_request(
             .await,
         )
     } else {
+        // Extract rate limit headers for non-streaming
+        let rate_limit_info = extract_rate_limit_headers(&resp);
+        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
         // For non-streaming, translate the full response
         let body = resp
             .bytes()
@@ -1080,6 +1175,14 @@ pub async fn stream_response_translated(
                 );
                 verify_token_usage(&ctx.tier_name, ctx.local_estimate, usage.input_tokens);
             }
+            // Clear rate limit backoff and update rate limit state on successful stream completion
+            if let Some(ref tracker) = ctx.ratelimit_tracker {
+                if let Some((remaining, reset_at)) = &ctx.rate_limit_info {
+                    tracker.record_success(&ctx.tier_name, *remaining, *reset_at);
+                } else {
+                    tracker.record_success(&ctx.tier_name, None, None);
+                }
+            }
         }
 
         increment_active_streams(-1);
@@ -1259,5 +1362,51 @@ mod tests {
         assert!(!events.is_empty());
         let delta = events[0].delta.as_ref().unwrap();
         assert_eq!(delta["type"], "thinking_delta");
+    }
+
+    #[test]
+    fn test_translate_tool_result() {
+        let request = AnthropicRequest {
+            model: "claude-3".to_string(),
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: serde_json::json!("What's 2+2?"),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: serde_json::json!([{
+                        "type": "tool_use",
+                        "id": "toolu_123",
+                        "name": "calculator",
+                        "input": {"expression": "2+2"}
+                    }]),
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: serde_json::json!([{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_123",
+                        "content": "4"
+                    }]),
+                },
+            ],
+            system: None,
+            max_tokens: Some(1000),
+            temperature: None,
+            stream: None,
+            tools: None,
+        };
+
+        let openai_req = translate_request_anthropic_to_openai(&request, "gpt-4");
+
+        // Should have: user, assistant, tool messages
+        let tool_msg = openai_req
+            .messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("Should have tool message");
+        assert_eq!(tool_msg.content, Some("4".to_string()));
+        assert_eq!(tool_msg.tool_call_id, Some("toolu_123".to_string()));
     }
 }

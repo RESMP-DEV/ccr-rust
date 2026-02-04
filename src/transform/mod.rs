@@ -5,5 +5,6 @@
 
 pub mod maxtoken;
 pub mod registry;
+pub mod thinktag;
 
 pub use registry::TransformerRegistry;

@@ -26,10 +26,10 @@ use clap::Parser as ClapParser;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Barrier};
 use tokio::time;
 use tracing::{debug, error, info, warn, Level};
@@ -66,7 +66,7 @@ impl MockStream {
             // Chunks are typically 10-500 bytes depending on tokenization
             bytes_per_chunk: 50 + (id as usize % 200),
             // Variable delay mimics network and model inference time
-            delay_ms: 10 + (id as usize % 50),
+            delay_ms: 10 + (id as u64 % 50),
         }
     }
 
@@ -149,9 +149,9 @@ struct StressTestResults {
     /// Peak concurrent streams
     peak_concurrent: AtomicUsize,
     /// Start time of the test
-    start_time: Option<Instant>,
+    start_time: parking_lot::Mutex<Option<Instant>>,
     /// End time of the test
-    end_time: Option<Instant>,
+    end_time: parking_lot::Mutex<Option<Instant>>,
     /// Memory statistics
     memory: Arc<MemoryStats>,
     /// Per-stream statistics (sampled)
@@ -168,8 +168,8 @@ impl StressTestResults {
             bytes_sent: AtomicU64::new(0),
             total_errors: AtomicU64::new(0),
             peak_concurrent: AtomicUsize::new(0),
-            start_time: None,
-            end_time: None,
+            start_time: parking_lot::Mutex::new(None),
+            end_time: parking_lot::Mutex::new(None),
             memory,
             stream_stats: parking_lot::Mutex::new(HashMap::new()),
         }
@@ -200,7 +200,8 @@ impl StressTestResults {
 
     fn record_chunk(&self, id: u64, bytes: &Bytes) {
         self.chunks_sent.fetch_add(1, Ordering::Relaxed);
-        self.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        self.bytes_sent
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         let mut stats = self.stream_stats.lock();
         if let Some(s) = stats.get_mut(&id) {
             s.record_chunk(bytes);
@@ -218,17 +219,19 @@ impl StressTestResults {
         }
     }
 
-    fn start(&mut self) {
-        self.start_time = Some(Instant::now());
+    fn start(&self) {
+        *self.start_time.lock() = Some(Instant::now());
     }
 
-    fn end(&mut self) {
-        self.end_time = Some(Instant::now());
+    fn end(&self) {
+        *self.end_time.lock() = Some(Instant::now());
     }
 
     fn duration(&self) -> Duration {
-        self.start_time
-            .map(|s| self.end_time.unwrap_or_else(Instant::now) - s)
+        let start = *self.start_time.lock();
+        let end = *self.end_time.lock();
+        start
+            .map(|s| end.unwrap_or_else(Instant::now) - s)
             .unwrap_or_default()
     }
 
@@ -312,7 +315,10 @@ fn get_current_rss() -> u64 {
     #[cfg(target_os = "linux")]
     {
         let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-        statm.split_whitespace().next().map(|s| s.parse::<u64>().unwrap_or(0) * 4096)
+        statm
+            .split_whitespace()
+            .next()
+            .map(|s| s.parse::<u64>().unwrap_or(0) * 4096)
     }
     #[cfg(target_os = "macos")]
     {
@@ -370,7 +376,10 @@ async fn run_stress_phase(
     bytes_per_chunk: usize,
     chunk_delay_ms: u64,
 ) -> Result<()> {
-    info!("Starting stress phase with {} concurrent streams for {:?}", num_streams, duration);
+    info!(
+        "Starting stress phase with {} concurrent streams for {:?}",
+        num_streams, duration
+    );
 
     // Use a barrier to start all streams nearly simultaneously
     let barrier = Arc::new(Barrier::new(num_streams));
@@ -470,15 +479,37 @@ fn print_results(results: &StressTestResults) {
     println!("Streams Started:        {}", started);
     println!("Streams Completed:      {}", completed);
     println!("Streams Errored:        {}", errored);
-    println!("Completion Rate:        {:.2}%", if started > 0 { (completed as f64 / started as f64) * 100.0 } else { 0.0 });
+    println!(
+        "Completion Rate:        {:.2}%",
+        if started > 0 {
+            (completed as f64 / started as f64) * 100.0
+        } else {
+            0.0
+        }
+    );
     println!("Peak Concurrent:        {}", peak);
     println!("Total Chunks:           {}", chunks);
-    println!("Total Bytes:            {} ({:.2} MB)", bytes, bytes as f64 / 1024.0 / 1024.0);
-    println!("Chunk Throughput:       {:.2} chunks/sec", results.throughput());
-    println!("Data Throughput:        {:.2} MB/sec", results.bytes_per_second() / 1024.0 / 1024.0);
+    println!(
+        "Total Bytes:            {} ({:.2} MB)",
+        bytes,
+        bytes as f64 / 1024.0 / 1024.0
+    );
+    println!(
+        "Chunk Throughput:       {:.2} chunks/sec",
+        results.throughput()
+    );
+    println!(
+        "Data Throughput:        {:.2} MB/sec",
+        results.bytes_per_second() / 1024.0 / 1024.0
+    );
     println!("{:=^60}\n", "");
 
-    if let Some(rss) = results.memory.peak_rss.load(Ordering::Relaxed).checked_div(1024 * 1024) {
+    if let Some(rss) = results
+        .memory
+        .peak_rss
+        .load(Ordering::Relaxed)
+        .checked_div(1024 * 1024)
+    {
         println!("Peak Memory (RSS):      {} MB", rss);
     }
 
@@ -566,7 +597,10 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)
         .context("Failed to set tracing subscriber")?;
 
-    info!("CCR Stress Test - Scaling to {} concurrent streams", args.streams);
+    info!(
+        "CCR Stress Test - Scaling to {} concurrent streams",
+        args.streams
+    );
     info!("Duration: {:?}", args.duration);
 
     let duration = Duration::from(args.duration);
@@ -601,7 +635,10 @@ async fn main() -> Result<()> {
         let end = args.ramp_end.unwrap_or(300);
         let step = args.ramp_step.unwrap_or(25);
 
-        info!("Running ramp-up test: {} -> {} streams (step {})", start, end, step);
+        info!(
+            "Running ramp-up test: {} -> {} streams (step {})",
+            start, end, step
+        );
 
         run_ramp_test(
             start,
@@ -654,7 +691,8 @@ mod tests {
     #[test]
     fn test_stream_stats() {
         let mut stats = StreamStats::new(1);
-        assert!(stats.duration().is_zero());
+        // Duration is small (just the time to construct) - allow up to 100ms for slow CI
+        assert!(stats.duration() < Duration::from_millis(100));
         assert_eq!(stats.chunks_sent, 0);
         assert_eq!(stats.errors, 0);
 

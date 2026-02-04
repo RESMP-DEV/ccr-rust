@@ -69,6 +69,7 @@ impl Config {
         &self.inner.file.router
     }
 
+    #[allow(dead_code)]
     pub fn api_timeout_ms(&self) -> u64 {
         self.inner.file.api_timeout_ms
     }
@@ -158,6 +159,7 @@ impl<'de> Deserialize<'de> for TransformerEntry {
 ///
 /// Corresponds to e.g. `"use": ["deepseek", ["maxtoken", {"max_tokens": 65536}]]`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[allow(dead_code)]
 pub struct TransformerUseList {
     pub use_list: Vec<TransformerEntry>,
 }
@@ -202,6 +204,8 @@ pub struct ProviderTransformer {
 
 impl ProviderTransformer {
     /// Get the provider-level transformer chain.
+    #[allow(dead_code)]
+    // TODO: integrate into request flow or remove
     pub fn provider_transformers(&self) -> &[TransformerEntry] {
         &self.use_list
     }
@@ -214,6 +218,7 @@ impl ProviderTransformer {
     }
 
     /// Check whether this provider has any transformers configured at all.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.use_list.is_empty() && self.model_overrides.is_empty()
     }
@@ -221,6 +226,8 @@ impl ProviderTransformer {
     /// Check whether there is exactly one provider-level transformer and it
     /// matches `name`, with no model overrides. Used by the bypass/passthrough
     /// logic that mirrors the Node.js `shouldBypassTransformers`.
+    #[allow(dead_code)]
+    // TODO: integrate into request flow or remove
     pub fn is_sole_transformer(&self, name: &str) -> bool {
         self.use_list.len() == 1
             && self.use_list[0].name() == name
@@ -230,6 +237,7 @@ impl ProviderTransformer {
     /// Check bypass eligibility for a specific model, matching the Node.js
     /// logic: provider has exactly one transformer matching `name`, and the
     /// model either has no overrides or a single override also matching `name`.
+    #[allow(dead_code)]
     pub fn should_bypass(&self, transformer_name: &str, model: &str) -> bool {
         if self.use_list.len() != 1 || self.use_list[0].name() != transformer_name {
             return false;
@@ -426,6 +434,7 @@ impl Default for TierRetryConfig {
 
 impl TierRetryConfig {
     /// Calculate backoff duration for a given attempt (0-indexed).
+    #[allow(dead_code)]
     pub fn backoff_duration(&self, attempt: usize) -> std::time::Duration {
         let delay_ms = (self.base_backoff_ms as f64) * self.backoff_multiplier.powi(attempt as i32);
         let clamped_ms = delay_ms.min(self.max_backoff_ms as f64) as u64;
@@ -480,11 +489,11 @@ impl TierRetryConfig {
             _ => base_delay_ms,
         };
 
-        // Clamp to max backoff, and floor at 0.5x of base (from latency_factor clamp)
-        let clamped_ms = scaled_delay_ms.min(self.max_backoff_ms as f64) as u64;
-        let min_backoff = (self.base_backoff_ms as f64 * 0.5) as u64;
+        // Clamp to max backoff, and floor at 0.5x of base (fast tier minimum)
+        let clamped_ms = scaled_delay_ms.min(self.max_backoff_ms as f64);
+        let min_backoff = self.base_backoff_ms as f64 * 0.5;
 
-        std::time::Duration::from_millis(clamped_ms.max(min_backoff))
+        std::time::Duration::from_millis(clamped_ms.max(min_backoff) as u64)
     }
 }
 

@@ -53,6 +53,10 @@ struct Cli {
     /// Maximum concurrent streams (0 = unlimited)
     #[arg(long, env = "CCR_MAX_STREAMS", default_value = "512")]
     max_streams: usize,
+
+    /// Graceful shutdown timeout in seconds
+    #[arg(long, default_value = "30")]
+    shutdown_timeout: u64,
 }
 
 #[tokio::main]
@@ -72,6 +76,7 @@ async fn main() -> Result<()> {
     tracing::info!("Loaded config from {}", config_path);
     tracing::info!("Tier order: {:?}", config.backend_tiers());
     tracing::info!("Max concurrent streams: {}", cli.max_streams);
+    tracing::info!("Shutdown timeout: {}s", cli.shutdown_timeout);
 
     let ewma_tracker = std::sync::Arc::new(EwmaTracker::new());
     let transformer_registry = std::sync::Arc::new(TransformerRegistry::new());
@@ -82,6 +87,7 @@ async fn main() -> Result<()> {
         transformer_registry,
         active_streams: Arc::new(AtomicUsize::new(0)),
         ratelimit_tracker,
+        shutdown_timeout: cli.shutdown_timeout,
     };
 
     let app = Router::new()
@@ -100,13 +106,13 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(cli.shutdown_timeout))
         .await?;
 
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(timeout: u64) {
     let ctrl_c = async { ctrl_c().await.expect("failed to listen for ctrl+c") };
     #[cfg(unix)]
     let terminate = async {
@@ -122,7 +128,10 @@ async fn shutdown_signal() {
         _ = ctrl_c => tracing::info!("Received SIGINT"),
         _ = terminate => tracing::info!("Received SIGTERM"),
     }
-    tracing::info!("Received shutdown signal, draining connections...");
+    tracing::info!(
+        "Received shutdown signal, draining connections (timeout {}s)...",
+        timeout
+    );
 }
 
 async fn latencies_handler(State(state): State<AppState>) -> impl axum::response::IntoResponse {

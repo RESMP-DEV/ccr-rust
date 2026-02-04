@@ -9,6 +9,7 @@ use tracing::{debug, trace};
 /// allowing faster tiers to retry more aggressively while slowing down retries
 /// for degraded or slow tiers.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DynamicBackoff {
     /// Reference latency in milliseconds (default: 1000ms = 1 second).
     /// Tiers with EWMA below this scale down their backoff; above scales up.
@@ -21,6 +22,7 @@ pub struct DynamicBackoff {
     ewma_tracker: Arc<EwmaTracker>,
 }
 
+#[allow(dead_code)]
 impl DynamicBackoff {
     /// Create a new dynamic backoff scaler with default parameters.
     pub fn new(ewma_tracker: Arc<EwmaTracker>) -> Self {
@@ -189,6 +191,7 @@ impl DynamicBackoff {
 ///
 /// # Returns
 /// The scaled duration. If `ewma_secs` is None, returns `base_duration` unchanged.
+#[allow(dead_code)]
 pub fn scale_backoff_with_ewma(
     base_duration: Duration,
     ewma_secs: Option<f64>,

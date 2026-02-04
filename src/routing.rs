@@ -63,6 +63,7 @@ impl EwmaTracker {
     }
 
     /// Create a tracker with custom parameters.
+    #[allow(dead_code)]
     pub fn with_params(alpha: f64, min_samples: u64, failure_penalty: f64) -> Self {
         Self {
             state: RwLock::new(HashMap::new()),
@@ -219,6 +220,7 @@ impl<'a> AttemptTimer<'a> {
     }
 
     /// Get elapsed time without recording. Useful for logging.
+    #[allow(dead_code)]
     pub fn elapsed_secs(&self) -> f64 {
         self.start.elapsed().as_secs_f64()
     }

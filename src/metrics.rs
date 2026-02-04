@@ -5,8 +5,8 @@ use parking_lot::RwLock;
 use prometheus::core::Collector;
 use prometheus::{
     register_counter, register_counter_vec, register_gauge, register_gauge_vec,
-    register_histogram_vec, Counter, CounterVec, Encoder, Gauge, GaugeVec, HistogramVec,
-    TextEncoder,
+    register_histogram_vec, register_int_counter_vec, Counter, CounterVec, Encoder, Gauge,
+    GaugeVec, HistogramVec, IntCounterVec, TextEncoder,
 };
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -113,6 +113,13 @@ lazy_static! {
         "Distribution of estimated pre-request token counts per tier",
         &["tier"],
         vec![100.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 25000.0, 50000.0, 100000.0, 200000.0]
+    )
+    .unwrap();
+
+    static ref RATE_LIMIT_HITS: CounterVec = register_counter_vec!(
+        "ccr_rate_limit_hits_total",
+        "Number of 429 responses received per tier",
+        &["tier"]
     )
     .unwrap();
 
@@ -233,8 +240,14 @@ pub fn record_stream_backpressure() {
 }
 
 /// Record that a stream request was rejected due to concurrency limit.
+#[allow(dead_code)]
 pub fn record_rejected() {
     REJECTED_STREAMS.inc();
+}
+
+/// Record a 429 rate limit response from a backend tier.
+pub fn record_rate_limit_hit(tier: &str) {
+    RATE_LIMIT_HITS.with_label_values(&[tier]).inc();
 }
 
 /// Estimate token count for a JSON value by serializing it to a string and
@@ -472,6 +485,7 @@ pub async fn token_drift_handler() -> impl IntoResponse {
 /// audit entries from the in-memory ring buffer. Each entry captures the
 /// per-component token estimate (messages, system, tools) computed before a
 /// request is dispatched to a backend tier.
+#[allow(dead_code)]
 pub async fn token_audit_handler() -> impl IntoResponse {
     let guard = AUDIT_LOG.read();
     let entries: Vec<PreRequestAuditEntry> = match guard.as_ref() {

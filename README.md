@@ -184,6 +184,7 @@ The config parser fully supports the Node.js nested transformer patterns:
 | `maxtoken` | Cap/override max_tokens (configurable) |
 | `reasoning` | Convert reasoning_content to thinking blocks |
 | `enhancetool` | Add cache_control metadata to tool blocks |
+| `thinktag` | Strip ``, `<thinking>`, `<reasoning>` blocks |
 | `identity` | No-op passthrough |
 
 ---

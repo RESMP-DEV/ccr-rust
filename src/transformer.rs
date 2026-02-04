@@ -40,6 +40,7 @@ pub trait Transformer: Send + Sync {
     ///
     /// Some transformers are identity passthroughs when specific conditions
     /// are met (e.g., Anthropic transformer with Anthropic API).
+    #[allow(dead_code)]
     fn is_passthrough(&self, request: &Value) -> bool {
         let _ = request;
         false
@@ -647,11 +648,13 @@ impl TransformerChain {
     }
 
     /// Check if the entire chain is a passthrough (all transformers are identity).
+    #[allow(dead_code)]
     pub fn is_passthrough(&self, request: &Value) -> bool {
         self.transformers.iter().all(|t| t.is_passthrough(request))
     }
 
     /// Get the number of transformers in the chain.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.transformers.len()
     }
@@ -747,6 +750,7 @@ impl TransformerRegistry {
     }
 
     /// Check if all entries in the list are valid transformers.
+    #[allow(dead_code)]
     pub fn validate_entries(&self, entries: &[TransformerEntry]) -> Vec<String> {
         let mut errors = Vec::new();
         for entry in entries {
