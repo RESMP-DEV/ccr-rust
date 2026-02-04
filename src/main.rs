@@ -17,12 +17,14 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod config;
 mod metrics;
 mod proxy;
+mod ratelimit;
 mod router;
 mod routing;
 mod sse;
 mod transformer;
 
 use config::Config;
+use ratelimit::RateLimitTracker;
 use router::AppState;
 use routing::EwmaTracker;
 use transformer::TransformerRegistry;
@@ -73,11 +75,13 @@ async fn main() -> Result<()> {
 
     let ewma_tracker = std::sync::Arc::new(EwmaTracker::new());
     let transformer_registry = std::sync::Arc::new(TransformerRegistry::new());
+    let ratelimit_tracker = std::sync::Arc::new(RateLimitTracker::new());
     let state = AppState {
         config,
         ewma_tracker,
         transformer_registry,
         active_streams: Arc::new(AtomicUsize::new(0)),
+        ratelimit_tracker,
     };
 
     let app = Router::new()

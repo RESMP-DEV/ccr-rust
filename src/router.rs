@@ -5,9 +5,8 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
 use crate::config::Config;
@@ -15,11 +14,44 @@ use crate::metrics::{
     record_failure, record_pre_request_tokens, record_request, record_request_duration,
     record_usage, sync_ewma_gauge, verify_token_usage,
 };
+use crate::ratelimit::RateLimitTracker;
 use crate::routing::{AttemptTimer, EwmaTracker};
 use crate::sse::StreamVerifyCtx;
 use crate::transformer::{TransformerChain, TransformerRegistry};
 
 const MAX_RETRIES: usize = 3;
+
+/// Error type for try_request that distinguishes rate limits from other errors.
+#[derive(Debug)]
+pub enum TryRequestError {
+    /// 429 Too Many Requests - includes optional Retry-After header value
+    RateLimited(Option<std::time::Duration>),
+    /// Other errors
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for TryRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TryRequestError::RateLimited(d) => {
+                write!(f, "Rate limited")?;
+                if let Some(dur) = d {
+                    write!(f, " (retry after {}s)", dur.as_secs())?;
+                }
+                Ok(())
+            }
+            TryRequestError::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for TryRequestError {}
+
+impl From<anyhow::Error> for TryRequestError {
+    fn from(e: anyhow::Error) -> Self {
+        TryRequestError::Other(e)
+    }
+}
 
 /// Shared application state threaded through Axum handlers.
 #[derive(Clone)]
@@ -28,6 +60,7 @@ pub struct AppState {
     pub ewma_tracker: Arc<EwmaTracker>,
     pub transformer_registry: Arc<TransformerRegistry>,
     pub active_streams: Arc<AtomicUsize>,
+    pub ratelimit_tracker: Arc<RateLimitTracker>,
 }
 
 // ============================================================================
@@ -560,6 +593,10 @@ pub async fn handle_messages(
 
     // Try each tier with retries
     for (tier, tier_name) in ordered.iter() {
+        if state.ratelimit_tracker.should_skip_tier(tier_name) {
+            tracing::debug!(tier = %tier_name, "Skipping rate-limited tier");
+            continue;
+        }
         // Pre-request token audit: estimate input tokens before dispatching
         let local_estimate = record_pre_request_tokens(
             tier_name,
@@ -603,13 +640,30 @@ pub async fn handle_messages(
                     record_request(tier_name);
                     record_request_duration(tier_name, total_duration);
                     sync_ewma_gauge(&state.ewma_tracker);
+                    // Reset rate limit state on success
+                    state.ratelimit_tracker.record_success(tier_name);
                     info!(
                         "Success on {} after {:.2}s (attempt {:.3}s)",
                         tier_name, total_duration, attempt_duration
                     );
                     return response;
                 }
-                Err(e) => {
+                Err(TryRequestError::RateLimited(retry_after)) => {
+                    timer.finish_failure();
+                    sync_ewma_gauge(&state.ewma_tracker);
+                    warn!(
+                        "Rate limited on {} attempt {} (retry-after: {:?})",
+                        tier_name,
+                        attempt + 1,
+                        retry_after
+                    );
+                    record_failure(tier_name, "rate_limited");
+                    // Record 429 for backoff tracking
+                    state.ratelimit_tracker.record_429(tier_name, retry_after);
+                    // Skip remaining retries for this tier - move to next
+                    break;
+                }
+                Err(TryRequestError::Other(e)) => {
                     timer.finish_failure();
                     sync_ewma_gauge(&state.ewma_tracker);
                     warn!("Failed {} attempt {}: {}", tier_name, attempt + 1, e);
@@ -655,10 +709,10 @@ async fn try_request(
     tier_name: &str,
     local_estimate: u64,
     active_streams: &Arc<AtomicUsize>,
-) -> anyhow::Result<Response> {
-    let provider = config
-        .resolve_provider(tier)
-        .ok_or_else(|| anyhow::anyhow!("Provider not found for tier: {}", tier))?;
+) -> Result<Response, TryRequestError> {
+    let provider = config.resolve_provider(tier).ok_or_else(|| {
+        TryRequestError::Other(anyhow::anyhow!("Provider not found for tier: {}", tier))
+    })?;
 
     // Build transformer chain from provider config
     let chain = build_transformer_chain(registry, provider, tier.split(',').nth(1).unwrap_or(tier));
@@ -671,23 +725,30 @@ async fn try_request(
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "Authorization",
-        format!("Bearer {}", provider.api_key).parse()?,
+        format!("Bearer {}", provider.api_key)
+            .parse()
+            .map_err(|e: reqwest::header::InvalidHeaderValue| TryRequestError::Other(anyhow::anyhow!("{}", e)))?,
     );
-    headers.insert("Content-Type", "application/json".parse()?);
+    headers.insert(
+        "Content-Type",
+        "application/json"
+            .parse()
+            .map_err(|e: reqwest::header::InvalidHeaderValue| TryRequestError::Other(anyhow::anyhow!("{}", e)))?,
+    );
 
     // Extract the actual model name from the tier (format: "provider,model")
     let model_name = tier.split(',').nth(1).unwrap_or(tier);
 
     // Apply request transformers if chain is not empty
     let transformed_request = if chain.is_empty() {
-        serde_json::to_value(request)?
+        serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?
     } else {
-        let req_value = serde_json::to_value(request)?;
-        chain.apply_request(req_value)?
+        let req_value = serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?;
+        chain.apply_request(req_value).map_err(|e| TryRequestError::Other(e))?
     };
 
     // Deserialize back to AnthropicRequest for translation
-    let request: AnthropicRequest = serde_json::from_value(transformed_request)?;
+    let request: AnthropicRequest = serde_json::from_value(transformed_request).map_err(|e| TryRequestError::Other(e.into()))?;
 
     // Translate Anthropic request to OpenAI format
     let openai_request = translate_request_anthropic_to_openai(&request, model_name);
@@ -698,12 +759,33 @@ async fn try_request(
         .headers(headers)
         .json(&openai_request)
         .send()
-        .await?;
+        .await
+        .map_err(|e| TryRequestError::Other(e.into()))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await?;
-        anyhow::bail!("Provider returned {}: {}", status, body);
+
+        // Check for 429 rate limit
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            // Parse Retry-After header if present
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
+            return Err(TryRequestError::RateLimited(retry_after));
+        }
+
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| TryRequestError::Other(e.into()))?;
+        return Err(TryRequestError::Other(anyhow::anyhow!(
+            "Provider returned {}: {}",
+            status,
+            body
+        )));
     }
 
     // Handle streaming vs non-streaming
@@ -725,7 +807,10 @@ async fn try_request(
         )
     } else {
         // For non-streaming, translate the full response
-        let body = resp.bytes().await?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| TryRequestError::Other(e.into()))?;
 
         // Try to parse as OpenAI response and translate
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
@@ -748,12 +833,16 @@ async fn try_request(
             let final_resp = if chain.is_empty() {
                 anthropic_resp
             } else {
-                let resp_value = serde_json::to_value(&anthropic_resp)?;
-                let transformed = chain.apply_response(resp_value)?;
+                let resp_value = serde_json::to_value(&anthropic_resp)
+                    .map_err(|e| TryRequestError::Other(e.into()))?;
+                let transformed = chain
+                    .apply_response(resp_value)
+                    .map_err(|e| TryRequestError::Other(e))?;
                 serde_json::from_value::<AnthropicResponse>(transformed).unwrap_or(anthropic_resp)
             };
 
-            let response_body = serde_json::to_vec(&final_resp)?;
+            let response_body =
+                serde_json::to_vec(&final_resp).map_err(|e| TryRequestError::Other(e.into()))?;
 
             let mut response = (StatusCode::OK, response_body).into_response();
             response.headers_mut().insert(

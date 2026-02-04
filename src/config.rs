@@ -614,9 +614,9 @@ mod backoff_tests {
     #[test]
     fn ewma_backoff_never_below_base() {
         let config = default_retry_config();
-        // Very fast tier (0.1s EWMA) would scale to 0.1x, but floors at base_backoff_ms
+        // Very fast tier (0.1s EWMA) would scale to 0.1x, but floors at 0.5x base
         let duration = config.backoff_duration_with_ewma(0, Some(0.1));
-        assert_eq!(duration.as_millis(), 100); // 100ms base_backoff_ms (floor)
+        assert_eq!(duration.as_millis(), 50); // 50ms = 0.5 * base_backoff_ms (floor)
     }
 
     #[test]

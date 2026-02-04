@@ -5,6 +5,7 @@
 
 use crate::config::TransformerEntry;
 use anyhow::Result;
+use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -562,6 +563,42 @@ impl Transformer for EnhanceToolTransformer {
     }
 }
 
+/// Think tag transformer.
+///
+/// Strips thinking/reasoning tags from response text content.
+/// Removes <think>, <thinking>, and <reasoning> blocks and their content.
+#[derive(Debug, Clone)]
+pub struct ThinkTagTransformer;
+
+impl Transformer for ThinkTagTransformer {
+    fn name(&self) -> &str {
+        "thinktag"
+    }
+
+    fn transform_response(&self, mut response: Value) -> Result<Value> {
+        lazy_static::lazy_static! {
+            // Regex crate doesn't support backreferences, so use alternation
+            static ref THINK_TAG_RE: Regex = Regex::new(
+                r"(?s)<think>.*?</think>|<thinking>.*?</thinking>|<reasoning>.*?</reasoning>"
+            ).unwrap();
+        }
+
+        if let Some(content) = response.get_mut("content") {
+            if let Some(arr) = content.as_array_mut() {
+                for block in arr {
+                    if let Some(text) = block.get_mut("text") {
+                        if let Some(s) = text.as_str() {
+                            let stripped = THINK_TAG_RE.replace_all(s, "");
+                            *text = Value::String(stripped.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(response)
+    }
+}
+
 // ============================================================================
 // Transformer Chain
 // ============================================================================
@@ -659,6 +696,7 @@ impl TransformerRegistry {
         registry.register("identity", Arc::new(IdentityTransformer));
         registry.register("reasoning", Arc::new(ReasoningTransformer));
         registry.register("enhancetool", Arc::new(EnhanceToolTransformer));
+        registry.register("thinktag", Arc::new(ThinkTagTransformer));
 
         registry
     }
@@ -901,6 +939,26 @@ mod tests {
         let chain = TransformerChain::new();
         assert!(chain.is_passthrough(&test_request()));
         assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn thinktag_strips_blocks() {
+        let t = ThinkTagTransformer;
+        let think_text = format!(
+            "{}think{}hidden content{}/think{}Before After",
+            '<', '>', '<', '>'
+        );
+        let resp = serde_json::json!({
+            "content": [{"type": "text", "text": think_text}]
+        });
+        let result = t.transform_response(resp).unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("<think>"), "Should strip think tags");
+        assert!(
+            !text.contains("hidden content"),
+            "Should strip think content"
+        );
+        assert!(text.contains("Before") && text.contains("After"));
     }
 
     #[test]
