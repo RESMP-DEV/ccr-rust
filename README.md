@@ -9,7 +9,7 @@
 Love Claude Code's interface but want to use other models? CCR-Rust lets you:
 
 - **Use any OpenAI-compatible API** as a Claude Code backend
-- **Chain multiple providers** with automatic fallback (try DeepSeek first, then GLM-4, then OpenRouter)
+- **Chain multiple providers** with automatic fallback (try DeepSeek first, then GLM-4.7 via Z.AI, then OpenRouter)
 - **Handle high concurrency** when running many agents or batch jobs
 
 ### Why Rust over the Node.js version?
