@@ -897,14 +897,16 @@ pub async fn stream_response_translated(
                         }
                     }
                 }
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            e.to_string(),
-                        )))
-                        .await;
-                    break;
+                        Err(e) => {
+                            let _ = tx
+                                .send(Err(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    e.to_string(),
+                                )))
+                                .await;
+                            break;
+                        }
+                    }
                 }
                 _ = tx.closed() => {
                     tracing::debug!("Client disconnected, aborting upstream");

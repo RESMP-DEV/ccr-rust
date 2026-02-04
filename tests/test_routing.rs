@@ -327,10 +327,12 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
     let ewma_tracker = std::sync::Arc::new(ccr_rust::routing::EwmaTracker::new());
     let transformer_registry =
         std::sync::Arc::new(ccr_rust::transformer::TransformerRegistry::new());
+    let active_streams = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let state = ccr_rust::router::AppState {
         config,
         ewma_tracker,
         transformer_registry,
+        active_streams,
     };
     Router::new()
         .route("/v1/messages", post(ccr_rust::router::handle_messages))
