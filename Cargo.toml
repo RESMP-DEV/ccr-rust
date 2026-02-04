@@ -27,6 +27,25 @@ clap = { version = "4.5", features = ["derive", "env"] }
 shellexpand = "3.1"
 tokio-stream = "0.1"
 tiktoken-rs = "0.6"
+parking_lot = "0.12"
+humantime = "2.1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+rand = "0.8"
+wiremock = "0.6"
+http-body-util = "0.1"
+tokio-test = "0.4"
+tempfile = "3"
+tower = { version = "0.4", features = ["util"] }
+
+[[bin]]
+name = "ccr-stress"
+path = "src/bin/stress.rs"
+
+[[bench]]
+name = "concurrent_streams"
+harness = false
 
 [profile.release]
 opt-level = 3

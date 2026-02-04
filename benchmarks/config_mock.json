@@ -1,0 +1,16 @@
+{
+    "PORT": 3456,
+    "HOST": "127.0.0.1",
+    "API_TIMEOUT_MS": 120000,
+    "Providers": [
+        {
+            "name": "mock",
+            "api_base_url": "http://127.0.0.1:9999",
+            "api_key": "mock-key-not-used",
+            "models": ["mock-model"]
+        }
+    ],
+    "Router": {
+        "default": "mock,mock-model"
+    }
+}

@@ -52,10 +52,27 @@ Uses the standard CCR JSON format—your existing `config.json` should just work
     "default": "zai,glm-4.7",
     "think": "deepseek,deepseek-reasoner",
     "longContext": "openrouter,minimax-m2.1",
-    "longContextThreshold": 60000
+    "longContextThreshold": 60000,
+    "tierRetries": {
+      "tier-0": { "max_retries": 5, "base_backoff_ms": 50, "backoff_multiplier": 1.5 },
+      "tier-1": { "max_retries": 3, "base_backoff_ms": 100 }
+    }
   }
 }
 ```
+
+### Per-Tier Retry Configuration
+
+New in ccr-rust: fine-tune retry behavior for each tier.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_retries` | 3 | Maximum retry attempts per tier |
+| `base_backoff_ms` | 100 | Initial backoff delay |
+| `backoff_multiplier` | 2.0 | Exponential multiplier per attempt |
+| `max_backoff_ms` | 10000 | Maximum backoff cap |
+
+Backoff is also dynamically scaled by the tier's observed EWMA latency—fast tiers retry more aggressively.
 
 ## API Endpoints
 
@@ -64,6 +81,8 @@ Uses the standard CCR JSON format—your existing `config.json` should just work
 | `POST /v1/messages` | Anthropic-compatible chat completions |
 | `GET /v1/usage` | Aggregate token usage per tier (JSON) |
 | `GET /v1/latencies` | Real-time EWMA latency stats (JSON) |
+| `GET /v1/token-drift` | Token estimation accuracy per tier |
+| `GET /v1/token-audit` | Recent pre-request token breakdowns |
 | `GET /metrics` | Prometheus scrape endpoint |
 | `GET /health` | Health check |
 
@@ -74,11 +93,31 @@ Prometheus metrics are exposed at `:3456/metrics`:
 ```
 ccr_requests_total{tier="tier-0"}           # Requests per backend
 ccr_request_duration_seconds{tier="tier-0"} # Latency histogram
+ccr_tier_ewma_latency_seconds{tier="tier-0"} # EWMA latency gauge
 ccr_failures_total{tier="tier-0",reason="timeout"}
 ccr_active_streams                          # Current SSE connections
+ccr_peak_active_streams                     # High-water mark
+ccr_stream_backpressure_total               # Buffer overflow events
 ccr_input_tokens_total{tier="tier-0"}       # Token accounting
 ccr_output_tokens_total{tier="tier-0"}
+ccr_pre_request_tokens_total{tier,component} # Estimated tokens before dispatch
+ccr_token_drift_pct{tier="tier-0"}          # Local vs upstream token accuracy
 ```
+
+### Token Drift Verification
+
+CCR-Rust estimates token counts *before* dispatching requests (using tiktoken's `cl100k_base`) and compares against upstream-reported usage. The `/v1/token-drift` endpoint surfaces cumulative accuracy stats:
+
+```json
+[{
+  "tier": "tier-0",
+  "samples": 150,
+  "cumulative_drift_pct": 2.3,
+  "last_drift_pct": 1.8
+}]
+```
+
+Alerts fire automatically when drift exceeds 10% (warning) or 25% (critical).
 
 ## Intelligent Fallback
 
@@ -90,32 +129,81 @@ Request
 Tier 0 (default) ──[3 retries]──→ Tier 1 (think) ──[3 retries]──→ Tier 2 (long) ──→ Error
 ```
 
-**New in ccr-rust:** Tiers are dynamically reordered by observed latency (EWMA). If Tier 2 is consistently faster than Tier 1, it gets promoted automatically.
+**Dynamic tier reordering:** Tiers are automatically reordered by observed latency (EWMA). If Tier 2 is consistently faster than Tier 1, it gets promoted. Tiers with fewer than 3 samples keep their configured priority.
+
+**Adaptive backoff:** Retry delays are scaled by the tier's EWMA latency—fast tiers get shorter backoffs, degraded tiers back off longer to avoid pile-on.
+
+---
+
+## What's Implemented
+
+### ✅ Core Features (v0.1.0)
+- [x] Zero-copy SSE streaming with backpressure detection
+- [x] Shared HTTP connection pool (configurable idle connections/timeout)
+- [x] Multi-tier cascade with per-tier retry configuration
+- [x] EWMA latency tracking (per-attempt, not per-request total)
+- [x] Latency-aware tier reordering
+- [x] Adaptive backoff with EWMA scaling
+- [x] Pre-request token estimation (tiktoken cl100k_base)
+- [x] Token drift verification (local vs upstream)
+- [x] Full nested transformer config parsing
+- [x] Provider-level and model-level transformer chains
+- [x] Comprehensive Prometheus metrics
+- [x] Stream usage extraction from SSE events
+- [x] Integration test suite with wiremock
+- [x] Python stress test suite (100+ concurrent streams)
+
+### 🔨 Transformer Config Support
+The config parser fully supports the Node.js nested transformer patterns:
+
+```json
+{
+  "transformer": {
+    "use": ["deepseek", ["maxtoken", {"max_tokens": 65536}]],
+    "deepseek-chat": { "use": ["tooluse"] }
+  }
+}
+```
+
+**Note:** Config parsing is complete, but the actual transformers (request/response format conversion) are not yet implemented—see roadmap.
 
 ---
 
 ## Roadmap
 
-We're actively working toward full feature parity with the Node.js version, plus some extras:
-
 ### v0.2.0 — Format Parity (In Progress)
-- [ ] **Anthropic → OpenAI translation** — Auto-convert request/response formats
-- [ ] **Nested transformer config** — Full support for per-model transformers
+- [ ] **Anthropic → OpenAI translation** — Convert request format (system prompt, tools, etc.)
+- [ ] **OpenAI → Anthropic translation** — Convert response format
 - [ ] **Think-tag stripping** — Clean up reasoning tokens before forwarding
+- [ ] **Transformer execution** — Actually apply the parsed transformer chains
 
 ### v0.3.0 — Production Hardening
 - [ ] **Graceful shutdown** — Drain active streams before exit
-- [ ] **Rate limit awareness** — Back off when providers return 429s
-- [ ] **Request deduplication** — Collapse identical concurrent requests
+- [ ] **Request cancellation** — Abort upstream when client disconnects
+- [ ] **Rate limit awareness** — Back off on 429s, circuit breaker
 
 ### v1.0.0 — Full Replacement
 - [ ] **Web search integration** — Proxy to search-enabled models
 - [ ] **Preset namespaces** — `/preset/my-config/v1/messages` routing
 - [ ] **CLI parity** — `ccr-rust start`, `ccr-rust status`, etc.
 
-### Future
-- [ ] **Distributed mode** — ZeroMQ backend for multi-machine pools
-- [ ] **Cost tracking** — Real-time spend estimates per tier
+---
+
+## Stress Testing
+
+The `benchmarks/` directory contains a self-contained stress test suite:
+
+```bash
+# Run the full orchestrated test (starts mock backend + ccr-rust + 100 streams)
+./benchmarks/run_stress_test.sh --streams 100 --chunks 20
+
+# Manual setup for debugging
+uv run python benchmarks/mock_sse_backend.py --port 9999 &
+./target/release/ccr-rust --config benchmarks/config_mock.json &
+uv run python benchmarks/stress_sse_streams.py --streams 100
+```
+
+See `benchmarks/README.md` for options and metrics collected.
 
 ---
 

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use axum::{
+    extract::State,
     routing::{get, post},
     Router,
 };
@@ -11,9 +12,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod config;
 mod metrics;
 mod router;
+mod routing;
 mod sse;
 
 use config::Config;
+use router::AppState;
+use routing::EwmaTracker;
 
 #[derive(Parser)]
 #[command(name = "ccr-rust")]
@@ -30,11 +34,14 @@ struct Cli {
     /// Server port
     #[arg(short, long, default_value = "3456")]
     port: u16,
+
+    /// Maximum concurrent streams (0 = unlimited)
+    #[arg(long, env = "CCR_MAX_STREAMS", default_value = "512")]
+    max_streams: usize,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -45,24 +52,29 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Load config
     let config_path = shellexpand::tilde(&cli.config).to_string();
     let config = Config::from_file(&config_path)?;
     tracing::info!("Loaded config from {}", config_path);
     tracing::info!("Tier order: {:?}", config.backend_tiers());
+    tracing::info!("Max concurrent streams: {}", cli.max_streams);
 
-    // Build app
+    let ewma_tracker = std::sync::Arc::new(EwmaTracker::new());
+    let state = AppState {
+        config,
+        ewma_tracker,
+    };
+
     let app = Router::new()
         .route("/v1/messages", post(router::handle_messages))
-        .route("/v1/latencies", get(metrics::latencies_handler))
+        .route("/v1/latencies", get(latencies_handler))
         .route("/v1/usage", get(metrics::usage_handler))
+        .route("/v1/token-drift", get(metrics::token_drift_handler))
         .route("/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(config);
+        .with_state(state);
 
-    // Start server
     let addr = SocketAddr::from((
         cli.host.parse::<std::net::IpAddr>()?,
         cli.port,
@@ -73,6 +85,12 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn latencies_handler(
+    State(state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    axum::Json(metrics::get_latency_entries(&state.ewma_tracker))
 }
 
 async fn health() -> &'static str {

@@ -5,17 +5,25 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::metrics::{
-    get_tier_latencies, record_failure, record_request, record_request_duration, record_usage,
+    record_failure, record_pre_request_tokens, record_request,
+    record_request_duration, record_usage, sync_ewma_gauge, verify_token_usage,
 };
-use crate::sse::stream_response;
+use crate::routing::{AttemptTimer, EwmaTracker};
+use crate::sse::{stream_response, StreamVerifyCtx};
 
 const MAX_RETRIES: usize = 3;
-/// Minimum samples before a tier's EWMA is trusted for routing decisions.
-const MIN_LATENCY_SAMPLES: u64 = 3;
+
+/// Shared application state threaded through Axum handlers.
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Config,
+    pub ewma_tracker: Arc<EwmaTracker>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AnthropicRequest {
@@ -71,81 +79,84 @@ struct ResponseWithUsage {
     usage: Option<ResponseUsage>,
 }
 
-/// Reorder tiers by EWMA latency (lowest first). Tiers without enough samples
-/// keep their original config-defined position.
-fn latency_sorted_tiers(tiers: &[String]) -> Vec<(String, String)> {
-    let latencies = get_tier_latencies();
-    let latency_map: std::collections::HashMap<String, (f64, u64)> = latencies
-        .into_iter()
-        .map(|(tier, ewma, count)| (tier, (ewma, count)))
-        .collect();
-
-    // Build (tier_route, tier_name, ewma_or_none) tuples
-    let mut entries: Vec<(usize, String, String, Option<f64>)> = tiers
-        .iter()
-        .enumerate()
-        .map(|(idx, tier)| {
-            let tier_name = format!("tier-{}", idx);
-            let ewma = latency_map
-                .get(&tier_name)
-                .and_then(|(e, c)| if *c >= MIN_LATENCY_SAMPLES { Some(*e) } else { None });
-            (idx, tier.clone(), tier_name, ewma)
-        })
-        .collect();
-
-    // Stable sort: tiers with latency data sort by EWMA ascending,
-    // tiers without data keep their original order but come after measured tiers.
-    entries.sort_by(|a, b| {
-        match (a.3, b.3) {
-            (Some(la), Some(lb)) => la.partial_cmp(&lb).unwrap_or(std::cmp::Ordering::Equal),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.0.cmp(&b.0), // preserve config order
-        }
-    });
-
-    entries.into_iter().map(|(_, tier, name, _)| (tier, name)).collect()
-}
-
 pub async fn handle_messages(
-    State(config): State<Config>,
+    State(state): State<AppState>,
     Json(mut request): Json<AnthropicRequest>,
 ) -> Response {
     let start = std::time::Instant::now();
+    let config = &state.config;
     let tiers = config.backend_tiers();
 
     info!("Incoming request for model: {}", request.model);
 
-    // Sort tiers by observed latency (lowest EWMA first)
-    let ordered = latency_sorted_tiers(&tiers);
+    // Sort tiers by observed EWMA latency (lowest first). Tiers without
+    // enough samples keep their config-defined order.
+    let ordered = state.ewma_tracker.sort_tiers(&tiers);
+
+    // Serialize messages to JSON values once for pre-request token audit
+    let msg_values: Vec<serde_json::Value> = request
+        .messages
+        .iter()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    let tool_values: Option<Vec<serde_json::Value>> = request
+        .tools
+        .as_ref()
+        .map(|t| t.clone());
 
     // Try each tier with retries
     for (tier, tier_name) in ordered.iter() {
+        // Pre-request token audit: estimate input tokens before dispatching
+        let local_estimate = record_pre_request_tokens(
+            tier_name,
+            &msg_values,
+            request.system.as_ref(),
+            tool_values.as_deref(),
+        );
 
-        for attempt in 0..MAX_RETRIES {
-            info!("Trying {} ({}), attempt {}/{}", tier, tier_name, attempt + 1, MAX_RETRIES);
+        let retry_config = config.get_tier_retry(tier_name);
+        let max_retries = retry_config.max_retries;
+
+        for attempt in 0..max_retries {
+            info!("Trying {} ({}), attempt {}/{}", tier, tier_name, attempt + 1, max_retries);
 
             // Override model with current tier
             request.model = tier.clone();
 
-            match try_request(&config, &request, tier, &tier_name).await {
+            // Start per-attempt latency timer for EWMA tracking
+            let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
+
+            match try_request(config, &request, tier, tier_name, local_estimate).await {
                 Ok(response) => {
-                    let duration = start.elapsed().as_secs_f64();
-                    record_request(&tier_name);
-                    record_request_duration(&tier_name, duration);
-                    info!("Success on {} after {:.2}s", tier_name, duration);
+                    let attempt_duration = timer.finish_success();
+                    let total_duration = start.elapsed().as_secs_f64();
+                    record_request(tier_name);
+                    record_request_duration(tier_name, total_duration);
+                    sync_ewma_gauge(&state.ewma_tracker);
+                    info!(
+                        "Success on {} after {:.2}s (attempt {:.3}s)",
+                        tier_name, total_duration, attempt_duration
+                    );
                     return response;
                 }
                 Err(e) => {
+                    timer.finish_failure();
+                    sync_ewma_gauge(&state.ewma_tracker);
                     warn!("Failed {} attempt {}: {}", tier_name, attempt + 1, e);
-                    record_failure(&tier_name, "request_failed");
+                    record_failure(tier_name, "request_failed");
 
-                    if attempt < MAX_RETRIES - 1 {
-                        // Exponential backoff
-                        tokio::time::sleep(tokio::time::Duration::from_millis(
-                            100 * 2_u64.pow(attempt as u32),
-                        ))
-                        .await;
+                    if attempt < max_retries - 1 {
+                        // Get current EWMA for this tier for dynamic backoff scaling
+                        let ewma = state.ewma_tracker.get_latency(tier_name).map(|(e, _)| e);
+                        let backoff = retry_config.backoff_duration_with_ewma(attempt, ewma);
+                        info!(
+                            tier = tier_name,
+                            attempt = attempt + 1,
+                            backoff_ms = backoff.as_millis(),
+                            ewma = ewma.map(|e| format!("{:.3}s", e)).unwrap_or_else(|| "N/A".to_string()),
+                            "sleeping before retry"
+                        );
+                        tokio::time::sleep(backoff).await;
                     }
                 }
             }
@@ -153,11 +164,12 @@ pub async fn handle_messages(
     }
 
     // All tiers exhausted
-    error!("All tiers exhausted after {} attempts", ordered.len() * MAX_RETRIES);
+    let total_attempts = ordered.len() * MAX_RETRIES;
+    error!("All tiers exhausted after {} tier(s)", ordered.len());
     let error_resp = ErrorResponse {
         error: "All backend tiers failed".to_string(),
         tier: "all".to_string(),
-        attempts: ordered.len() * MAX_RETRIES,
+        attempts: total_attempts,
     };
 
     (StatusCode::SERVICE_UNAVAILABLE, Json(error_resp)).into_response()
@@ -168,14 +180,11 @@ async fn try_request(
     request: &AnthropicRequest,
     tier: &str,
     tier_name: &str,
+    local_estimate: u64,
 ) -> anyhow::Result<Response> {
     let provider = config
         .resolve_provider(tier)
         .ok_or_else(|| anyhow::anyhow!("Provider not found for tier: {}", tier))?;
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(config.api_timeout_ms))
-        .build()?;
 
     let url = format!("{}/chat/completions", provider.api_base_url.trim_end_matches('/'));
 
@@ -186,7 +195,8 @@ async fn try_request(
     );
     headers.insert("Content-Type", "application/json".parse()?);
 
-    let resp = client
+    let resp = config
+        .http_client()
         .post(&url)
         .headers(headers)
         .json(&request)
@@ -201,7 +211,11 @@ async fn try_request(
 
     // Handle streaming vs non-streaming
     if request.stream.unwrap_or(false) {
-        Ok(stream_response(resp).await)
+        let ctx = StreamVerifyCtx {
+            tier_name: tier_name.to_string(),
+            local_estimate,
+        };
+        Ok(stream_response(resp, config.sse_buffer_size(), Some(ctx)).await)
     } else {
         let body = resp.bytes().await?;
 
@@ -215,6 +229,8 @@ async fn try_request(
                     usage.cache_read_input_tokens,
                     usage.cache_creation_input_tokens,
                 );
+                // Verify local token estimate against upstream-reported input tokens
+                verify_token_usage(tier_name, local_estimate, usage.input_tokens);
             }
         }
 
@@ -222,7 +238,7 @@ async fn try_request(
         let mut response = (StatusCode::OK, body).into_response();
         response.headers_mut().insert(
             "x-ccr-tier",
-            tier_name.parse().unwrap_or_default(),
+            tier_name.parse().unwrap_or(axum::http::HeaderValue::from_static("unknown")),
         );
         Ok(response)
     }
