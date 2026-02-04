@@ -11,8 +11,8 @@ use tracing::{error, info, trace, warn};
 
 use crate::config::Config;
 use crate::metrics::{
-    record_failure, record_pre_request_tokens, record_rate_limit_hit, record_request, record_request_duration,
-    record_usage, sync_ewma_gauge, verify_token_usage,
+    record_failure, record_pre_request_tokens, record_rate_limit_hit, record_request,
+    record_request_duration, record_usage, sync_ewma_gauge, verify_token_usage,
 };
 use crate::ratelimit::RateLimitTracker;
 use crate::routing::{AttemptTimer, EwmaTracker};
@@ -137,10 +137,10 @@ pub struct ErrorResponse {
 // ============================================================================
 
 /// OpenAI chat completion request format.
-#[derive(Debug, Serialize)]
-struct OpenAIRequest {
-    model: String,
-    messages: Vec<OpenAIMessage>,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenAIRequest {
+    pub model: String,
+    pub messages: Vec<OpenAIMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,9 +156,9 @@ struct OpenAIRequest {
 }
 
 /// OpenAI message format.
-#[derive(Debug, Serialize, Clone, Default)]
-struct OpenAIMessage {
-    role: String,
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct OpenAIMessage {
+    pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -699,7 +699,10 @@ pub async fn handle_messages(
     let requested_model = request.model.clone();
     if requested_model.contains(',') {
         // Explicit provider,model - find matching tier and prioritize it
-        if let Some(pos) = ordered.iter().position(|(tier, _)| tier == &requested_model) {
+        if let Some(pos) = ordered
+            .iter()
+            .position(|(tier, _)| tier == &requested_model)
+        {
             // Move the requested tier to the front
             let target = ordered.remove(pos);
             ordered.insert(0, target);
@@ -846,19 +849,64 @@ pub async fn handle_messages(
 }
 
 // ============================================================================
+// OpenAI-Compatible Endpoint
+// ============================================================================
+
+/// Handle OpenAI-format chat completion requests.
+/// Converts to Anthropic format internally.
+pub async fn handle_chat_completions(
+    State(state): State<AppState>,
+    Json(request): Json<OpenAIRequest>,
+) -> Response {
+    // Convert OpenAI request to Anthropic format
+    let anthropic_messages: Vec<Message> = request
+        .messages
+        .into_iter()
+        .map(|m| {
+            let content = if let Some(text) = m.content {
+                serde_json::Value::String(text)
+            } else {
+                serde_json::Value::String(String::new())
+            };
+            Message {
+                role: m.role,
+                content,
+            }
+        })
+        .collect();
+
+    let anthropic_request = AnthropicRequest {
+        model: request.model,
+        messages: anthropic_messages,
+        system: None,
+        max_tokens: request.max_tokens,
+        temperature: request.temperature,
+        stream: request.stream,
+        tools: request.tools,
+    };
+
+    // Delegate to the standard Anthropic handler
+    handle_messages(State(state), Json(anthropic_request)).await
+}
+
+// ============================================================================
 // Preset Handlers
 // ============================================================================
 
 /// List all configured presets.
 pub async fn list_presets(State(state): State<AppState>) -> impl IntoResponse {
-    let presets: Vec<_> = state.config.presets
+    let presets: Vec<_> = state
+        .config
+        .presets
         .iter()
-        .map(|(name, cfg)| serde_json::json!({
-            "name": name,
-            "route": cfg.route,
-            "max_tokens": cfg.max_tokens,
-            "temperature": cfg.temperature,
-        }))
+        .map(|(name, cfg)| {
+            serde_json::json!({
+                "name": name,
+                "route": cfg.route,
+                "max_tokens": cfg.max_tokens,
+                "temperature": cfg.temperature,
+            })
+        })
         .collect();
     Json(presets)
 }
@@ -875,10 +923,11 @@ pub async fn handle_preset_messages(
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": format!("Preset '{}' not found", preset_name)})),
-            ).into_response();
+            )
+                .into_response();
         }
     };
-    
+
     // Apply preset overrides
     if let Some(mt) = preset.max_tokens {
         request.max_tokens = Some(mt);
@@ -886,10 +935,10 @@ pub async fn handle_preset_messages(
     if let Some(temp) = preset.temperature {
         request.temperature = Some(temp);
     }
-    
+
     // Force route to preset's tier
     request.model = preset.route.clone();
-    
+
     // Delegate to normal handler
     handle_messages(State(state), Json(request)).await
 }

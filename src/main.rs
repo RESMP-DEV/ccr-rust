@@ -110,7 +110,14 @@ async fn run_server(
 
     let app = Router::new()
         .route("/v1/messages", post(router::handle_messages))
-        .route("/preset/:name/v1/messages", post(router::handle_preset_messages))
+        .route(
+            "/v1/chat/completions",
+            post(router::handle_chat_completions),
+        )
+        .route(
+            "/preset/:name/v1/messages",
+            post(router::handle_preset_messages),
+        )
         .route("/v1/presets", get(router::list_presets))
         .route("/v1/latencies", get(latencies_handler))
         .route("/v1/usage", get(metrics::usage_handler))
@@ -157,7 +164,8 @@ async fn check_status(host: &str, port: u16) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let url = format!("http://{}:{}/health", host, port);
 
-    match client.get(&url)
+    match client
+        .get(&url)
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
@@ -194,14 +202,20 @@ async fn main() -> Result<()> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
-    
+
     let cli = Cli::parse();
-    let config_path = cli.config
+    let config_path = cli
+        .config
         .map(|p| shellexpand::tilde(&p).to_string())
         .unwrap_or_else(|| shellexpand::tilde("~/.claude-code-router/config.json").to_string());
-    
+
     match cli.command {
-        Some(Commands::Start { host, port, max_streams, shutdown_timeout }) => {
+        Some(Commands::Start {
+            host,
+            port,
+            max_streams,
+            shutdown_timeout,
+        }) => {
             run_server(&config_path, host, port, max_streams, shutdown_timeout).await?;
         }
         None => {
