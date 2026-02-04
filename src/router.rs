@@ -725,15 +725,19 @@ async fn try_request(
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "Authorization",
-        format!("Bearer {}", provider.api_key)
-            .parse()
-            .map_err(|e: reqwest::header::InvalidHeaderValue| TryRequestError::Other(anyhow::anyhow!("{}", e)))?,
+        format!("Bearer {}", provider.api_key).parse().map_err(
+            |e: reqwest::header::InvalidHeaderValue| {
+                TryRequestError::Other(anyhow::anyhow!("{}", e))
+            },
+        )?,
     );
     headers.insert(
         "Content-Type",
         "application/json"
             .parse()
-            .map_err(|e: reqwest::header::InvalidHeaderValue| TryRequestError::Other(anyhow::anyhow!("{}", e)))?,
+            .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                TryRequestError::Other(anyhow::anyhow!("{}", e))
+            })?,
     );
 
     // Extract the actual model name from the tier (format: "provider,model")
@@ -743,12 +747,16 @@ async fn try_request(
     let transformed_request = if chain.is_empty() {
         serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?
     } else {
-        let req_value = serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?;
-        chain.apply_request(req_value).map_err(|e| TryRequestError::Other(e))?
+        let req_value =
+            serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?;
+        chain
+            .apply_request(req_value)
+            .map_err(|e| TryRequestError::Other(e))?
     };
 
     // Deserialize back to AnthropicRequest for translation
-    let request: AnthropicRequest = serde_json::from_value(transformed_request).map_err(|e| TryRequestError::Other(e.into()))?;
+    let request: AnthropicRequest = serde_json::from_value(transformed_request)
+        .map_err(|e| TryRequestError::Other(e.into()))?;
 
     // Translate Anthropic request to OpenAI format
     let openai_request = translate_request_anthropic_to_openai(&request, model_name);

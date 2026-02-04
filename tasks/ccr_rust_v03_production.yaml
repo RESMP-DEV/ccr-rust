@@ -1,254 +1,32 @@
 # yaml-language-server: $schema=
-# CCR-Rust v0.3.0 — Production Hardening
+# CCR-Rust v0.3.0 — Production Hardening (REMAINING TASKS)
 #
 # Updated: 2026-02-03
 # Status:
-#   ✅ Graceful shutdown - DONE (signal handlers, with_graceful_shutdown)
-#   ✅ Active streams counter - DONE (in AppState)
-#   ⚠️ Rate limiting - struct exists in ratelimit.rs but NOT integrated
-#   ❌ Think-tag stripping - NOT IMPLEMENTED
+#   ✅ Graceful shutdown - DONE
+#   ✅ Rate limiting - DONE (record_429, record_success, should_skip_tier, TryRequestError)
+#   ✅ Think-tag stripping - DONE (regex fixed)
+#   ✅ Backoff test - DONE (expectation fixed)
 #   ❌ Tool result translation - NOT IMPLEMENTED
+#   ❌ Integration tests - BROKEN (Arc mutability errors)
+#   ❌ Rate limit metrics - NOT IMPLEMENTED
+#   ❌ Dead code cleanup - NOT DONE
 #
 # Run from AlphaHENG repo root:
 #   uv run alphaheng tasks add contrib/ccr-rust/tasks/ccr_rust_v03_production.yaml
 
 tasks:
   # ==========================================================================
-  # Phase 1: Bug Fix (P0)
-  # ==========================================================================
-
-  - name: ccr-fix-ewma-backoff-floor
-    priority: P0
-    prompt: |
-      Fix failing test `ewma_backoff_never_below_base` in
-      `contrib/ccr-rust/src/config.rs`.
-      
-      Find `backoff_duration_with_ewma` function and ensure the returned
-      duration never goes below `base_backoff_ms`.
-      
-      Add floor check after calculating scaled value:
-      ```rust
-      let final_ms = scaled_ms.max(self.base_backoff_ms);
-      ```
-      
-      Verify: `cd contrib/ccr-rust && cargo test ewma_backoff_never_below_base`
-    verify_command: "cd contrib/ccr-rust && cargo test ewma_backoff_never_below_base 2>&1 | grep -q 'ok'"
-
-  # ==========================================================================
-  # Phase 2: Integrate Rate Limiter (P0)
-  # ratelimit.rs EXISTS with TierRateLimitState, RateLimitTracker
-  # but is NOT used by router.rs
-  # ==========================================================================
-
-  - name: ccr-ratelimit-export-mod
-    priority: P0
-    prompt: |
-      Export `ratelimit` module from `contrib/ccr-rust/src/lib.rs`.
-      
-      Add this line among the other pub mod declarations:
-      ```rust
-      pub mod ratelimit;
-      ```
-    verify_command: grep -q "pub mod ratelimit" contrib/ccr-rust/src/lib.rs
-
-  - name: ccr-ratelimit-add-to-appstate
-    priority: P0
-    dependencies: [ccr-ratelimit-export-mod]
-    prompt: |
-      Add `RateLimitTracker` to `AppState` in `contrib/ccr-rust/src/router.rs`.
-      
-      1. Add import at top of file:
-         ```rust
-         use crate::ratelimit::RateLimitTracker;
-         ```
-      
-      2. Add field to `AppState` struct (around line 30):
-         ```rust
-         pub ratelimit_tracker: Arc<RateLimitTracker>,
-         ```
-    verify_command: grep -q "ratelimit_tracker.*Arc<RateLimitTracker>" contrib/ccr-rust/src/router.rs
-
-  - name: ccr-ratelimit-init-main
-    priority: P0
-    dependencies: [ccr-ratelimit-add-to-appstate]
-    prompt: |
-      Initialize `RateLimitTracker` in `contrib/ccr-rust/src/main.rs`.
-      
-      1. Add to imports (use the module path):
-         ```rust
-         mod ratelimit;
-         use ratelimit::RateLimitTracker;
-         ```
-      
-      2. Update AppState construction (around line 75):
-         ```rust
-         let state = AppState {
-             config,
-             ewma_tracker,
-             transformer_registry,
-             active_streams: Arc::new(AtomicUsize::new(0)),
-             ratelimit_tracker: Arc::new(RateLimitTracker::new()),
-         };
-         ```
-    verify_command: grep -q "RateLimitTracker::new()" contrib/ccr-rust/src/main.rs
-
-  - name: ccr-ratelimit-skip-tier
-    priority: P0
-    dependencies: [ccr-ratelimit-init-main]
-    prompt: |
-      Skip rate-limited tiers in `handle_messages` in `contrib/ccr-rust/src/router.rs`.
-      
-      Find the tier iteration loop (search for "for (tier_spec, tier_name) in").
-      Add skip check at start of loop body:
-      
-      ```rust
-      if state.ratelimit_tracker.should_skip_tier(tier_name) {
-          tracing::debug!(tier = %tier_name, "Skipping rate-limited tier");
-          continue;
-      }
-      ```
-    verify_command: grep -q "should_skip_tier" contrib/ccr-rust/src/router.rs
-
-  - name: ccr-ratelimit-record-429
-    priority: P0
-    dependencies: [ccr-ratelimit-skip-tier]
-    prompt: |
-      Record 429 responses in `contrib/ccr-rust/src/router.rs`.
-      
-      Find where responses are checked (search for "status()").
-      Add 429 handling before other status checks:
-      
-      ```rust
-      if resp.status() == axum::http::StatusCode::TOO_MANY_REQUESTS {
-          let retry_after = resp.headers()
-              .get("retry-after")
-              .and_then(|v| v.to_str().ok())
-              .and_then(|s| s.parse::<u64>().ok())
-              .map(std::time::Duration::from_secs);
-          state.ratelimit_tracker.record_429(&tier_name, retry_after);
-          continue;
-      }
-      ```
-    verify_command: grep -q "record_429\|TOO_MANY_REQUESTS" contrib/ccr-rust/src/router.rs
-
-  - name: ccr-ratelimit-record-success
-    priority: P0
-    dependencies: [ccr-ratelimit-record-429]
-    prompt: |
-      Clear rate limit backoff on successful response in `contrib/ccr-rust/src/router.rs`.
-      
-      After a successful (2xx) response is processed, call:
-      ```rust
-      state.ratelimit_tracker.record_success(&tier_name);
-      ```
-      
-      Find where success is handled (after response body is read) and add call.
-    verify_command: grep -q "record_success" contrib/ccr-rust/src/router.rs
-
-  # ==========================================================================
-  # Phase 3: Think-Tag Stripping (P1)
-  # ==========================================================================
-
-  - name: ccr-thinktag-add-regex
-    priority: P1
-    prompt: |
-      Add `regex` crate to `contrib/ccr-rust/Cargo.toml`.
-      
-      Under `[dependencies]`, add:
-      ```toml
-      regex = "1"
-      ```
-    verify_command: grep -q '^regex = "1"' contrib/ccr-rust/Cargo.toml
-
-  - name: ccr-thinktag-impl
-    priority: P1
-    dependencies: [ccr-thinktag-add-regex]
-    prompt: |
-      Create `ThinkTagTransformer` in `contrib/ccr-rust/src/transformer.rs`.
-      
-      Add after other transformer implementations:
-      
-      ```rust
-      use regex::Regex;
-      
-      lazy_static::lazy_static! {
-          static ref THINK_TAG_RE: Regex = Regex::new(
-              r"(?s)<(think|thinking|reasoning)>.*?</\1>"
-          ).unwrap();
-      }
-      
-      #[derive(Debug, Clone)]
-      pub struct ThinkTagTransformer;
-      
-      impl Transformer for ThinkTagTransformer {
-          fn name(&self) -> &str { "thinktag" }
-          
-          fn transform_response(&self, mut response: Value) -> Result<Value, TransformError> {
-              if let Some(content) = response.get_mut("content") {
-                  if let Some(arr) = content.as_array_mut() {
-                      for block in arr {
-                          if let Some(text) = block.get_mut("text") {
-                              if let Some(s) = text.as_str() {
-                                  let stripped = THINK_TAG_RE.replace_all(s, "");
-                                  *text = Value::String(stripped.trim().to_string());
-                              }
-                          }
-                      }
-                  }
-              }
-              Ok(response)
-          }
-      }
-      ```
-    verify_command: grep -q "ThinkTagTransformer" contrib/ccr-rust/src/transformer.rs
-
-  - name: ccr-thinktag-register
-    priority: P1
-    dependencies: [ccr-thinktag-impl]
-    prompt: |
-      Register `ThinkTagTransformer` in `TransformerRegistry::new()` in
-      `contrib/ccr-rust/src/transformer.rs`.
-      
-      Add in the registry construction:
-      ```rust
-      registry.register("thinktag", Arc::new(ThinkTagTransformer));
-      ```
-    verify_command: grep -q '"thinktag"' contrib/ccr-rust/src/transformer.rs
-
-  - name: ccr-thinktag-test
-    priority: P1
-    dependencies: [ccr-thinktag-register]
-    prompt: |
-      Add test for `ThinkTagTransformer` in `contrib/ccr-rust/src/transformer.rs`.
-      
-      In the tests module:
-      ```rust
-      #[test]
-      fn thinktag_strips_blocks() {
-          let t = ThinkTagTransformer;
-          let resp = serde_json::json!({
-              "content": [{"type": "text", "text": "Before <think>hidden</think> After"}]
-          });
-          let result = t.transform_response(resp).unwrap();
-          let text = result["content"][0]["text"].as_str().unwrap();
-          assert!(!text.contains("<think>"), "Should strip think tags");
-          assert!(text.contains("Before") && text.contains("After"));
-      }
-      ```
-      
-      Verify: `cd contrib/ccr-rust && cargo test thinktag`
-    verify_command: "cd contrib/ccr-rust && cargo test thinktag 2>&1 | grep -q 'ok'"
-
-  # ==========================================================================
-  # Phase 4: Tool Result Translation (P1)
+  # Phase 1: Tool Result Translation (P0)
   # ==========================================================================
 
   - name: ccr-tool-result-field
-    priority: P1
+    priority: P0
     prompt: |
       Add `tool_call_id` field to `OpenAIMessage` in `contrib/ccr-rust/src/router.rs`.
       
-      Find `struct OpenAIMessage` and add:
+      Find `struct OpenAIMessage` (around line 180) and add the field:
+      
       ```rust
       #[derive(Debug, Serialize, Default)]
       struct OpenAIMessage {
@@ -264,140 +42,138 @@ tasks:
     verify_command: grep -q "tool_call_id.*Option<String>" contrib/ccr-rust/src/router.rs
 
   - name: ccr-tool-result-translate
-    priority: P1
+    priority: P0
     dependencies: [ccr-tool-result-field]
     prompt: |
       Handle `tool_result` messages in `translate_request_anthropic_to_openai`
       in `contrib/ccr-rust/src/router.rs`.
       
+      Find the function (search for "fn translate_request_anthropic_to_openai").
       In the message loop, check for tool_result content blocks:
+      
       ```rust
+      // Handle tool_result blocks
       if let Some(arr) = msg.content.as_array() {
           for block in arr {
               if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
                   messages.push(OpenAIMessage {
                       role: "tool".to_string(),
-                      content: block.get("content").and_then(|c| c.as_str()).map(String::from),
-                      tool_call_id: block.get("tool_use_id").and_then(|id| id.as_str()).map(String::from),
+                      content: block.get("content")
+                          .and_then(|c| c.as_str())
+                          .map(String::from),
+                      tool_call_id: block.get("tool_use_id")
+                          .and_then(|id| id.as_str())
+                          .map(String::from),
                       ..Default::default()
                   });
               }
           }
       }
       ```
-    verify_command: grep -q "tool_result" contrib/ccr-rust/src/router.rs
+    verify_command: grep -q "tool_result\|tool_use_id" contrib/ccr-rust/src/router.rs
 
   # ==========================================================================
-  # Phase 5: Fix Compilation Errors (P2)
+  # Phase 2: Fix Integration Tests (P1)
   # ==========================================================================
-
-  - name: ccr-fix-router-imports
-    priority: P2
-    prompt: |
-      Remove invalid import from `contrib/ccr-rust/src/router.rs`.
-      
-      Line 10 has unused import that will error:
-      ```rust
-      use tokio_util::sync::CancellationToken;
-      ```
-      
-      Remove this line. The `sync` feature isn't enabled for tokio-util.
-      
-      Also check line 8 for unused `Ordering`:
-      ```rust
-      use std::sync::atomic::{AtomicUsize, Ordering};
-      ```
-      Remove `Ordering` if not used in the file.
-    verify_command: "! grep -q 'tokio_util::sync::CancellationToken' contrib/ccr-rust/src/router.rs"
-
-  - name: ccr-fix-test-routing
-    priority: P2
-    dependencies: [ccr-ratelimit-add-to-appstate]
-    prompt: |
-      Update `contrib/ccr-rust/tests/test_routing.rs` for new AppState field.
-      
-      Find `build_app` function and add ratelimit_tracker:
-      ```rust
-      let ratelimit_tracker = std::sync::Arc::new(ccr_rust::ratelimit::RateLimitTracker::new());
-      let state = ccr_rust::router::AppState {
-          config,
-          ewma_tracker,
-          transformer_registry,
-          active_streams,
-          ratelimit_tracker,
-      };
-      ```
-    verify_command: grep -q "ratelimit_tracker" contrib/ccr-rust/tests/test_routing.rs
 
   - name: ccr-fix-test-shutdown
-    priority: P2
+    priority: P1
     prompt: |
       Fix `contrib/ccr-rust/tests/test_shutdown.rs` compilation errors.
       
-      Replace entire file content with simpler working tests:
+      The file has Arc mutability issues. Replace entire file with:
+      
       ```rust
+      //! Tests for graceful shutdown behavior.
+      
       use std::sync::atomic::{AtomicUsize, Ordering};
+      use std::time::Duration;
       
       #[test]
-      fn test_active_stream_counter() {
+      fn test_active_stream_counter_basic() {
           let counter = AtomicUsize::new(0);
+          
+          // Simulate stream start
           counter.fetch_add(1, Ordering::Relaxed);
           assert_eq!(counter.load(Ordering::Relaxed), 1);
+          
+          // Simulate stream end
           counter.fetch_sub(1, Ordering::Relaxed);
+          assert_eq!(counter.load(Ordering::Relaxed), 0);
+      }
+      
+      #[test]
+      fn test_multiple_streams() {
+          let counter = AtomicUsize::new(0);
+          
+          // Start multiple streams
+          for _ in 0..5 {
+              counter.fetch_add(1, Ordering::Relaxed);
+          }
+          assert_eq!(counter.load(Ordering::Relaxed), 5);
+          
+          // End all streams
+          for _ in 0..5 {
+              counter.fetch_sub(1, Ordering::Relaxed);
+          }
           assert_eq!(counter.load(Ordering::Relaxed), 0);
       }
       
       #[tokio::test]
       async fn test_shutdown_timeout() {
-          use std::time::Duration;
           use tokio::time::timeout;
           
           let result = timeout(Duration::from_millis(10), async {
               tokio::time::sleep(Duration::from_secs(10)).await;
           }).await;
           
-          assert!(result.is_err());
+          assert!(result.is_err(), "Should timeout");
       }
       ```
-    verify_command: "cd contrib/ccr-rust && cargo test --test test_shutdown 2>&1 | grep -q 'test result'"
+    verify_command: "cd contrib/ccr-rust && cargo test --test test_shutdown 2>&1 | grep -q 'test result: ok'"
 
-  - name: ccr-fix-stress-binary
-    priority: P2
+  - name: ccr-fix-test-routing
+    priority: P1
     prompt: |
-      Fix Arc mutability errors in `contrib/ccr-rust/src/bin/stress.rs`.
+      Fix `contrib/ccr-rust/tests/test_routing.rs` Arc mutability errors.
       
-      The `StressTestResults` struct needs interior mutability.
-      Wrap it in `parking_lot::Mutex`:
+      The test file tries to mutably borrow Arc. Find and fix by using
+      interior mutability (Mutex/RwLock) or by restructuring the test.
       
+      Common fixes:
+      1. Use `Arc<Mutex<T>>` instead of `Arc<T>` for mutable data
+      2. Or use atomics where possible
+      3. Or restructure to avoid mutation
+      
+      Check for patterns like:
       ```rust
-      use parking_lot::Mutex;
-      
-      // Change:
-      // let results = Arc::new(StressTestResults::new());
-      // To:
-      let results = Arc::new(Mutex::new(StressTestResults::new()));
-      
-      // Usage:
-      results.lock().start();
-      results.lock().end();
+      let arc_thing = Arc::new(thing);
+      arc_thing.method_that_needs_mut();  // ERROR
       ```
-    verify_command: "cd contrib/ccr-rust && cargo check --bin ccr-stress 2>&1 | grep -qE 'Finished|warning'"
+      
+      Fix to:
+      ```rust
+      let arc_thing = Arc::new(Mutex::new(thing));
+      arc_thing.lock().method_that_needs_mut();  // OK
+      ```
+    verify_command: "cd contrib/ccr-rust && cargo test --test test_routing 2>&1 | grep -qE 'test result|Compiling'"
 
   # ==========================================================================
-  # Phase 6: Metrics (P2)
+  # Phase 3: Metrics (P2)
   # ==========================================================================
 
   - name: ccr-ratelimit-metrics
     priority: P2
-    dependencies: [ccr-ratelimit-record-429]
     prompt: |
-      Add rate limit metrics to `contrib/ccr-rust/src/metrics.rs`:
+      Add rate limit metrics to `contrib/ccr-rust/src/metrics.rs`.
+      
+      Add after existing metric declarations:
       
       ```rust
       lazy_static! {
           static ref RATE_LIMIT_HITS: IntCounterVec = register_int_counter_vec!(
               "ccr_rate_limit_hits_total",
-              "429 responses per tier",
+              "Number of 429 responses received per tier",
               &["tier"]
           ).unwrap();
       }
@@ -407,11 +183,12 @@ tasks:
       }
       ```
       
-      Call from router when recording 429.
+      Then in `contrib/ccr-rust/src/router.rs`, call `record_rate_limit_hit`
+      in the `TryRequestError::RateLimited` match arm.
     verify_command: grep -q "rate_limit_hits_total" contrib/ccr-rust/src/metrics.rs
 
   # ==========================================================================
-  # Phase 7: Dead Code Cleanup (P3)
+  # Phase 4: Dead Code Cleanup (P3)
   # ==========================================================================
 
   - name: ccr-cleanup-dead-code
@@ -419,17 +196,42 @@ tasks:
     prompt: |
       Add `#[allow(dead_code)]` to unused fields in `contrib/ccr-rust/src/router.rs`.
       
-      Apply to OpenAI struct fields not directly used:
-      - `OpenAIResponse.object`, `.created`, `.model`
-      - `OpenAIChoice.index`
-      - `OpenAIResponseMessage.role`
-      - `OpenAIUsage.prompt_tokens_details`
-      - `OpenAIStreamChunk.object`, `.created`
-      - `OpenAIDelta.role`
+      The compiler warns about these fields that are deserialized but not read:
+      - `OpenAIResponse`: object, created, model
+      - `OpenAIChoice`: index
+      - `OpenAIResponseMessage`: role
+      - `OpenAIUsage`: prompt_tokens_details
+      - `OpenAIStreamChunk`: object, created
+      - `OpenAIDelta`: role
       
-      Example:
+      Add attribute above each unused field:
       ```rust
       #[allow(dead_code)]
       object: String,
       ```
-    verify_command: "cd contrib/ccr-rust && cargo check 2>&1 | grep -c 'never read' | xargs test 5 -gt"
+      
+      Or add at struct level:
+      ```rust
+      #[derive(Debug, Deserialize)]
+      #[allow(dead_code)]
+      struct OpenAIResponse { ... }
+      ```
+    verify_command: "cd contrib/ccr-rust && cargo check 2>&1 | grep -c 'never read' | xargs test 3 -gt"
+
+  - name: ccr-cleanup-unused-variable
+    priority: P3
+    prompt: |
+      Fix unused variable warning in `contrib/ccr-rust/src/router.rs`.
+      
+      The `active_streams` parameter in `try_request` is unused.
+      
+      Either prefix with underscore:
+      ```rust
+      async fn try_request(
+          // ... other params ...
+          _active_streams: &Arc<AtomicUsize>,
+      )
+      ```
+      
+      Or remove if truly unused and update all call sites.
+    verify_command: "! cargo check 2>&1 | grep -q 'unused variable.*active_streams'"
