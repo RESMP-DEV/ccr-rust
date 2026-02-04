@@ -1,0 +1,7 @@
+# Prometheus configuration to scrape ccr-rust
+scrape_configs:
+  - job_name: "ccr-rust"
+    static_configs:
+      - targets: ["localhost:3456"]
+    metrics_path: "/metrics"
+    scrape_interval: 10s

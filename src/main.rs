@@ -54,6 +54,8 @@ async fn main() -> Result<()> {
     // Build app
     let app = Router::new()
         .route("/v1/messages", post(router::handle_messages))
+        .route("/v1/latencies", get(metrics::latencies_handler))
+        .route("/v1/usage", get(metrics::usage_handler))
         .route("/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
         .layer(CorsLayer::permissive())

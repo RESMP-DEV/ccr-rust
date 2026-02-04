@@ -42,21 +42,50 @@ pub struct Provider {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub default: String,
-    
+
     #[serde(default)]
     pub background: Option<String>,
-    
+
     #[serde(default)]
     pub think: Option<String>,
-    
+
     #[serde(default)]
-    pub longContext: Option<String>,
-    
+    #[serde(rename = "longContext")]
+    pub long_context: Option<String>,
+
     #[serde(default = "default_long_context_threshold")]
-    pub longContextThreshold: u32,
-    
+    #[serde(rename = "longContextThreshold")]
+    pub long_context_threshold: u32,
+
     #[serde(default)]
-    pub webSearch: Option<String>,
+    #[serde(rename = "webSearch")]
+    pub web_search: Option<String>,
+
+    /// Per-tier retry configuration. Keys are tier names ("tier-0", "tier-1", etc.).
+    /// If absent, all tiers use the global default (3 retries, 100ms base backoff).
+    #[serde(default)]
+    #[serde(rename = "tierRetries")]
+    pub tier_retries: HashMap<String, TierRetryConfig>,
+}
+
+/// Per-tier retry limits and backoff configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TierRetryConfig {
+    /// Maximum number of retry attempts for this tier.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: usize,
+
+    /// Base backoff delay in milliseconds.
+    #[serde(default = "default_base_backoff_ms")]
+    pub base_backoff_ms: u64,
+
+    /// Backoff multiplier per attempt.
+    #[serde(default = "default_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+
+    /// Maximum backoff delay in milliseconds.
+    #[serde(default = "default_max_backoff_ms")]
+    pub max_backoff_ms: u64,
 }
 
 impl Config {
@@ -84,7 +113,7 @@ impl Config {
                 tiers.push(think.clone());
             }
         }
-        if let Some(long) = &self.router.longContext {
+        if let Some(long) = &self.router.long_context {
             if !tiers.contains(long) {
                 tiers.push(long.clone());
             }
@@ -99,11 +128,40 @@ impl Config {
         if parts.len() != 2 {
             return None;
         }
-        
+
         let provider_name = parts[0];
         self.providers.iter().find(|p| p.name == provider_name)
     }
+
+    /// Get retry config for a specific tier, falling back to defaults.
+    pub fn get_tier_retry(&self, tier_name: &str) -> TierRetryConfig {
+        self.router
+            .tier_retries
+            .get(tier_name)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
+
+impl Default for TierRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: default_max_retries(),
+            base_backoff_ms: default_base_backoff_ms(),
+            backoff_multiplier: default_backoff_multiplier(),
+            max_backoff_ms: default_max_backoff_ms(),
+        }
+    }
+}
+
+impl TierRetryConfig {
+    /// Calculate backoff duration for a given attempt (0-indexed).
+    pub fn backoff_duration(&self, attempt: usize) -> std::time::Duration {
+        let delay_ms = (self.base_backoff_ms as f64)
+            * self.backoff_multiplier.powi(attempt as i32);
+        let clamped_ms = delay_ms.min(self.max_backoff_ms as f64) as u64;
+        std::time::Duration::from_millis(clamped_ms)
+    }
 
 fn default_port() -> u16 {
     3456
