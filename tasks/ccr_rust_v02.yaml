@@ -1,0 +1,428 @@
+# yaml-language-server: $schema=
+# CCR-Rust v0.2.0 — Format Parity & Production Hardening
+#
+# Task execution from repo root:
+#   uv run alphaheng tasks add contrib/ccr-rust/tasks/ccr_rust_v02.yaml
+#   uv run alphaheng coordinator --local-workers 10
+
+tasks:
+  # ==========================================================================
+  # Phase 1: Transformer Infrastructure (P0)
+  # ==========================================================================
+
+  - name: ccr-transformer-trait
+    priority: P0
+    prompt: |
+      Create `contrib/ccr-rust/src/transform/mod.rs` with the Transformer trait:
+      
+      ```rust
+      pub trait Transformer: Send + Sync {
+          fn name(&self) -> &'static str;
+          fn transform_request(&self, req: &mut serde_json::Value) -> anyhow::Result<()>;
+          fn transform_response(&self, resp: &mut serde_json::Value) -> anyhow::Result<()>;
+      }
+      
+      pub struct TransformerChain { transformers: Vec<Box<dyn Transformer>> }
+      impl TransformerChain {
+          pub fn new() -> Self;
+          pub fn push(&mut self, t: Box<dyn Transformer>);
+          pub fn apply_request(&self, req: &mut serde_json::Value) -> anyhow::Result<()>;
+          pub fn apply_response(&self, resp: &mut serde_json::Value) -> anyhow::Result<()>;
+      }
+      ```
+      
+      Add `mod transform;` to `src/lib.rs`.
+    verify_command: grep -q "trait Transformer" contrib/ccr-rust/src/transform/mod.rs
+
+  - name: ccr-transformer-registry
+    priority: P0
+    dependencies: [ccr-transformer-trait]
+    prompt: |
+      Create `contrib/ccr-rust/src/transform/registry.rs`:
+      
+      - `TransformerRegistry` struct with `HashMap<&'static str, Box<dyn Fn(Option<&serde_json::Value>) -> Box<dyn Transformer>>>`
+      - `register(&mut self, name, factory)` method
+      - `build(&self, entry: &TransformerEntry) -> Option<Box<dyn Transformer>>` method
+      - `build_chain(&self, entries: &[TransformerEntry]) -> TransformerChain` method
+      
+      Update `mod.rs` to `pub mod registry;`
+    verify_command: grep -q "TransformerRegistry" contrib/ccr-rust/src/transform/registry.rs
+
+  # ==========================================================================
+  # Phase 2: Anthropic → OpenAI Translation (P0)
+  # ==========================================================================
+
+  - name: ccr-anthropic-request-system
+    priority: P0
+    dependencies: [ccr-transformer-trait]
+    prompt: |
+      Create `contrib/ccr-rust/src/transform/anthropic.rs`:
+      
+      Implement `AnthropicToOpenaiTransformer` that transforms requests:
+      
+      1. Extract `system` field from Anthropic request
+      2. Convert to OpenAI format: prepend `{"role": "system", "content": <system>}` to messages
+      3. Remove the `system` field from the request
+      
+      Handle both string and array system prompts (Anthropic allows both).
+      
+      Register as "anthropic" in the registry.
+    verify_command: grep -q "AnthropicToOpenaiTransformer" contrib/ccr-rust/src/transform/anthropic.rs
+
+  - name: ccr-anthropic-request-messages
+    priority: P0
+    dependencies: [ccr-anthropic-request-system]
+    prompt: |
+      Extend `AnthropicToOpenaiTransformer` in `contrib/ccr-rust/src/transform/anthropic.rs`:
+      
+      Transform message content blocks:
+      - Anthropic: `{"role": "user", "content": [{"type": "text", "text": "..."}]}`
+      - OpenAI: `{"role": "user", "content": "..."}`
+      
+      Handle mixed content types (text + image_url) by keeping array format for OpenAI if needed.
+      
+      Also transform:
+      - `max_tokens` (required in Anthropic) → keep as-is (optional in OpenAI)
+      - Remove Anthropic-specific fields: `metadata`, `stop_sequences` → `stop`
+    verify_command: "cd contrib/ccr-rust && cargo test transform::anthropic --no-fail-fast 2>&1 | grep -q 'test result: ok'"
+
+  - name: ccr-anthropic-request-tools
+    priority: P0
+    dependencies: [ccr-anthropic-request-messages]
+    prompt: |
+      Extend `AnthropicToOpenaiTransformer` to convert tool definitions:
+      
+      Anthropic format:
+      ```json
+      {"name": "get_weather", "description": "...", "input_schema": {"type": "object", ...}}
+      ```
+      
+      OpenAI format:
+      ```json
+      {"type": "function", "function": {"name": "get_weather", "description": "...", "parameters": {...}}}
+      ```
+      
+      Transform tool_choice:
+      - Anthropic: `{"type": "tool", "name": "..."}` or `"auto"` or `"any"`
+      - OpenAI: `{"type": "function", "function": {"name": "..."}}` or `"auto"` or `"required"`
+    verify_command: grep -q "input_schema" contrib/ccr-rust/src/transform/anthropic.rs
+
+  - name: ccr-anthropic-request-tool-results
+    priority: P0
+    dependencies: [ccr-anthropic-request-tools]
+    prompt: |
+      Extend `AnthropicToOpenaiTransformer` to convert tool result messages:
+      
+      Anthropic format:
+      ```json
+      {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "...", "content": "..."}]}
+      ```
+      
+      OpenAI format:
+      ```json
+      {"role": "tool", "tool_call_id": "...", "content": "..."}
+      ```
+      
+      Handle the case where Anthropic tool results are in user messages alongside text.
+    verify_command: grep -q "tool_result" contrib/ccr-rust/src/transform/anthropic.rs
+
+  # ==========================================================================
+  # Phase 3: OpenAI → Anthropic Response Translation (P0)
+  # ==========================================================================
+
+  - name: ccr-openai-response-basic
+    priority: P0
+    dependencies: [ccr-transformer-trait]
+    prompt: |
+      Create `contrib/ccr-rust/src/transform/openai.rs`:
+      
+      Implement `OpenaiToAnthropicTransformer` that transforms non-streaming responses:
+      
+      OpenAI format:
+      ```json
+      {"id": "...", "choices": [{"message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}], "usage": {...}}
+      ```
+      
+      Anthropic format:
+      ```json
+      {"id": "...", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "..."}], "stop_reason": "end_turn", "usage": {...}}
+      ```
+      
+      Map finish_reason: stop→end_turn, length→max_tokens, tool_calls→tool_use
+    verify_command: grep -q "OpenaiToAnthropicTransformer" contrib/ccr-rust/src/transform/openai.rs
+
+  - name: ccr-openai-response-tool-calls
+    priority: P0
+    dependencies: [ccr-openai-response-basic]
+    prompt: |
+      Extend `OpenaiToAnthropicTransformer` to convert tool calls:
+      
+      OpenAI format:
+      ```json
+      {"message": {"tool_calls": [{"id": "...", "type": "function", "function": {"name": "...", "arguments": "{...}"}}]}}
+      ```
+      
+      Anthropic format:
+      ```json
+      {"content": [{"type": "tool_use", "id": "...", "name": "...", "input": {...}}]}
+      ```
+      
+      Note: OpenAI arguments is a JSON string, Anthropic input is a JSON object.
+    verify_command: grep -q "tool_calls" contrib/ccr-rust/src/transform/openai.rs
+
+  - name: ccr-openai-response-streaming
+    priority: P0
+    dependencies: [ccr-openai-response-basic]
+    prompt: |
+      Extend `OpenaiToAnthropicTransformer` for streaming (SSE) responses:
+      
+      OpenAI streaming format:
+      ```
+      data: {"choices": [{"delta": {"content": "..."}}]}
+      ```
+      
+      Anthropic streaming format:
+      ```
+      event: content_block_delta
+      data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "..."}}
+      ```
+      
+      Transform each SSE event:
+      - First chunk: emit `message_start` event
+      - Content chunks: emit `content_block_delta`
+      - Tool call chunks: accumulate and emit `content_block_start` with `tool_use`
+      - Final chunk: emit `message_delta` with stop_reason and `message_stop`
+    verify_command: grep -q "content_block_delta" contrib/ccr-rust/src/transform/openai.rs
+
+  # ==========================================================================
+  # Phase 4: Router Integration (P0)
+  # ==========================================================================
+
+  - name: ccr-router-transformer-integration
+    priority: P0
+    dependencies: [ccr-transformer-registry, ccr-anthropic-request-tool-results, ccr-openai-response-streaming]
+    prompt: |
+      Update `contrib/ccr-rust/src/router.rs` to apply transformers:
+      
+      1. Add `transformer_registry: Arc<TransformerRegistry>` to `AppState`
+      2. In `handle_messages`:
+         - Get provider from resolved model route
+         - Build transformer chain from `provider.transformer` config
+         - Clone request, apply `chain.apply_request(&mut req)` before sending
+         - Apply `chain.apply_response(&mut resp)` to response before returning
+      3. For streaming: wrap the SSE stream in a transform adapter
+      
+      Update `main.rs` to initialize the registry with all transformers.
+    verify_command: grep -q "transformer_registry" contrib/ccr-rust/src/router.rs
+
+  # ==========================================================================
+  # Phase 5: DeepSeek Transformer (P1)
+  # ==========================================================================
+
+  - name: ccr-deepseek-transformer
+    priority: P1
+    dependencies: [ccr-transformer-trait]
+    prompt: |
+      Create `contrib/ccr-rust/src/transform/deepseek.rs`:
+      
+      Implement `DeepSeekTransformer` for DeepSeek API quirks:
+      
+      Request transformations:
+      - Strip `anthropic-beta` header
+      - Remove unsupported fields: `metadata`
+      - Handle `deepseek-reasoner` model: add `enable_thinking: true` if not present
+      
+      Response transformations:
+      - Map `reasoning_content` field to content (for reasoner model)
+      
+      Register as "deepseek" in the registry.
+    verify_command: grep -q "DeepSeekTransformer" contrib/ccr-rust/src/transform/deepseek.rs
+
+  # ==========================================================================
+  # Phase 6: Think-Tag Stripping (P1)
+  # ==========================================================================
+
+  - name: ccr-think-tag-transformer
+    priority: P1
+    dependencies: [ccr-transformer-trait]
+    prompt: |
+      Create `contrib/ccr-rust/src/transform/thinktag.rs`:
+      
+      Implement `ThinkTagTransformer` to strip reasoning tokens:
+      
+      1. On response, find content matching `<think>...</think>` or `<thinking>...</thinking>`
+      2. Remove the think blocks from text content
+      3. Optionally: preserve in a separate field for logging/audit
+      
+      Options (from TransformerEntry):
+      - `strip_patterns: ["<think>", "<thinking>", "<reasoning>"]`
+      - `preserve_in_metadata: bool` (default: false)
+      
+      Register as "thinktag" in the registry.
+    verify_command: grep -q "ThinkTagTransformer" contrib/ccr-rust/src/transform/thinktag.rs
+
+  # ==========================================================================
+  # Phase 7: Other Transformers (P1)
+  # ==========================================================================
+
+  - name: ccr-maxtoken-transformer
+    priority: P1
+    dependencies: [ccr-transformer-trait]
+    prompt: |
+      Create `contrib/ccr-rust/src/transform/maxtoken.rs`:
+      
+      Implement `MaxTokenTransformer` to override max_tokens:
+      
+      Options from TransformerEntry:
+      - `max_tokens: u32` (required) - The value to set
+      - `override_if_higher: bool` (default: true) - Only set if higher than existing
+      
+      Example usage: `["maxtoken", {"max_tokens": 65536}]`
+      
+      Register as "maxtoken" in the registry.
+    verify_command: grep -q "MaxTokenTransformer" contrib/ccr-rust/src/transform/maxtoken.rs
+
+  - name: ccr-tooluse-transformer
+    priority: P1
+    dependencies: [ccr-transformer-trait]
+    prompt: |
+      Create `contrib/ccr-rust/src/transform/tooluse.rs`:
+      
+      Implement `ToolUseTransformer` for enhanced tool handling:
+      
+      Request transformations:
+      - Validate tool definitions have required fields
+      - Add default descriptions if missing
+      - Normalize tool_choice values
+      
+      Response transformations:
+      - Ensure tool_use blocks have valid JSON in `input`
+      - Handle malformed tool call arguments gracefully (wrap in {"raw": ...})
+      
+      Register as "tooluse" in the registry.
+    verify_command: grep -q "ToolUseTransformer" contrib/ccr-rust/src/transform/tooluse.rs
+
+  - name: ccr-openrouter-transformer
+    priority: P1
+    dependencies: [ccr-anthropic-request-tool-results]
+    prompt: |
+      Create `contrib/ccr-rust/src/transform/openrouter.rs`:
+      
+      Implement `OpenRouterTransformer` for OpenRouter-specific handling:
+      
+      Request transformations:
+      - Add `HTTP-Referer` header if not present (OpenRouter recommendation)
+      - Add `X-Title` header for app identification
+      - Handle model name mapping (e.g., provider/model format)
+      
+      Response transformations:
+      - Extract `x-ratelimit-*` headers for rate limit awareness (future use)
+      
+      Register as "openrouter" in the registry.
+    verify_command: grep -q "OpenRouterTransformer" contrib/ccr-rust/src/transform/openrouter.rs
+
+  # ==========================================================================
+  # Phase 8: Production Hardening (P2)
+  # ==========================================================================
+
+  - name: ccr-graceful-shutdown
+    priority: P2
+    prompt: |
+      Update `contrib/ccr-rust/src/main.rs` for graceful shutdown:
+      
+      1. Install SIGINT/SIGTERM handlers using `tokio::signal`
+      2. Create a `shutdown_tx: broadcast::Sender<()>` channel
+      3. Pass `shutdown_rx` to the server via `axum::serve(...).with_graceful_shutdown(...)`
+      4. Track active streams in `AppState` with an `AtomicUsize`
+      5. On shutdown signal:
+         - Stop accepting new requests (502 for new connections)
+         - Wait up to 30s for active streams to complete
+         - Force-close remaining streams after timeout
+      
+      Add `--shutdown-timeout` CLI flag (default: 30s).
+    verify_command: grep -q "with_graceful_shutdown" contrib/ccr-rust/src/main.rs
+
+  - name: ccr-request-cancellation
+    priority: P2
+    dependencies: [ccr-graceful-shutdown]
+    prompt: |
+      Update `contrib/ccr-rust/src/sse.rs` for request cancellation:
+      
+      1. Accept a `CancellationToken` (from tokio-util) in `stream_response`
+      2. In the stream forwarding loop, select on:
+         - Next chunk from upstream
+         - Cancellation signal
+         - Client disconnect (tx.closed())
+      3. On cancellation or client disconnect:
+         - Abort the upstream request (reqwest supports abort)
+         - Clean up metrics (decrement active_streams)
+         - Log the cancellation reason
+      
+      Update router to create cancellation tokens and cancel on client drop.
+    verify_command: grep -q "CancellationToken" contrib/ccr-rust/src/sse.rs
+
+  - name: ccr-rate-limit-handling
+    priority: P2
+    prompt: |
+      Create `contrib/ccr-rust/src/ratelimit.rs`:
+      
+      1. `RateLimitState` struct tracking per-tier rate limit info:
+         - `remaining: Option<u32>` (from x-ratelimit-remaining header)
+         - `reset_at: Option<Instant>` (from x-ratelimit-reset header)
+         - `backoff_until: Option<Instant>` (exponential backoff on 429)
+      
+      2. In router, before trying a tier:
+         - Check if `backoff_until` is in the future → skip tier
+         - Check if `remaining == 0` and `reset_at` is in the future → skip tier
+      
+      3. On 429 response:
+         - Parse Retry-After header if present
+         - Set exponential backoff (min 1s, max 60s, 2x multiplier)
+         - Record to `ccr_rate_limit_backoffs_total` metric
+      
+      4. On success: update remaining/reset from response headers
+    verify_command: grep -q "RateLimitState" contrib/ccr-rust/src/ratelimit.rs
+
+  # ==========================================================================
+  # Phase 9: Testing (P2)
+  # ==========================================================================
+
+  - name: ccr-transformer-unit-tests
+    priority: P2
+    dependencies: [ccr-anthropic-request-tool-results, ccr-openai-response-streaming]
+    prompt: |
+      Create `contrib/ccr-rust/tests/test_transformers.rs`:
+      
+      Unit tests for all transformers:
+      
+      1. `anthropic_system_prompt_extraction` - string and array variants
+      2. `anthropic_message_content_conversion` - text, image, mixed
+      3. `anthropic_tool_definition_conversion` - input_schema → parameters
+      4. `anthropic_tool_result_conversion` - tool_result → tool role
+      5. `openai_response_basic_conversion` - choices → content blocks
+      6. `openai_tool_call_conversion` - function → tool_use
+      7. `openai_streaming_event_conversion` - delta → content_block_delta
+      8. `deepseek_reasoner_handling` - reasoning_content extraction
+      9. `thinktag_stripping` - various tag patterns
+      10. `maxtoken_override` - override_if_higher logic
+      
+      Use snapshot testing (insta crate) for complex JSON transformations.
+    verify_command: "cd contrib/ccr-rust && cargo test test_transformers --no-fail-fast 2>&1 | grep -q 'test result'"
+
+  - name: ccr-integration-tests-transformers
+    priority: P2
+    dependencies: [ccr-router-transformer-integration]
+    prompt: |
+      Extend `contrib/ccr-rust/tests/test_routing.rs`:
+      
+      Integration tests for transformer pipeline:
+      
+      1. `anthropic_to_openai_full_request` - Mock OpenAI server, verify transformed request
+      2. `openai_to_anthropic_full_response` - Mock server returns OpenAI format, verify Anthropic response
+      3. `streaming_transform_integrity` - SSE events transformed correctly
+      4. `transformer_chain_ordering` - Multiple transformers apply in order
+      5. `model_specific_override` - deepseek-chat uses tooluse, deepseek-reasoner doesn't
+      6. `bypass_passthrough` - Single matching transformer skips actual transform
+      
+      Use wiremock to verify request bodies sent to mock server.
+    verify_command: "cd contrib/ccr-rust && cargo test test_routing --no-fail-fast 2>&1 | grep -q 'anthropic_to_openai'"
