@@ -91,6 +91,7 @@ pub struct AppState {
     pub transformer_registry: Arc<TransformerRegistry>,
     pub active_streams: Arc<AtomicUsize>,
     pub ratelimit_tracker: Arc<RateLimitTracker>,
+    #[allow(dead_code)]
     pub shutdown_timeout: u64,
 }
 
@@ -778,7 +779,7 @@ pub async fn handle_messages(
         .iter()
         .filter_map(|m| serde_json::to_value(m).ok())
         .collect();
-    let tool_values: Option<Vec<serde_json::Value>> = request.tools.as_ref().map(|t| t.clone());
+    let tool_values: Option<Vec<serde_json::Value>> = request.tools.clone();
 
     // Try each tier with retries
     for (tier, tier_name) in ordered.iter() {
@@ -819,7 +820,6 @@ pub async fn handle_messages(
                 tier,
                 tier_name,
                 local_estimate,
-                &state.active_streams,
                 state.ratelimit_tracker.clone(),
             )
             .await
@@ -992,7 +992,6 @@ async fn try_request(
     tier: &str,
     tier_name: &str,
     local_estimate: u64,
-    _active_streams: &Arc<AtomicUsize>,
     ratelimit_tracker: Arc<RateLimitTracker>,
 ) -> Result<Response, TryRequestError> {
     let provider = config.resolve_provider(tier).ok_or_else(|| {

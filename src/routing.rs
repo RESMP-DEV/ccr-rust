@@ -52,6 +52,12 @@ pub struct EwmaTracker {
     failure_penalty: f64,
 }
 
+impl Default for EwmaTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EwmaTracker {
     pub fn new() -> Self {
         Self {

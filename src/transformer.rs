@@ -107,22 +107,17 @@ impl Transformer for DeepSeekTransformer {
     fn transform_response(&self, mut response: Value) -> Result<Value> {
         // DeepSeek may return tool calls in a different format
         // Ensure tool calls are properly formatted for Anthropic format
-        if let Some(content) = response.get_mut("content") {
-            if let Some(content_array) = content.as_array_mut() {
-                for block in content_array {
-                    if let Some(block_obj) = block.as_object_mut() {
-                        // Normalize tool use blocks
-                        if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
-                            if !block_obj.contains_key("id") {
-                                // Generate a deterministic ID if missing
-                                block_obj.insert(
-                                    "id".to_string(),
-                                    Value::String(format!(
-                                        "toolu_{}",
-                                        uuid_nopanic::timestamp_ms()
-                                    )),
-                                );
-                            }
+        if let Some(content_array) = response.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for block in content_array {
+                if let Some(block_obj) = block.as_object_mut() {
+                    // Normalize tool use blocks
+                    if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
+                        if !block_obj.contains_key("id") {
+                            // Generate a deterministic ID if missing
+                            block_obj.insert(
+                                "id".to_string(),
+                                Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                            );
                         }
                     }
                 }
@@ -401,17 +396,15 @@ impl Transformer for ToolUseTransformer {
 
     fn transform_request(&self, mut request: Value) -> Result<Value> {
         // Ensure tools are properly formatted for providers that need it
-        if let Some(tools) = request.get_mut("tools") {
-            if let Some(tools_array) = tools.as_array_mut() {
-                for tool in tools_array {
-                    if let Some(tool_obj) = tool.as_object_mut() {
-                        // Ensure tool has required fields
-                        if !tool_obj.contains_key("input_schema") {
-                            tool_obj.insert(
-                                "input_schema".to_string(),
-                                Value::Object(serde_json::Map::new()),
-                            );
-                        }
+        if let Some(tools_array) = request.get_mut("tools").and_then(|t| t.as_array_mut()) {
+            for tool in tools_array {
+                if let Some(tool_obj) = tool.as_object_mut() {
+                    // Ensure tool has required fields
+                    if !tool_obj.contains_key("input_schema") {
+                        tool_obj.insert(
+                            "input_schema".to_string(),
+                            Value::Object(serde_json::Map::new()),
+                        );
                     }
                 }
             }
@@ -421,20 +414,15 @@ impl Transformer for ToolUseTransformer {
 
     fn transform_response(&self, mut response: Value) -> Result<Value> {
         // Ensure tool_use blocks have IDs
-        if let Some(content) = response.get_mut("content") {
-            if let Some(content_array) = content.as_array_mut() {
-                for block in content_array {
-                    if let Some(block_obj) = block.as_object_mut() {
-                        if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
-                            if !block_obj.contains_key("id") {
-                                block_obj.insert(
-                                    "id".to_string(),
-                                    Value::String(format!(
-                                        "toolu_{}",
-                                        uuid_nopanic::timestamp_ms()
-                                    )),
-                                );
-                            }
+        if let Some(content_array) = response.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for block in content_array {
+                if let Some(block_obj) = block.as_object_mut() {
+                    if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
+                        if !block_obj.contains_key("id") {
+                            block_obj.insert(
+                                "id".to_string(),
+                                Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                            );
                         }
                     }
                 }

@@ -20,5 +20,5 @@ config.json
 Thumbs.db
 
 # Task specification (internal planning doc)
-INTEGRATION_SPEC.md
+tasks/
 config.alphaheng.json

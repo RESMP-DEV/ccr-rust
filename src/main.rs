@@ -14,16 +14,35 @@ use tokio::signal::unix::{signal, SignalKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod config;
-mod metrics;
-mod proxy;
-mod ratelimit;
-mod router;
-mod routing;
-mod sse;
-mod transformer;
+mod config {
+    pub use ccr_rust::config::*;
+}
+mod dashboard {
+    pub use ccr_rust::dashboard::*;
+}
+mod metrics {
+    pub use ccr_rust::metrics::*;
+}
+mod proxy {
+    pub use ccr_rust::proxy::*;
+}
+mod ratelimit {
+    pub use ccr_rust::ratelimit::*;
+}
+mod router {
+    pub use ccr_rust::router::*;
+}
+mod routing {
+    pub use ccr_rust::routing::*;
+}
+mod sse {
+    pub use ccr_rust::sse::*;
+}
+mod transformer {
+    pub use ccr_rust::transformer::*;
+}
 
-use config::Config;
+use crate::config::Config;
 use ratelimit::RateLimitTracker;
 use router::AppState;
 use routing::EwmaTracker;
@@ -70,6 +89,16 @@ enum Commands {
     },
     /// Validate config file syntax and providers
     Validate,
+    /// Launch interactive TUI dashboard
+    Dashboard {
+        /// Tracker host
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Tracker port
+        #[arg(short, long, default_value = "3456")]
+        port: u16,
+    },
     /// Show version and build info
     Version,
 }
@@ -227,6 +256,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Validate) => {
             validate_config(&config_path)?;
+        }
+        Some(Commands::Dashboard { host, port }) => {
+            dashboard::run_dashboard(host, port)?;
         }
         Some(Commands::Version) => {
             show_version();

@@ -23,16 +23,14 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser as ClapParser;
-use futures::StreamExt;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Barrier};
+use tokio::sync::Barrier;
 use tokio::time;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 /// Memory tracking for stress tests.
@@ -42,8 +40,6 @@ struct MemoryStats {
     current_rss: AtomicU64,
     /// Peak RSS in bytes
     peak_rss: AtomicU64,
-    /// Number of allocations tracked
-    allocations: AtomicU64,
     /// Stream count at peak memory
     peak_stream_count: AtomicUsize,
 }
@@ -53,11 +49,14 @@ struct MemoryStats {
 struct MockStream {
     id: u64,
     chunk_count: usize,
+    #[allow(dead_code)]
     bytes_per_chunk: usize,
+    #[allow(dead_code)]
     delay_ms: u64,
 }
 
 impl MockStream {
+    #[allow(dead_code)]
     fn new(id: u64) -> Self {
         Self {
             id,
@@ -66,7 +65,7 @@ impl MockStream {
             // Chunks are typically 10-500 bytes depending on tokenization
             bytes_per_chunk: 50 + (id as usize % 200),
             // Variable delay mimics network and model inference time
-            delay_ms: 10 + (id as u64 % 50),
+            delay_ms: 10 + (id % 50),
         }
     }
 
@@ -116,6 +115,7 @@ impl StreamStats {
         self.bytes_sent += bytes.len() as u64;
     }
 
+    #[allow(dead_code)]
     fn record_error(&mut self) {
         self.errors += 1;
     }
@@ -336,7 +336,7 @@ fn get_current_rss() -> u64 {
 /// This creates a connection, sends a request, and consumes the stream.
 async fn simulate_stream_client(
     id: u64,
-    addr: SocketAddr,
+    _addr: SocketAddr,
     results: Arc<StressTestResults>,
     chunks_per_stream: usize,
     bytes_per_chunk: usize,
@@ -345,7 +345,7 @@ async fn simulate_stream_client(
     results.record_stream_start(id);
 
     // Create a mock stream
-    let mut mock_stream = MockStream {
+    let mock_stream = MockStream {
         id,
         chunk_count: chunks_per_stream,
         bytes_per_chunk,
@@ -401,7 +401,7 @@ async fn run_stress_phase(
             let stream_results = results.clone();
 
             // Create a mock stream and process it
-            let mut mock_stream = MockStream {
+            let mock_stream = MockStream {
                 id: stream_id,
                 chunk_count: chunks_per_stream,
                 bytes_per_chunk,

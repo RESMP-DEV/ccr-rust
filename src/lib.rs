@@ -1,4 +1,5 @@
 pub mod config;
+pub mod dashboard;
 pub mod metrics;
 pub mod proxy;
 pub mod ratelimit;

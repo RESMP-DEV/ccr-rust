@@ -5,10 +5,10 @@ use parking_lot::RwLock;
 use prometheus::core::Collector;
 use prometheus::{
     register_counter, register_counter_vec, register_gauge, register_gauge_vec,
-    register_histogram_vec, register_int_counter_vec, Counter, CounterVec, Encoder, Gauge,
-    GaugeVec, HistogramVec, IntCounterVec, TextEncoder,
+    register_histogram_vec, Counter, CounterVec, Encoder, Gauge, GaugeVec, HistogramVec,
+    TextEncoder,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
@@ -160,7 +160,7 @@ static AUDIT_LOG: RwLock<Option<VecDeque<PreRequestAuditEntry>>> = RwLock::new(N
 
 /// A single pre-request token audit record capturing the estimated token
 /// breakdown for a request before it is dispatched to a backend tier.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreRequestAuditEntry {
     /// ISO-8601 timestamp of when the audit was recorded.
     pub timestamp: String,
@@ -189,10 +189,15 @@ struct TokenDriftEntry {
 }
 
 // Atomic counters for fast aggregate access without Prometheus iteration
-static TOTAL_INPUT_TOKENS: AtomicU64 = AtomicU64::new(0);
-static TOTAL_OUTPUT_TOKENS: AtomicU64 = AtomicU64::new(0);
-static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
-static TOTAL_FAILURES: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_INPUT_TOKENS: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_OUTPUT_TOKENS: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// Get the current number of active streams.
+pub fn get_active_streams() -> f64 {
+    ACTIVE_STREAMS.get()
+}
 
 pub fn record_request(tier: &str) {
     REQUESTS_TOTAL.with_label_values(&[tier]).inc();
@@ -277,7 +282,7 @@ pub fn record_pre_request_tokens(
     let mut total: u64 = 0;
 
     // Messages
-    let msg_tokens: u64 = messages.iter().map(|m| count_tokens_json(m)).sum();
+    let msg_tokens: u64 = messages.iter().map(count_tokens_json).sum();
     if msg_tokens > 0 {
         PRE_REQUEST_TOKENS
             .with_label_values(&[tier, "messages"])
@@ -296,7 +301,7 @@ pub fn record_pre_request_tokens(
 
     // Tool definitions
     let tool_tokens: u64 = tools
-        .map(|t| t.iter().map(|v| count_tokens_json(v)).sum())
+        .map(|t| t.iter().map(count_tokens_json).sum())
         .unwrap_or(0);
     if tool_tokens > 0 {
         PRE_REQUEST_TOKENS
@@ -440,7 +445,7 @@ pub fn verify_token_usage(tier: &str, local_estimate: u64, upstream_input: u64) 
 }
 
 /// Per-tier drift summary for the /v1/token-drift JSON endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TierTokenDrift {
     pub tier: String,
     pub samples: u64,
@@ -496,7 +501,7 @@ pub async fn token_audit_handler() -> impl IntoResponse {
 }
 
 /// Aggregated usage summary returned by /v1/usage.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UsageSummary {
     pub total_requests: u64,
     pub total_failures: u64,
@@ -506,7 +511,7 @@ pub struct UsageSummary {
     pub tiers: Vec<TierUsage>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TierUsage {
     pub tier: String,
     pub requests: u64,
@@ -677,7 +682,7 @@ pub async fn metrics_handler() -> impl IntoResponse {
 }
 
 /// Per-tier latency entry for the /v1/latencies JSON endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TierLatency {
     pub tier: String,
     pub ewma_seconds: f64,

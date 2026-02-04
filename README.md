@@ -29,6 +29,9 @@ cargo install --path .
 # Start the server (default: http://127.0.0.1:3456)
 ccr-rust start --config ~/.claude-code-router/config.json
 
+# Launch interactive TUI dashboard
+ccr-rust dashboard
+
 # Check if running
 ccr-rust status
 
@@ -44,6 +47,7 @@ ccr-rust version
 | Command | Description |
 |---------|-------------|
 | `start` | Start the CCR server (default if no command given) |
+| `dashboard` | Launch interactive TUI for real-time monitoring |
 | `status` | Check if server is running and show latencies |
 | `validate` | Validate config file syntax and providers |
 | `version` | Show version and build info |
@@ -173,6 +177,42 @@ ccr_output_tokens_total{tier="tier-0"}
 ccr_pre_request_tokens_total{tier,component} # Estimated tokens before dispatch
 ccr_token_drift_pct{tier="tier-0"}          # Local vs upstream token accuracy
 ```
+
+### Terminal Dashboard (TUI)
+
+CCR-Rust includes a built-in interactive dashboard for monitoring traffic in real-time without external dependencies.
+
+```bash
+ccr-rust dashboard --port 3456
+```
+
+**Layout:**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ CCR-Rust Dashboard | 127.0.0.1:3456                                 │
+│ Active Streams: 5    │ Requests: 1,234 / Failures: 12 (99.0%)       │
+│                      │ In: 450.2k / Out: 89.1k                      │
+├─────────────────────────────────────────────────────────────────────┤
+│ Token Drift Monitor                                                  │
+│ Tier      │ Samples │ Cumulative Drift % │ Last Sample Drift %      │
+│ tier-0    │ 117     │ 2.3%               │ 1.8%                      │
+│ tier-1    │ 66      │ -1.2%              │ 0.5%                      │
+├─────────────────────────────────────────────────────────────────────┤
+│ Session Info         │ Tier Statistics                              │
+│ CWD: /path/to/proj   │ Tier   │ EWMA (ms) │ Requests │ Tokens       │
+│ Git Branch: main     │ tier-0 │ 1,921     │ 100/5    │ 350k/80k     │
+│ Version: 1.0.0       │ tier-1 │ 2,722     │ 60/3     │ 100k/9k      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Panels:**
+- **Header**: Active streams (green when >0), success rate with color coding, token throughput (In/Out in 'k' units)
+- **Token Drift Monitor**: Per-tier comparison of local tiktoken estimates vs upstream-reported usage. Yellow for >10% drift, red for >25%
+- **Session Info**: Current working directory, git branch, and project version
+- **Tier Statistics**: Per-tier EWMA latency (color-coded by speed), request success/failure counts, token consumption, average duration
+
+**Keyboard shortcuts:**
+- `q` or `Esc` — Exit dashboard
 
 ### Token Drift Verification
 

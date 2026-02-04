@@ -438,11 +438,12 @@ impl Config {
         let r = self.router();
         let mut tiers = vec![r.default.clone()];
 
-        for opt in [&r.background, &r.think, &r.long_context] {
-            if let Some(tier) = opt {
-                if !tiers.contains(tier) {
-                    tiers.push(tier.clone());
-                }
+        for tier in [&r.background, &r.think, &r.long_context]
+            .into_iter()
+            .flatten()
+        {
+            if !tiers.contains(tier) {
+                tiers.push(tier.clone());
             }
         }
 
