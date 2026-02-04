@@ -1,0 +1,748 @@
+//! Request/response transformer module for CCR-Rust.
+//!
+//! Transformers modify requests before sending to providers and responses
+//! before returning to clients. This mirrors the Node.js transformer system.
+
+use crate::config::TransformerEntry;
+use anyhow::Result;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tracing::{debug, trace};
+
+// ============================================================================
+// Transformer Trait
+// ============================================================================
+
+/// Core trait for request/response transformers.
+///
+/// Transformers can:
+/// - Modify requests before sending to upstream providers
+/// - Modify responses before returning to clients
+/// - Handle streaming transformations
+pub trait Transformer: Send + Sync {
+    /// Apply transformation to an incoming Anthropic request.
+    ///
+    /// Returns a modified request or an error if transformation fails.
+    fn transform_request(&self, request: Value) -> Result<Value> {
+        Ok(request)
+    }
+
+    /// Apply transformation to an outgoing Anthropic response.
+    ///
+    /// Returns a modified response or an error if transformation fails.
+    fn transform_response(&self, response: Value) -> Result<Value> {
+        Ok(response)
+    }
+
+    /// Check if this transformer should be applied as a passthrough (no-op).
+    ///
+    /// Some transformers are identity passthroughs when specific conditions
+    /// are met (e.g., Anthropic transformer with Anthropic API).
+    fn is_passthrough(&self, request: &Value) -> bool {
+        let _ = request;
+        false
+    }
+
+    /// Get the transformer's name for logging and debugging.
+    fn name(&self) -> &str {
+        "unknown"
+    }
+}
+
+// ============================================================================
+// Concrete Transformer Implementations
+// ============================================================================
+
+/// Identity passthrough transformer - makes no modifications.
+///
+/// Used when no transformation is needed or as a fallback.
+#[derive(Debug, Clone)]
+pub struct IdentityTransformer;
+
+impl Transformer for IdentityTransformer {
+    fn name(&self) -> &str {
+        "identity"
+    }
+
+    fn is_passthrough(&self, _request: &Value) -> bool {
+        true
+    }
+}
+
+/// Anthropic API transformer.
+///
+/// Handles transformations specific to the Anthropic API format.
+/// In most cases, this is a passthrough since we already use
+/// Anthropic format internally.
+#[derive(Debug, Clone)]
+pub struct AnthropicTransformer;
+
+impl Transformer for AnthropicTransformer {
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
+    fn is_passthrough(&self, request: &Value) -> bool {
+        // Anthropic format requests passthrough by default
+        request.get("model").is_some()
+    }
+}
+
+/// DeepSeek API transformer.
+///
+/// Handles DeepSeek-specific transformations including:
+/// - Tool use format conversions
+/// - Response parsing for DeepSeek models
+#[derive(Debug, Clone)]
+pub struct DeepSeekTransformer;
+
+impl Transformer for DeepSeekTransformer {
+    fn name(&self) -> &str {
+        "deepseek"
+    }
+
+    fn transform_response(&self, mut response: Value) -> Result<Value> {
+        // DeepSeek may return tool calls in a different format
+        // Ensure tool calls are properly formatted for Anthropic format
+        if let Some(content) = response.get_mut("content") {
+            if let Some(content_array) = content.as_array_mut() {
+                for block in content_array {
+                    if let Some(block_obj) = block.as_object_mut() {
+                        // Normalize tool use blocks
+                        if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
+                            if !block_obj.contains_key("id") {
+                                // Generate a deterministic ID if missing
+                                block_obj.insert(
+                                    "id".to_string(),
+                                    Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(response)
+    }
+}
+
+/// OpenRouter API transformer.
+///
+/// Handles OpenRouter-specific transformations.
+#[derive(Debug, Clone)]
+pub struct OpenRouterTransformer;
+
+impl Transformer for OpenRouterTransformer {
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+}
+
+/// Anthropic to OpenAI transformer.
+///
+/// Converts Anthropic API format to OpenAI API format.
+/// Handles:
+/// - Tool definitions (input_schema → parameters)
+/// - Tool choice (type conversion)
+#[derive(Debug, Clone)]
+pub struct AnthropicToOpenaiTransformer;
+
+impl Transformer for AnthropicToOpenaiTransformer {
+    fn name(&self) -> &str {
+        "anthropic-to-openai"
+    }
+
+    fn transform_request(&self, mut request: Value) -> Result<Value> {
+        // Transform tools from Anthropic to OpenAI format
+        if let Some(tools) = request.get_mut("tools") {
+            if let Some(tools_array) = tools.as_array_mut() {
+                for tool in tools_array {
+                    if let Some(tool_obj) = tool.as_object_mut() {
+                        // Anthropic: {"name": "...", "description": "...", "input_schema": {...}}
+                        // OpenAI: {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+
+                        let name = tool_obj.get("name").cloned();
+                        let description = tool_obj.get("description").cloned();
+                        let input_schema = tool_obj.get("input_schema").cloned();
+
+                        if let (Some(n), Some(d), Some(is)) = (name, description, input_schema) {
+                            *tool = serde_json::json!({
+                                "type": "function",
+                                "function": {
+                                    "name": n,
+                                    "description": d,
+                                    "parameters": is
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Transform tool_choice from Anthropic to OpenAI format
+        if let Some(tool_choice) = request.get_mut("tool_choice") {
+            let new_tool_choice = match tool_choice {
+                // Anthropic: {"type": "tool", "name": "..."}
+                // OpenAI: {"type": "function", "function": {"name": "..."}}
+                Value::Object(map) if map.get("type") == Some(&Value::String("tool".to_string())) => {
+                    if let Some(name) = map.get("name").cloned() {
+                        Some(serde_json::json!({
+                            "type": "function",
+                            "function": {"name": name}
+                        }))
+                    } else {
+                        None
+                    }
+                }
+                // Anthropic: "any" → OpenAI: "required"
+                Value::String(s) if s == "any" => Some(Value::String("required".to_string())),
+                // "auto" stays the same
+                Value::String(s) if s == "auto" => None,
+                // Already in OpenAI format, leave as is
+                Value::Object(map) if map.get("type") == Some(&Value::String("function".to_string())) => {
+                    None
+                }
+                _ => None,
+            };
+
+            if let Some(tc) = new_tool_choice {
+                *tool_choice = tc;
+            }
+        }
+
+        Ok(request)
+    }
+
+    fn transform_response(&self, mut response: Value) -> Result<Value> {
+        // Convert OpenAI tool calls back to Anthropic format
+        if let Some(content) = response.get_mut("content") {
+            if let Some(content_array) = content.as_array_mut() {
+                for block in content_array {
+                    if let Some(block_obj) = block.as_object_mut() {
+                        // Ensure tool_use blocks have IDs
+                        if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
+                            if !block_obj.contains_key("id") {
+                                block_obj.insert(
+                                    "id".to_string(),
+                                    Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(response)
+    }
+}
+
+/// Tool use enhancement transformer.
+///
+/// Ensures tool calls are properly formatted and adds any missing metadata.
+#[derive(Debug, Clone)]
+pub struct ToolUseTransformer;
+
+impl Transformer for ToolUseTransformer {
+    fn name(&self) -> &str {
+        "tooluse"
+    }
+
+    fn transform_request(&self, mut request: Value) -> Result<Value> {
+        // Ensure tools are properly formatted for providers that need it
+        if let Some(tools) = request.get_mut("tools") {
+            if let Some(tools_array) = tools.as_array_mut() {
+                for tool in tools_array {
+                    if let Some(tool_obj) = tool.as_object_mut() {
+                        // Ensure tool has required fields
+                        if !tool_obj.contains_key("input_schema") {
+                            tool_obj.insert(
+                                "input_schema".to_string(),
+                                Value::Object(serde_json::Map::new()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(request)
+    }
+
+    fn transform_response(&self, mut response: Value) -> Result<Value> {
+        // Ensure tool_use blocks have IDs
+        if let Some(content) = response.get_mut("content") {
+            if let Some(content_array) = content.as_array_mut() {
+                for block in content_array {
+                    if let Some(block_obj) = block.as_object_mut() {
+                        if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
+                            if !block_obj.contains_key("id") {
+                                block_obj.insert(
+                                    "id".to_string(),
+                                    Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(response)
+    }
+}
+
+/// Max tokens transformer.
+///
+/// Ensures requests respect max_tokens limits.
+#[derive(Debug, Clone)]
+pub struct MaxTokenTransformer {
+    max_tokens: u32,
+}
+
+impl MaxTokenTransformer {
+    pub fn new(max_tokens: u32) -> Self {
+        Self { max_tokens }
+    }
+}
+
+impl Transformer for MaxTokenTransformer {
+    fn name(&self) -> &str {
+        "maxtoken"
+    }
+
+    fn transform_request(&self, mut request: Value) -> Result<Value> {
+        // Cap max_tokens if present
+        if let Some(max_tokens) = request.get_mut("max_tokens") {
+            if let Some(current) = max_tokens.as_u64() {
+                if current > self.max_tokens as u64 {
+                    *max_tokens = Value::Number(serde_json::Number::from(self.max_tokens));
+                }
+            }
+        } else {
+            // Add max_tokens if not present
+            request
+                .as_object_mut()
+                .map(|obj| obj.insert("max_tokens".to_string(), self.max_tokens.into()));
+        }
+        Ok(request)
+    }
+}
+
+/// Reasoning transformer for DeepSeek-R1 and other reasoning models.
+///
+/// Handles the special reasoning_content field in responses.
+#[derive(Debug, Clone)]
+pub struct ReasoningTransformer;
+
+impl Transformer for ReasoningTransformer {
+    fn name(&self) -> &str {
+        "reasoning"
+    }
+
+    fn transform_response(&self, mut response: Value) -> Result<Value> {
+        // Extract thinking field before mutable borrow of content
+        let thinking_text = response.get("thinking").and_then(|t| t.as_str()).map(String::from);
+
+        // Ensure reasoning content is properly formatted in content blocks
+        if let Some(content) = response.get_mut("content") {
+            if let Some(content_array) = content.as_array_mut() {
+                // Check if there's a thinking block
+                let has_thinking = content_array.iter().any(|block| {
+                    block.get("type") == Some(&Value::String("thinking".to_string()))
+                });
+
+                // Some providers return reasoning in a different format
+                if !has_thinking {
+                    if let Some(text) = thinking_text {
+                        // Convert to proper thinking content block
+                        let thinking_block = serde_json::json!({
+                            "type": "thinking",
+                            "thinking": text,
+                            "signature": ""
+                        });
+                        content_array.insert(0, thinking_block);
+                    }
+                }
+            }
+        }
+        Ok(response)
+    }
+}
+
+/// Enhance tool transformer.
+///
+/// Adds additional metadata to tool calls for better handling.
+#[derive(Debug, Clone)]
+pub struct EnhanceToolTransformer;
+
+impl Transformer for EnhanceToolTransformer {
+    fn name(&self) -> &str {
+        "enhancetool"
+    }
+
+    fn transform_response(&self, mut response: Value) -> Result<Value> {
+        // Add cache_control metadata to tool_use blocks
+        if let Some(content) = response.get_mut("content") {
+            if let Some(content_array) = content.as_array_mut() {
+                for block in content_array {
+                    if let Some(block_obj) = block.as_object_mut() {
+                        if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
+                            // Add cache control if missing
+                            if !block_obj.contains_key("cache_control") {
+                                let mut cache_control = serde_json::Map::new();
+                                cache_control.insert("type".to_string(), Value::String("ephemeral".to_string()));
+                                block_obj.insert("cache_control".to_string(), Value::Object(cache_control));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(response)
+    }
+}
+
+// ============================================================================
+// Transformer Chain
+// ============================================================================
+
+/// A chain of transformers applied in sequence.
+#[derive(Clone)]
+pub struct TransformerChain {
+    transformers: Vec<Arc<dyn Transformer>>,
+}
+
+impl TransformerChain {
+    /// Create a new empty transformer chain.
+    pub fn new() -> Self {
+        Self {
+            transformers: Vec::new(),
+        }
+    }
+
+    /// Add a transformer to the chain.
+    pub fn add(mut self, transformer: Arc<dyn Transformer>) -> Self {
+        self.transformers.push(transformer);
+        self
+    }
+
+    /// Apply all transformers in the chain to a request.
+    pub fn apply_request(&self, mut request: Value) -> Result<Value> {
+        for transformer in &self.transformers {
+            debug!(name = %transformer.name(), "applying request transformer");
+            request = transformer.transform_request(request)?;
+            trace!(after = %serde_json::to_string(&request).unwrap_or_default(),
+                   "request after transformation");
+        }
+        Ok(request)
+    }
+
+    /// Apply all transformers in the chain to a response.
+    pub fn apply_response(&self, mut response: Value) -> Result<Value> {
+        // Apply transformers in reverse order for responses
+        for transformer in self.transformers.iter().rev() {
+            debug!(name = %transformer.name(), "applying response transformer");
+            response = transformer.transform_response(response)?;
+            trace!(after = %serde_json::to_string(&response).unwrap_or_default(),
+                   "response after transformation");
+        }
+        Ok(response)
+    }
+
+    /// Check if the entire chain is a passthrough (all transformers are identity).
+    pub fn is_passthrough(&self, request: &Value) -> bool {
+        self.transformers.iter().all(|t| t.is_passthrough(request))
+    }
+
+    /// Get the number of transformers in the chain.
+    pub fn len(&self) -> usize {
+        self.transformers.len()
+    }
+
+    /// Check if the chain is empty.
+    pub fn is_empty(&self) -> bool {
+        self.transformers.is_empty()
+    }
+}
+
+impl Default for TransformerChain {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Transformer Registry
+// ============================================================================
+
+/// Registry for looking up and creating transformer instances by name.
+pub struct TransformerRegistry {
+    transformers: HashMap<String, Arc<dyn Transformer>>,
+}
+
+impl TransformerRegistry {
+    /// Create a new transformer registry with default transformers registered.
+    pub fn new() -> Self {
+        let mut registry = Self {
+            transformers: HashMap::new(),
+        };
+
+        // Register default transformers
+        registry.register("anthropic", Arc::new(AnthropicTransformer));
+        registry.register("anthropic-to-openai", Arc::new(AnthropicToOpenaiTransformer));
+        registry.register("deepseek", Arc::new(DeepSeekTransformer));
+        registry.register("openrouter", Arc::new(OpenRouterTransformer));
+        registry.register("tooluse", Arc::new(ToolUseTransformer));
+        registry.register("identity", Arc::new(IdentityTransformer));
+        registry.register("reasoning", Arc::new(ReasoningTransformer));
+        registry.register("enhancetool", Arc::new(EnhanceToolTransformer));
+
+        registry
+    }
+
+    /// Register a transformer with a given name.
+    pub fn register(&mut self, name: &str, transformer: Arc<dyn Transformer>) {
+        self.transformers.insert(name.to_string(), transformer);
+    }
+
+    /// Look up a transformer by name.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Transformer>> {
+        self.transformers.get(name).cloned()
+    }
+
+    /// Create a transformer with options.
+    ///
+    /// Some transformers accept configuration via a JSON options object.
+    pub fn create_with_options(
+        &self,
+        name: &str,
+        options: &Value,
+    ) -> Option<Arc<dyn Transformer>> {
+        match name {
+            "maxtoken" => {
+                if let Some(max_tokens) = options.get("max_tokens").and_then(|v| v.as_u64()) {
+                    return Some(Arc::new(MaxTokenTransformer::new(max_tokens as u32)));
+                }
+                // Default to 65536 if not specified
+                Some(Arc::new(MaxTokenTransformer::new(65536)))
+            }
+            _ => self.get(name),
+        }
+    }
+
+    /// Build a transformer chain from a list of transformer entries.
+    ///
+    /// Returns an empty chain if no entries are provided.
+    pub fn build_chain(&self, entries: &[TransformerEntry]) -> TransformerChain {
+        let mut chain = TransformerChain::new();
+        for entry in entries {
+            if let Some(transformer) = entry
+                .options()
+                .and_then(|opts| self.create_with_options(entry.name(), opts))
+                .or_else(|| self.get(entry.name()))
+            {
+                chain = chain.add(transformer);
+            } else {
+                tracing::warn!(name = entry.name(), "transformer not found, skipping");
+            }
+        }
+        chain
+    }
+
+    /// Check if all entries in the list are valid transformers.
+    pub fn validate_entries(&self, entries: &[TransformerEntry]) -> Vec<String> {
+        let mut errors = Vec::new();
+        for entry in entries {
+            if self.get(entry.name()).is_none()
+                && !matches!(entry.name(), "maxtoken")
+            {
+                errors.push(format!("Unknown transformer: {}", entry.name()));
+            }
+        }
+        errors
+    }
+}
+
+impl Default for TransformerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Simple timestamp-based UUID generation for tool IDs.
+/// Uses a simple counter-based approach to avoid external dependencies.
+mod uuid_nopanic {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    pub fn timestamp_ms() -> u64 {
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_request() -> Value {
+        serde_json::json!({
+            "model": "claude-3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1000
+        })
+    }
+
+    fn test_response() -> Value {
+        serde_json::json!({
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3",
+            "content": [
+                {"type": "text", "text": "Hello!"}
+            ],
+            "stop_reason": "end_turn"
+        })
+    }
+
+    #[test]
+    fn identity_passthrough() {
+        let transformer = IdentityTransformer;
+        let request = test_request();
+        assert!(transformer.is_passthrough(&request));
+        assert_eq!(transformer.name(), "identity");
+    }
+
+    #[test]
+    fn anthropic_passthrough() {
+        let transformer = AnthropicTransformer;
+        let request = test_request();
+        assert!(transformer.is_passthrough(&request));
+        assert_eq!(transformer.name(), "anthropic");
+    }
+
+    #[test]
+    fn maxtoken_caps_request() {
+        let transformer = MaxTokenTransformer::new(5000);
+        let mut request = test_request();
+        request["max_tokens"] = Value::Number(10000.into());
+
+        let result = transformer.transform_request(request).unwrap();
+        assert_eq!(result["max_tokens"], 5000);
+    }
+
+    #[test]
+    fn maxtoken_adds_if_missing() {
+        let transformer = MaxTokenTransformer::new(5000);
+        let mut request = test_request();
+        request.as_object_mut().unwrap().remove("max_tokens");
+
+        let result = transformer.transform_request(request).unwrap();
+        assert_eq!(result["max_tokens"], 5000);
+    }
+
+    #[test]
+    fn tooluse_adds_id_to_tool_use() {
+        let transformer = ToolUseTransformer;
+        let mut response = serde_json::json!({
+            "content": [
+                {"type": "tool_use", "name": "calculator", "input": {}}
+            ]
+        });
+
+        let result = transformer.transform_response(response).unwrap();
+        let tool_use = result["content"][0].as_object().unwrap();
+        assert!(tool_use.contains_key("id"));
+        assert!(tool_use["id"].as_str().unwrap().starts_with("toolu_"));
+    }
+
+    #[test]
+    fn transformer_chain_applies_in_order() {
+        let chain = TransformerChain::new()
+            .add(Arc::new(MaxTokenTransformer::new(100)))
+            .add(Arc::new(IdentityTransformer));
+
+        let mut request = test_request();
+        request["max_tokens"] = Value::Number(1000.into());
+
+        let result = chain.apply_request(request).unwrap();
+        assert_eq!(result["max_tokens"], 100);
+    }
+
+    #[test]
+    fn transformer_chain_reverses_for_response() {
+        let chain = TransformerChain::new()
+            .add(Arc::new(ToolUseTransformer))
+            .add(Arc::new(DeepSeekTransformer));
+
+        let mut response = serde_json::json!({
+            "content": [
+                {"type": "tool_use", "name": "test", "input": {}}
+            ]
+        });
+
+        let result = chain.apply_response(response).unwrap();
+        // ToolUseTransformer should add the ID
+        assert!(result["content"][0].as_object().unwrap().contains_key("id"));
+    }
+
+    #[test]
+    fn registry_gets_transformer() {
+        let registry = TransformerRegistry::new();
+        assert!(registry.get("anthropic").is_some());
+        assert!(registry.get("deepseek").is_some());
+        assert!(registry.get("unknown").is_none());
+    }
+
+    #[test]
+    fn registry_builds_chain() {
+        let registry = TransformerRegistry::new();
+        let entries = vec![
+            TransformerEntry::Name("anthropic".to_string()),
+            TransformerEntry::Name("tooluse".to_string()),
+        ];
+
+        let chain = registry.build_chain(&entries);
+        assert_eq!(chain.len(), 2);
+        assert!(!chain.is_empty());
+    }
+
+    #[test]
+    fn registry_creates_maxtoken_with_options() {
+        let registry = TransformerRegistry::new();
+        let options = serde_json::json!({"max_tokens": 12345});
+        let transformer = registry.create_with_options("maxtoken", &options);
+
+        assert!(transformer.is_some());
+        assert_eq!(transformer.unwrap().name(), "maxtoken");
+    }
+
+    #[test]
+    fn registry_validates_entries() {
+        let registry = TransformerRegistry::new();
+        let entries = vec![
+            TransformerEntry::Name("anthropic".to_string()),
+            TransformerEntry::Name("unknown_transformer".to_string()),
+        ];
+
+        let errors = registry.validate_entries(&entries);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("unknown_transformer"));
+    }
+
+    #[test]
+    fn chain_empty_is_passthrough() {
+        let chain = TransformerChain::new();
+        assert!(chain.is_passthrough(&test_request()));
+        assert!(chain.is_empty());
+    }
+}

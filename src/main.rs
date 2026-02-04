@@ -14,10 +14,12 @@ mod metrics;
 mod router;
 mod routing;
 mod sse;
+mod transformer;
 
 use config::Config;
 use router::AppState;
 use routing::EwmaTracker;
+use transformer::TransformerRegistry;
 
 #[derive(Parser)]
 #[command(name = "ccr-rust")]
@@ -59,9 +61,11 @@ async fn main() -> Result<()> {
     tracing::info!("Max concurrent streams: {}", cli.max_streams);
 
     let ewma_tracker = std::sync::Arc::new(EwmaTracker::new());
+    let transformer_registry = std::sync::Arc::new(TransformerRegistry::new());
     let state = AppState {
         config,
         ewma_tracker,
+        transformer_registry,
     };
 
     let app = Router::new()

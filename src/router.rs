@@ -14,7 +14,8 @@ use crate::metrics::{
     record_request_duration, record_usage, sync_ewma_gauge, verify_token_usage,
 };
 use crate::routing::{AttemptTimer, EwmaTracker};
-use crate::sse::{stream_response, StreamVerifyCtx};
+use crate::sse::StreamVerifyCtx;
+use crate::transformer::{TransformerChain, TransformerRegistry};
 
 const MAX_RETRIES: usize = 3;
 
@@ -23,7 +24,12 @@ const MAX_RETRIES: usize = 3;
 pub struct AppState {
     pub config: Config,
     pub ewma_tracker: Arc<EwmaTracker>,
+    pub transformer_registry: Arc<TransformerRegistry>,
 }
+
+// ============================================================================
+// Anthropic Format Types (Input)
+// ============================================================================
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AnthropicRequest {
@@ -46,7 +52,7 @@ pub struct AnthropicRequest {
     pub tools: Option<Vec<serde_json::Value>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
     pub role: String,
     pub content: serde_json::Value,
@@ -59,25 +65,468 @@ pub struct ErrorResponse {
     pub attempts: usize,
 }
 
-/// Usage block from Anthropic-style API responses.
-#[derive(Debug, Deserialize, Default)]
-struct ResponseUsage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default)]
-    cache_read_input_tokens: u64,
-    #[serde(default)]
-    cache_creation_input_tokens: u64,
+
+
+// ============================================================================
+// OpenAI Format Types
+// ============================================================================
+
+/// OpenAI chat completion request format.
+#[derive(Debug, Serialize)]
+struct OpenAIRequest {
+    model: String,
+    messages: Vec<OpenAIMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
-/// Wrapper to extract the `usage` field from a response body.
-#[derive(Debug, Deserialize)]
-struct ResponseWithUsage {
-    #[serde(default)]
-    usage: Option<ResponseUsage>,
+/// OpenAI message format.
+#[derive(Debug, Serialize, Clone)]
+struct OpenAIMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
 }
+
+/// OpenAI non-streaming response.
+#[derive(Debug, Deserialize)]
+struct OpenAIResponse {
+    id: String,
+    object: String,
+    created: i64,
+    model: String,
+    choices: Vec<OpenAIChoice>,
+    usage: Option<OpenAIUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIChoice {
+    index: u32,
+    message: OpenAIResponseMessage,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct OpenAIResponseMessage {
+    role: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default, rename = "reasoning_content")]
+    reasoning_content: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAIUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<serde_json::Value>,
+}
+
+/// OpenAI streaming response chunk.
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamChunk {
+    id: String,
+    object: String,
+    created: i64,
+    model: String,
+    choices: Vec<OpenAIStreamChoice>,
+    usage: Option<OpenAIUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamChoice {
+    index: u32,
+    delta: OpenAIDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAIDelta {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default, rename = "reasoning_content")]
+    reasoning_content: Option<String>,
+}
+
+// ============================================================================
+// Anthropic Response Types (Output)
+// ============================================================================
+
+/// Anthropic non-streaming response format.
+#[derive(Debug, Serialize)]
+struct AnthropicResponse {
+    id: String,
+    #[serde(rename = "type")]
+    response_type: String,
+    role: String,
+    model: String,
+    content: Vec<AnthropicContentBlock>,
+    usage: AnthropicUsage,
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum AnthropicContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
+}
+
+#[derive(Debug, Serialize, Default, Clone)]
+struct AnthropicUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+/// Anthropic streaming event types.
+#[derive(Debug, Serialize)]
+struct AnthropicStreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_block: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delta: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<AnthropicUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<String>,
+}
+
+// ============================================================================
+// Request Translation: Anthropic -> OpenAI
+// ============================================================================
+
+/// Convert Anthropic message content to a plain string.
+/// Handles both string content and array of content blocks.
+fn normalize_message_content(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            // Concatenate all text blocks from the array
+            let mut result = String::new();
+            for block in arr {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    result.push_str(text);
+                } else if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                    // Include thinking content inline for OpenAI
+                    if !result.is_empty() {
+                        result.push_str("\n\n");
+                    }
+                    result.push_str("<thinking>");
+                    result.push_str(thinking);
+                    result.push_str("</thinking>");
+                }
+            }
+            result
+        }
+        _ => content.as_str().unwrap_or("").to_string(),
+    }
+}
+
+/// Translate Anthropic request format to OpenAI format.
+fn translate_request_anthropic_to_openai(
+    anthropic_req: &AnthropicRequest,
+    model: &str,
+) -> OpenAIRequest {
+    let mut messages: Vec<OpenAIMessage> = Vec::new();
+
+    // Handle system prompt: Anthropic has it as a top-level field,
+    // OpenAI expects it as the first message with role "system"
+    if let Some(system) = &anthropic_req.system {
+        let system_content = match system {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(arr) => {
+                let mut result = String::new();
+                for block in arr {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        if !result.is_empty() {
+                            result.push('\n');
+                        }
+                        result.push_str(text);
+                    }
+                }
+                result
+            }
+            _ => system.to_string(),
+        };
+
+        if !system_content.is_empty() {
+            messages.push(OpenAIMessage {
+                role: "system".to_string(),
+                content: Some(system_content),
+                reasoning_content: None,
+            });
+        }
+    }
+
+    // Convert user and assistant messages
+    for msg in &anthropic_req.messages {
+        let role = match msg.role.as_str() {
+            "human" | "user" => "user",
+            "assistant" => "assistant",
+            r => r,
+        };
+
+        let content = normalize_message_content(&msg.content);
+
+        if !content.is_empty() || role != "user" {
+            messages.push(OpenAIMessage {
+                role: role.to_string(),
+                content: Some(content),
+                reasoning_content: None,
+            });
+        }
+    }
+
+    // Determine if this is a reasoning model (e.g., DeepSeek-R1)
+    let is_reasoning_model = model.to_lowercase().contains("reasoner")
+        || model.to_lowercase().contains("r1")
+        || model.to_lowercase().contains("thinking");
+
+    OpenAIRequest {
+        model: model.to_string(),
+        messages,
+        // Use max_completion_tokens for reasoning models to allow for reasoning
+        max_tokens: if is_reasoning_model { None } else { anthropic_req.max_tokens },
+        max_completion_tokens: if is_reasoning_model {
+            anthropic_req.max_tokens
+        } else {
+            None
+        },
+        temperature: anthropic_req.temperature,
+        stream: anthropic_req.stream,
+        tools: anthropic_req.tools.clone(),
+        reasoning_effort: if is_reasoning_model {
+            Some("high".to_string())
+        } else {
+            None
+        },
+    }
+}
+
+// ============================================================================
+// Response Translation: OpenAI -> Anthropic
+// ============================================================================
+
+/// Translate OpenAI non-streaming response to Anthropic format.
+fn translate_response_openai_to_anthropic(
+    openai_resp: OpenAIResponse,
+    model: &str,
+) -> AnthropicResponse {
+    let content = if let Some(choice) = openai_resp.choices.first() {
+        let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
+
+        // Include reasoning content if present (from reasoning models)
+        if let Some(reasoning) = &choice.message.reasoning_content {
+            if !reasoning.is_empty() {
+                blocks.push(AnthropicContentBlock::Thinking {
+                    thinking: reasoning.clone(),
+                    signature: String::new(), // OpenAI doesn't provide signatures
+                });
+            }
+        }
+
+        // Main content
+        if let Some(text) = &choice.message.content {
+            if !text.is_empty() {
+                blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+            }
+        }
+
+        blocks
+    } else {
+        vec![]
+    };
+
+    let usage = openai_resp.usage.map(|u| AnthropicUsage {
+        input_tokens: u.prompt_tokens,
+        output_tokens: u.completion_tokens,
+    }).unwrap_or_default();
+
+    AnthropicResponse {
+        id: openai_resp.id,
+        response_type: "message".to_string(),
+        role: "assistant".to_string(),
+        model: model.to_string(),
+        content,
+        usage,
+        stop_reason: openai_resp
+            .choices
+            .first()
+            .and_then(|c| c.finish_reason.clone()),
+    }
+}
+
+/// Translate an OpenAI streaming chunk to Anthropic streaming events.
+fn translate_stream_chunk_to_anthropic(
+    chunk: &OpenAIStreamChunk,
+    is_first: bool,
+) -> Vec<AnthropicStreamEvent> {
+    let mut events = Vec::new();
+
+    // Send message_start on first chunk
+    if is_first {
+        events.push(AnthropicStreamEvent {
+            event_type: "message_start".to_string(),
+            message: Some(serde_json::json!({
+                "id": chunk.id,
+                "type": "message",
+                "role": "assistant",
+                "model": chunk.model,
+                "usage": null
+            })),
+            index: None,
+            content_block: None,
+            delta: None,
+            usage: None,
+            stop_reason: None,
+        });
+
+        // Start content block
+        events.push(AnthropicStreamEvent {
+            event_type: "content_block_start".to_string(),
+            message: None,
+            index: Some(0),
+            content_block: Some(serde_json::json!({
+                "type": "text",
+                "text": ""
+            })),
+            delta: None,
+            usage: None,
+            stop_reason: None,
+        });
+    }
+
+    // Handle content delta
+    if let Some(choice) = chunk.choices.first() {
+        // Handle reasoning content (for reasoning models)
+        if let Some(ref reasoning) = choice.delta.reasoning_content {
+            if !reasoning.is_empty() {
+                events.push(AnthropicStreamEvent {
+                    event_type: "content_block_delta".to_string(),
+                    message: None,
+                    index: Some(0),
+                    content_block: None,
+                    delta: Some(serde_json::json!({
+                        "type": "thinking_delta",
+                        "thinking": reasoning
+                    })),
+                    usage: None,
+                    stop_reason: None,
+                });
+            }
+        }
+
+        // Handle regular content
+        if let Some(ref content) = choice.delta.content {
+            if !content.is_empty() {
+                events.push(AnthropicStreamEvent {
+                    event_type: "content_block_delta".to_string(),
+                    message: None,
+                    index: Some(0),
+                    content_block: None,
+                    delta: Some(serde_json::json!({
+                        "type": "text_delta",
+                        "text": content
+                    })),
+                    usage: None,
+                    stop_reason: None,
+                });
+            }
+        }
+
+        // Handle finish reason
+        if choice.finish_reason.is_some() {
+            events.push(AnthropicStreamEvent {
+                event_type: "content_block_stop".to_string(),
+                message: None,
+                index: Some(0),
+                content_block: None,
+                delta: None,
+                usage: None,
+                stop_reason: None,
+            });
+        }
+    }
+
+    events
+}
+
+/// Create final Anthropic stream events (message_delta, message_stop)
+fn create_stream_stop_events(usage: Option<AnthropicUsage>) -> Vec<AnthropicStreamEvent> {
+    let mut events = Vec::new();
+
+    let usage = usage.unwrap_or_default();
+
+    events.push(AnthropicStreamEvent {
+        event_type: "message_delta".to_string(),
+        message: None,
+        index: None,
+        content_block: None,
+        delta: Some(serde_json::json!({"stop_reason": "end_turn"})),
+        usage: Some(usage.clone()),
+        stop_reason: None,
+    });
+
+    events.push(AnthropicStreamEvent {
+        event_type: "message_stop".to_string(),
+        message: None,
+        index: None,
+        content_block: None,
+        delta: None,
+        usage: Some(usage),
+        stop_reason: None,
+    });
+
+    events
+}
+
+/// Build the transformer chain for a given provider and model.
+///
+/// Combines provider-level transformers with any model-specific overrides.
+fn build_transformer_chain(
+    registry: &TransformerRegistry,
+    provider: &crate::config::Provider,
+    model: &str,
+) -> TransformerChain {
+    // Start with provider-level transformers
+    let mut all_entries = provider.provider_transformers().to_vec();
+
+    // Add model-specific transformers if configured
+    if let Some(model_transformers) = provider.model_transformers(model) {
+        all_entries.extend(model_transformers.to_vec());
+    }
+
+    registry.build_chain(&all_entries)
+}
+
+// ============================================================================
+// Request Handler
+// ============================================================================
 
 pub async fn handle_messages(
     State(state): State<AppState>,
@@ -195,11 +644,17 @@ async fn try_request(
     );
     headers.insert("Content-Type", "application/json".parse()?);
 
+    // Extract the actual model name from the tier (format: "provider,model")
+    let model_name = tier.split(',').nth(1).unwrap_or(tier);
+
+    // Translate Anthropic request to OpenAI format
+    let openai_request = translate_request_anthropic_to_openai(request, model_name);
+
     let resp = config
         .http_client()
         .post(&url)
         .headers(headers)
-        .json(&request)
+        .json(&openai_request)
         .send()
         .await?;
 
@@ -211,35 +666,373 @@ async fn try_request(
 
     // Handle streaming vs non-streaming
     if request.stream.unwrap_or(false) {
+        // For streaming, we need to translate the SSE events
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
             local_estimate,
         };
-        Ok(stream_response(resp, config.sse_buffer_size(), Some(ctx)).await)
+        Ok(stream_response_translated(resp, config.sse_buffer_size(), Some(ctx), model_name).await)
     } else {
+        // For non-streaming, translate the full response
         let body = resp.bytes().await?;
 
-        // Extract usage from response body for metrics (best-effort, non-blocking)
-        if let Ok(parsed) = serde_json::from_slice::<ResponseWithUsage>(&body) {
-            if let Some(usage) = parsed.usage {
+        // Try to parse as OpenAI response and translate
+        if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
+            // Record usage from the response
+            if let Some(ref usage) = openai_resp.usage {
                 record_usage(
                     tier_name,
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.cache_read_input_tokens,
-                    usage.cache_creation_input_tokens,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    0, // OpenAI doesn't have cache fields in the same way
+                    0,
                 );
-                // Verify local token estimate against upstream-reported input tokens
-                verify_token_usage(tier_name, local_estimate, usage.input_tokens);
+                verify_token_usage(tier_name, local_estimate, usage.prompt_tokens);
             }
+
+            // Translate to Anthropic format
+            let anthropic_resp = translate_response_openai_to_anthropic(openai_resp, model_name);
+            let response_body = serde_json::to_vec(&anthropic_resp)?;
+
+            let mut response = (StatusCode::OK, response_body).into_response();
+            response.headers_mut().insert(
+                "x-ccr-tier",
+                tier_name.parse().unwrap_or(axum::http::HeaderValue::from_static("unknown")),
+            );
+            return Ok(response);
         }
 
-        // Inject usage header so the Python client can extract it without re-parsing
+        // Fallback: pass through original response if translation fails
         let mut response = (StatusCode::OK, body).into_response();
         response.headers_mut().insert(
             "x-ccr-tier",
             tier_name.parse().unwrap_or(axum::http::HeaderValue::from_static("unknown")),
         );
         Ok(response)
+    }
+}
+
+// ============================================================================
+// Streaming Response Translation
+// ============================================================================
+
+use axum::body::Body;
+use bytes::Bytes;
+use futures::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
+
+use crate::metrics::{
+    increment_active_streams, record_stream_backpressure,
+};
+
+/// Stream response with OpenAI -> Anthropic translation.
+pub async fn stream_response_translated(
+    resp: reqwest::Response,
+    buffer_size: usize,
+    verify_ctx: Option<StreamVerifyCtx>,
+    model_name: &str,
+) -> Response {
+    increment_active_streams(1);
+
+    let _model_name = model_name.to_string();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(buffer_size);
+
+    tokio::spawn(async move {
+        let mut stream = resp.bytes_stream();
+        let mut is_first = true;
+        let mut accumulated_content = String::new();
+        let mut accumulated_reasoning = String::new();
+        let mut _has_reasoning = false;
+        let mut input_tokens: u64 = 0;
+        let mut output_tokens: u64 = 0;
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    // Parse SSE data lines
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        for line in text.lines() {
+                            let data = line.strip_prefix("data:").or_else(|| line.strip_prefix("data: "));
+                            if let Some(json_str) = data {
+                                let json_str = json_str.trim();
+                                if json_str == "[DONE]" || json_str.is_empty() {
+                                    continue;
+                                }
+
+                                // Try to parse as OpenAI stream chunk
+                                if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(json_str) {
+                                    // Accumulate usage info
+                                    if let Some(ref usage) = chunk.usage {
+                                        input_tokens = usage.prompt_tokens;
+                                        output_tokens = usage.completion_tokens;
+                                    }
+
+                                    // Translate to Anthropic events
+                                    let events = translate_stream_chunk_to_anthropic(&chunk, is_first);
+                                    is_first = false;
+
+                                    for event in events {
+                                        let event_json = serde_json::to_string(&event).unwrap_or_default();
+                                        let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
+                                        
+                                        if tx.capacity() == 0 {
+                                            record_stream_backpressure();
+                                        }
+                                        if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                            break;
+                                        }
+                                    }
+
+                                    // Accumulate content for usage estimation
+                                    if let Some(choice) = chunk.choices.first() {
+                                        if let Some(ref content) = choice.delta.content {
+                                            accumulated_content.push_str(content);
+                                        }
+                                        if let Some(ref reasoning) = choice.delta.reasoning_content {
+                                            accumulated_reasoning.push_str(reasoning);
+                                            _has_reasoning = true;
+                                        }
+                                    }
+                                } else {
+                                    // Pass through lines that don't parse as OpenAI chunks
+                                    let sse_data = format!("{}\n", line);
+                                    if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            } else if !line.is_empty() {
+                                // Pass through non-data lines
+                                let sse_data = format!("{}\n", line);
+                                if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        // Pass through binary data
+                        if tx.capacity() == 0 {
+                            record_stream_backpressure();
+                        }
+                        if tx.send(Ok(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            e.to_string(),
+                        )))
+                        .await;
+                    break;
+                }
+            }
+        }
+
+        // Send final stop events
+        let usage = if input_tokens > 0 || output_tokens > 0 {
+            Some(AnthropicUsage { input_tokens, output_tokens })
+        } else {
+            // Estimate from accumulated content if no usage reported
+            let estimated_output = (accumulated_content.len() + accumulated_reasoning.len()) / 4;
+            Some(AnthropicUsage {
+                input_tokens,
+                output_tokens: estimated_output as u64,
+            })
+        };
+
+        let stop_events = create_stream_stop_events(usage.clone());
+        for event in stop_events {
+            let event_json = serde_json::to_string(&event).unwrap_or_default();
+            let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
+            let _ = tx.send(Ok(Bytes::from(sse_data))).await;
+        }
+
+        // Record usage and verify token drift if we have context
+        if let Some(ctx) = &verify_ctx {
+            if let Some(ref usage) = usage {
+                record_usage(
+                    &ctx.tier_name,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    0,
+                    0,
+                );
+                verify_token_usage(&ctx.tier_name, ctx.local_estimate, usage.input_tokens);
+            }
+        }
+
+        increment_active_streams(-1);
+    });
+
+    let body = Body::from_stream(ReceiverStream::new(rx));
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+        .header(axum::http::header::CACHE_CONTROL, "no-cache")
+        .header(axum::http::header::CONNECTION, "keep-alive")
+        .body(body)
+        .unwrap()
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_string_content() {
+        let content = serde_json::Value::String("Hello world".to_string());
+        assert_eq!(normalize_message_content(&content), "Hello world");
+    }
+
+    #[test]
+    fn test_normalize_array_content() {
+        let content = serde_json::json!([
+            {"type": "text", "text": "Hello "},
+            {"type": "text", "text": "world"}
+        ]);
+        assert_eq!(normalize_message_content(&content), "Hello world");
+    }
+
+    #[test]
+    fn test_translate_request_with_system() {
+        let request = AnthropicRequest {
+            model: "claude-3".to_string(),
+            messages: vec![
+                Message {
+                    role: "human".to_string(),
+                    content: serde_json::Value::String("Hello".to_string()),
+                },
+            ],
+            system: Some(serde_json::Value::String("You are Claude.".to_string())),
+            max_tokens: Some(1000),
+            temperature: Some(0.7),
+            stream: Some(false),
+            tools: None,
+        };
+
+        let openai_req = translate_request_anthropic_to_openai(&request, "gpt-4");
+        
+        assert_eq!(openai_req.messages.len(), 2);
+        assert_eq!(openai_req.messages[0].role, "system");
+        assert_eq!(openai_req.messages[0].content, Some("You are Claude.".to_string()));
+        assert_eq!(openai_req.messages[1].role, "user");
+        assert_eq!(openai_req.messages[1].content, Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn test_translate_request_reasoning_model() {
+        let request = AnthropicRequest {
+            model: "deepseek-reasoner".to_string(),
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: serde_json::Value::String("Solve this.".to_string()),
+                },
+            ],
+            system: None,
+            max_tokens: Some(4000),
+            temperature: None,
+            stream: Some(true),
+            tools: None,
+        };
+
+        let openai_req = translate_request_anthropic_to_openai(&request, "deepseek-reasoner");
+        
+        // Should use max_completion_tokens for reasoning models
+        assert!(openai_req.max_tokens.is_none());
+        assert_eq!(openai_req.max_completion_tokens, Some(4000));
+        assert_eq!(openai_req.reasoning_effort, Some("high".to_string()));
+    }
+
+    #[test]
+    fn test_translate_response_with_reasoning() {
+        let openai_resp = OpenAIResponse {
+            id: "resp_123".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "deepseek-reasoner".to_string(),
+            choices: vec![OpenAIChoice {
+                index: 0,
+                message: OpenAIResponseMessage {
+                    role: "assistant".to_string(),
+                    content: Some("The answer is 42.".to_string()),
+                    reasoning_content: Some("Let me think...".to_string()),
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: Some(OpenAIUsage {
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                prompt_tokens_details: None,
+            }),
+        };
+
+        let anthropic_resp = translate_response_openai_to_anthropic(openai_resp, "deepseek-reasoner");
+        
+        assert_eq!(anthropic_resp.content.len(), 2);
+        assert!(matches!(anthropic_resp.content[0], AnthropicContentBlock::Thinking { .. }));
+        assert!(matches!(anthropic_resp.content[1], AnthropicContentBlock::Text { .. }));
+        assert_eq!(anthropic_resp.usage.input_tokens, 10);
+        assert_eq!(anthropic_resp.usage.output_tokens, 20);
+    }
+
+    #[test]
+    fn test_translate_stream_chunk() {
+        let chunk = OpenAIStreamChunk {
+            id: "chunk_1".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 1234567890,
+            model: "gpt-4".to_string(),
+            choices: vec![OpenAIStreamChoice {
+                index: 0,
+                delta: OpenAIDelta {
+                    role: Some("assistant".to_string()),
+                    content: Some("Hello".to_string()),
+                    reasoning_content: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+
+        let events = translate_stream_chunk_to_anthropic(&chunk, true);
+        
+        assert!(!events.is_empty());
+        assert_eq!(events[0].event_type, "message_start");
+        assert_eq!(events[1].event_type, "content_block_start");
+    }
+
+    #[test]
+    fn test_translate_stream_chunk_with_reasoning() {
+        let chunk = OpenAIStreamChunk {
+            id: "chunk_1".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 1234567890,
+            model: "deepseek-reasoner".to_string(),
+            choices: vec![OpenAIStreamChoice {
+                index: 0,
+                delta: OpenAIDelta {
+                    role: None,
+                    content: None,
+                    reasoning_content: Some("Analyzing...".to_string()),
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+
+        let events = translate_stream_chunk_to_anthropic(&chunk, false);
+        
+        // Should have a thinking_delta event
+        assert!(!events.is_empty());
+        let delta = events[0].delta.as_ref().unwrap();
+        assert_eq!(delta["type"], "thinking_delta");
     }
 }

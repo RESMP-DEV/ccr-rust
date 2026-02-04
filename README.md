@@ -153,6 +153,13 @@ Tier 0 (default) ──[3 retries]──→ Tier 1 (think) ──[3 retries]─�
 - [x] Integration test suite with wiremock
 - [x] Python stress test suite (100+ concurrent streams)
 
+### ✅ Format Parity (v0.2.0)
+- [x] **Anthropic → OpenAI translation** — Full request conversion (system prompt, messages, tools)
+- [x] **OpenAI → Anthropic translation** — Response format conversion (streaming + non-streaming)
+- [x] **Reasoning model support** — DeepSeek-R1 reasoning_content → thinking blocks
+- [x] **Transformer infrastructure** — Trait, chain, registry for composable transformations
+- [x] **Built-in transformers** — anthropic, deepseek, openrouter, tooluse, maxtoken, reasoning, enhancetool
+
 ### 🔨 Transformer Config Support
 The config parser fully supports the Node.js nested transformer patterns:
 
@@ -165,22 +172,29 @@ The config parser fully supports the Node.js nested transformer patterns:
 }
 ```
 
-**Note:** Config parsing is complete, but the actual transformers (request/response format conversion) are not yet implemented—see roadmap.
+**Transformers available:**
+
+| Name | Description |
+|------|-------------|
+| `anthropic` | Anthropic API passthrough |
+| `anthropic-to-openai` | Convert tool definitions and tool_choice |
+| `deepseek` | DeepSeek-specific tool normalization |
+| `openrouter` | OpenRouter format handling |
+| `tooluse` | Ensure tool blocks have IDs and input_schema |
+| `maxtoken` | Cap/override max_tokens (configurable) |
+| `reasoning` | Convert reasoning_content to thinking blocks |
+| `enhancetool` | Add cache_control metadata to tool blocks |
+| `identity` | No-op passthrough |
 
 ---
 
 ## Roadmap
 
-### v0.2.0 — Format Parity (In Progress)
-- [ ] **Anthropic → OpenAI translation** — Convert request format (system prompt, tools, etc.)
-- [ ] **OpenAI → Anthropic translation** — Convert response format
-- [ ] **Think-tag stripping** — Clean up reasoning tokens before forwarding
-- [ ] **Transformer execution** — Actually apply the parsed transformer chains
-
-### v0.3.0 — Production Hardening
+### v0.3.0 — Production Hardening (Next)
 - [ ] **Graceful shutdown** — Drain active streams before exit
 - [ ] **Request cancellation** — Abort upstream when client disconnects
 - [ ] **Rate limit awareness** — Back off on 429s, circuit breaker
+- [ ] **Think-tag stripping** — Clean up `<think>` blocks from reasoning models
 
 ### v1.0.0 — Full Replacement
 - [ ] **Web search integration** — Proxy to search-enabled models
