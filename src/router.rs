@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -657,19 +657,54 @@ fn build_transformer_chain(
 // Request Handler
 // ============================================================================
 
+/// Check if request contains [search] or [web] tags.
+fn needs_web_search(request: &AnthropicRequest) -> bool {
+    for msg in &request.messages {
+        if let Some(text) = msg.content.as_str() {
+            if text.contains("[search]") || text.contains("[web]") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Remove [search] and [web] tags from message content.
+fn strip_search_tags(request: &mut AnthropicRequest) {
+    for msg in &mut request.messages {
+        if let Some(text) = msg.content.as_str() {
+            let cleaned = text
+                .replace("[search]", "")
+                .replace("[web]", "")
+                .trim()
+                .to_string();
+            msg.content = serde_json::Value::String(cleaned);
+        }
+    }
+}
+
 pub async fn handle_messages(
     State(state): State<AppState>,
-    Json(mut request): Json<AnthropicRequest>,
+    Json(request): Json<AnthropicRequest>,
 ) -> Response {
     let start = std::time::Instant::now();
     let config = &state.config;
     let tiers = config.backend_tiers();
 
-    info!("Incoming request for model: {}", request.model);
+    let mut request = request;
+    let mut ordered = state.ewma_tracker.sort_tiers(&tiers);
 
-    // Sort tiers by observed EWMA latency (lowest first). Tiers without
-    // enough samples keep their config-defined order.
-    let ordered = state.ewma_tracker.sort_tiers(&tiers);
+    // Check for web search
+    if state.config.router().web_search.enabled && needs_web_search(&request) {
+        strip_search_tags(&mut request);
+        if let Some(ref search_provider) = state.config.router().web_search.search_provider {
+            // Prepend search provider as first tier
+            ordered.insert(0, (search_provider.clone(), "search".to_string()));
+            tracing::info!("Web search enabled, prepending {}", search_provider);
+        }
+    }
+
+    info!("Incoming request for model: {}", request.model);
 
     // Serialize messages to JSON values once for pre-request token audit
     let msg_values: Vec<serde_json::Value> = request
@@ -787,6 +822,55 @@ pub async fn handle_messages(
     };
 
     (StatusCode::SERVICE_UNAVAILABLE, Json(error_resp)).into_response()
+}
+
+// ============================================================================
+// Preset Handlers
+// ============================================================================
+
+/// List all configured presets.
+pub async fn list_presets(State(state): State<AppState>) -> impl IntoResponse {
+    let presets: Vec<_> = state.config.presets
+        .iter()
+        .map(|(name, cfg)| serde_json::json!({
+            "name": name,
+            "route": cfg.route,
+            "max_tokens": cfg.max_tokens,
+            "temperature": cfg.temperature,
+        }))
+        .collect();
+    Json(presets)
+}
+
+/// Handle messages via a named preset.
+pub async fn handle_preset_messages(
+    State(state): State<AppState>,
+    Path(preset_name): Path<String>,
+    Json(mut request): Json<AnthropicRequest>,
+) -> Response {
+    let preset = match state.config.get_preset(&preset_name) {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Preset '{}' not found", preset_name)})),
+            ).into_response();
+        }
+    };
+    
+    // Apply preset overrides
+    if let Some(mt) = preset.max_tokens {
+        request.max_tokens = Some(mt);
+    }
+    if let Some(temp) = preset.temperature {
+        request.temperature = Some(temp);
+    }
+    
+    // Force route to preset's tier
+    request.model = preset.route.clone();
+    
+    // Delegate to normal handler
+    handle_messages(State(state), Json(request)).await
 }
 
 async fn try_request(

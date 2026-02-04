@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ccr-rust-config
+data:
+  config.json: |
+    {
+      "Providers": [],
+      "Router": {"default": ""}
+    }

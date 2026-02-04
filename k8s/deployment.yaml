@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ccr-rust
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ccr-rust
+  template:
+    metadata:
+      labels:
+        app: ccr-rust
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3456"
+    spec:
+      containers:
+        - name: ccr-rust
+          image: ghcr.io/resmp-dev/ccr-rust:latest
+          ports:
+            - containerPort: 3456
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: CCR_CONFIG
+              value: "/etc/ccr/config.json"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3456
+            initialDelaySeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3456
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ccr
+      volumes:
+        - name: config
+          configMap:
+            name: ccr-rust-config

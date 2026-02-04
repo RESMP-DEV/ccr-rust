@@ -26,34 +26,13 @@ For most users, either works fine. But if you're running multiple Claude Code in
 # Build and install
 cargo install --path .
 
-# Start the server (default: http://127.0.0.1:3456)
-ccr-rust start --config ~/.claude-code-router/config.json
+# Run with your existing CCR config
+ccr-rust --config ~/.claude-code-router/config.json
 
-# Check if running
-ccr-rust status
-
-# Validate config
-ccr-rust validate
-
-# Show version
-ccr-rust version
+# Or via environment variable
+export CCR_CONFIG=~/.claude-code-router/config.json
+ccr-rust
 ```
-
-### CLI Subcommands
-
-| Command | Description |
-|---------|-------------|
-| `start` | Start the CCR server (default if no command given) |
-| `status` | Check if server is running and show latencies |
-| `validate` | Validate config file syntax and providers |
-| `version` | Show version and build info |
-
-**Options:**
-- `--config, -c` - Path to config file (env: `CCR_CONFIG`)
-- `--host` - Server host (default: 127.0.0.1)
-- `--port, -p` - Server port (default: 3456)
-- `--max-streams` - Max concurrent streams (default: 512)
-- `--shutdown-timeout` - Graceful shutdown timeout in seconds (default: 30)
 
 ## Configuration
 
@@ -95,60 +74,11 @@ New in ccr-rust: fine-tune retry behavior for each tier.
 
 Backoff is also dynamically scaled by the tier's observed EWMA latency—fast tiers retry more aggressively.
 
-### Preset Namespaces (v1.0.0)
-
-Define named routing presets with parameter overrides:
-
-```json
-{
-  "Presets": {
-    "fast": {
-      "route": "groq,llama-3",
-      "max_tokens": 2048
-    },
-    "smart": {
-      "route": "anthropic,claude-3-opus",
-      "temperature": 0.2
-    }
-  }
-}
-```
-
-**Usage:**
-```bash
-# Route via preset
-curl http://localhost:3456/preset/fast/v1/messages \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Hello"}]}'
-
-# List all presets
-curl http://localhost:3456/v1/presets
-```
-
-### Web Search Integration (v1.0.0)
-
-Automatically route requests with `[search]` or `[web]` tags to a search-capable provider:
-
-```json
-{
-  "Router": {
-    "web_search": {
-      "enabled": true,
-      "search_provider": "perplexity,sonar-pro"
-    }
-  }
-}
-```
-
-Tags are stripped before sending to the provider.
-
 ## API Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
 | `POST /v1/messages` | Anthropic-compatible chat completions |
-| `POST /preset/:name/v1/messages` | Route via named preset |
-| `GET /v1/presets` | List all configured presets |
 | `GET /v1/usage` | Aggregate token usage per tier (JSON) |
 | `GET /v1/latencies` | Real-time EWMA latency stats (JSON) |
 | `GET /v1/token-drift` | Token estimation accuracy per tier |
@@ -207,54 +137,70 @@ Tier 0 (default) ──[3 retries]──→ Tier 1 (think) ──[3 retries]─�
 
 ## What's Implemented
 
-### ✅ Core (v0.1.0)
-- Zero-copy SSE streaming
-- Multi-tier cascade with EWMA routing
-- Token drift verification
-- Prometheus metrics
+### ✅ Core Features (v0.1.0)
+- [x] Zero-copy SSE streaming with backpressure detection
+- [x] Shared HTTP connection pool (configurable idle connections/timeout)
+- [x] Multi-tier cascade with per-tier retry configuration
+- [x] EWMA latency tracking (per-attempt, not per-request total)
+- [x] Latency-aware tier reordering
+- [x] Adaptive backoff with EWMA scaling
+- [x] Pre-request token estimation (tiktoken cl100k_base)
+- [x] Token drift verification (local vs upstream)
+- [x] Full nested transformer config parsing
+- [x] Provider-level and model-level transformer chains
+- [x] Comprehensive Prometheus metrics
+- [x] Stream usage extraction from SSE events
+- [x] Integration test suite with wiremock
+- [x] Python stress test suite (100+ concurrent streams)
 
-### ✅ Format Parity (v0.2.0)  
-- OpenAI ↔ Anthropic translation
-- Reasoning model support
-- Transformer infrastructure
+### ✅ Format Parity (v0.2.0)
+- [x] **Anthropic → OpenAI translation** — Full request conversion (system prompt, messages, tools)
+- [x] **OpenAI → Anthropic translation** — Response format conversion (streaming + non-streaming)
+- [x] **Reasoning model support** — DeepSeek-R1 reasoning_content → thinking blocks
+- [x] **Transformer infrastructure** — Trait, chain, registry for composable transformations
+- [x] **Built-in transformers** — anthropic, deepseek, openrouter, tooluse, maxtoken, reasoning, enhancetool
 
-### ✅ Production (v0.3.0)
-- Graceful shutdown
-- Rate limit handling
-- Think-tag stripping
+### 🔨 Transformer Config Support
+The config parser fully supports the Node.js nested transformer patterns:
 
-### ✅ Full Feature (v1.0.0)
-- CLI subcommands (start/status/validate/version)
-- Preset namespaces
-- Web search integration
-- Docker/Kubernetes deployment
-
-## Installation
-
-```bash
-# From source
-cargo install --path .
-ccr-rust start
-
-# Docker
-docker compose up -d
-
-# Or manually
-docker run -v ./config.json:/etc/ccr/config.json ghcr.io/resmp-dev/ccr-rust
-
-# Kubernetes
-kubectl apply -f k8s/
-
-# Systemd (Linux)
-sudo cp deploy/ccr-rust.service /etc/systemd/system/
-sudo systemctl enable --now ccr-rust
-
-# Launchd (macOS)
-cp deploy/com.ccr.rust.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.ccr.rust.plist
+```json
+{
+  "transformer": {
+    "use": ["deepseek", ["maxtoken", {"max_tokens": 65536}]],
+    "deepseek-chat": { "use": ["tooluse"] }
+  }
+}
 ```
 
-See `docs/` for detailed deployment guides.
+**Transformers available:**
+
+| Name | Description |
+|------|-------------|
+| `anthropic` | Anthropic API passthrough |
+| `anthropic-to-openai` | Convert tool definitions and tool_choice |
+| `deepseek` | DeepSeek-specific tool normalization |
+| `openrouter` | OpenRouter format handling |
+| `tooluse` | Ensure tool blocks have IDs and input_schema |
+| `maxtoken` | Cap/override max_tokens (configurable) |
+| `reasoning` | Convert reasoning_content to thinking blocks |
+| `enhancetool` | Add cache_control metadata to tool blocks |
+| `thinktag` | Strip ``, `<thinking>`, `<reasoning>` blocks |
+| `identity` | No-op passthrough |
+
+---
+
+## Roadmap
+
+### v0.3.0 — Production Hardening (Next)
+- [ ] **Graceful shutdown** — Drain active streams before exit
+- [ ] **Request cancellation** — Abort upstream when client disconnects
+- [ ] **Rate limit awareness** — Back off on 429s, circuit breaker
+- [ ] **Think-tag stripping** — Clean up `<think>` blocks from reasoning models
+
+### v1.0.0 — Full Replacement
+- [ ] **Web search integration** — Proxy to search-enabled models
+- [ ] **Preset namespaces** — `/preset/my-config/v1/messages` routing
+- [ ] **CLI parity** — `ccr-rust start`, `ccr-rust status`, etc.
 
 ---
 

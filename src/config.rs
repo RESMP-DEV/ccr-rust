@@ -6,6 +6,21 @@ use std::fmt;
 use std::fs;
 use std::sync::Arc;
 
+/// Named routing preset with optional parameter overrides.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PresetConfig {
+    /// Provider,model to route to (e.g., "anthropic,claude-3-opus")
+    pub route: String,
+
+    /// Optional max_tokens override
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+
+    /// Optional temperature override
+    #[serde(default)]
+    pub temperature: Option<f32>,
+}
+
 /// Parsed JSON configuration (deserializable).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigFile {
@@ -45,6 +60,11 @@ pub struct ConfigFile {
     #[serde(default = "default_sse_buffer_size")]
     #[serde(rename = "SSE_BUFFER_SIZE")]
     pub sse_buffer_size: usize,
+
+    /// Named preset configurations.
+    #[serde(default)]
+    #[serde(rename = "Presets")]
+    pub presets: HashMap<String, PresetConfig>,
 }
 
 /// Runtime configuration shared across all handlers via Axum state.
@@ -52,6 +72,7 @@ pub struct ConfigFile {
 #[derive(Debug, Clone)]
 pub struct Config {
     inner: Arc<ConfigInner>,
+    pub presets: HashMap<String, PresetConfig>,
 }
 
 #[derive(Debug)]
@@ -81,6 +102,16 @@ impl Config {
     /// Get the shared HTTP client. One pool for all requests.
     pub fn http_client(&self) -> &reqwest::Client {
         &self.inner.http_client
+    }
+
+    /// Get a preset by name.
+    pub fn get_preset(&self, name: &str) -> Option<&PresetConfig> {
+        self.presets.get(name)
+    }
+
+    /// List all preset names.
+    pub fn preset_names(&self) -> Vec<&str> {
+        self.presets.keys().map(|s| s.as_str()).collect()
     }
 }
 
@@ -310,6 +341,16 @@ impl Provider {
     }
 }
 
+/// Configuration for web search routing.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebSearchConfig {
+    /// Enable [search] tag detection
+    #[serde(default)]
+    pub enabled: bool,
+    /// Provider,model for search-enabled requests
+    pub search_provider: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub default: String,
@@ -330,13 +371,18 @@ pub struct RouterConfig {
 
     #[serde(default)]
     #[serde(rename = "webSearch")]
-    pub web_search: Option<String>,
+    pub web_search: WebSearchConfig,
 
     /// Per-tier retry configuration. Keys are tier names ("tier-0", "tier-1", etc.).
     /// If absent, all tiers use the global default (3 retries, 100ms base backoff).
     #[serde(default)]
     #[serde(rename = "tierRetries")]
     pub tier_retries: HashMap<String, TierRetryConfig>,
+
+    /// Named presets that override model parameters and routing.
+    #[serde(default)]
+    #[serde(rename = "presets")]
+    pub presets: HashMap<String, PresetConfig>,
 }
 
 /// Per-tier retry limits and backoff configuration.
@@ -379,9 +425,11 @@ impl Config {
         }
 
         let http_client = client_builder.build()?;
+        let presets = file.presets.clone();
 
         Ok(Config {
             inner: Arc::new(ConfigInner { file, http_client }),
+            presets,
         })
     }
 

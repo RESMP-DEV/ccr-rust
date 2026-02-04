@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  ccr-rust:
+    build: .
+    ports:
+      - "3456:3456"
+    volumes:
+      - ./config.json:/etc/ccr/config.json:ro
+    environment:
+      - RUST_LOG=info
+      - CCR_CONFIG=/etc/ccr/config.json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3456/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

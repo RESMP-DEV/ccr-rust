@@ -1,0 +1,14 @@
+[Unit]
+Description=Claude Code Router (Rust)
+After=network-online.target
+
+[Service]
+Type=simple
+User=ccr
+ExecStart=/usr/local/bin/ccr-rust start --config /etc/ccr/config.json --host 0.0.0.0
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
