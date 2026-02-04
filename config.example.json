@@ -17,14 +17,14 @@
             "api_base_url": "https://openrouter.ai/api/v1",
             "api_key": "sk-xxx",
             "models": [
-                "theminimax/minimax-m2.1"
+                "minimax/minimax-m2.1"
             ]
         }
     ],
     "Router": {
         "default": "deepseek,deepseek-reasoner",
         "background": "deepseek,deepseek-chat",
-        "longContext": "openrouter,theminimax/minimax-m2.1",
+        "longContext": "openrouter,minimax/minimax-m2.1",
         "longContextThreshold": 60000
     }
 }

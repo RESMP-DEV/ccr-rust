@@ -694,6 +694,27 @@ pub async fn handle_messages(
     let mut request = request;
     let mut ordered = state.ewma_tracker.sort_tiers(&tiers);
 
+    // Check if the requested model explicitly targets a specific provider (e.g., "deepseek,deepseek-chat")
+    // If so, route directly to that provider instead of cascading through tiers
+    let requested_model = request.model.clone();
+    if requested_model.contains(',') {
+        // Explicit provider,model - find matching tier and prioritize it
+        if let Some(pos) = ordered.iter().position(|(tier, _)| tier == &requested_model) {
+            // Move the requested tier to the front
+            let target = ordered.remove(pos);
+            ordered.insert(0, target);
+            info!("Direct routing: {} moved to front", requested_model);
+        } else {
+            // Requested model not in tiers - try it directly as a single-tier request
+            let tier_name = format!(
+                "tier-direct-{}",
+                requested_model.split(',').next().unwrap_or("unknown")
+            );
+            ordered = vec![(requested_model.clone(), tier_name)];
+            info!("Direct routing: {} (not in tier list)", requested_model);
+        }
+    }
+
     // Check for web search
     if state.config.router().web_search.enabled && needs_web_search(&request) {
         strip_search_tags(&mut request);
