@@ -1,19 +1,24 @@
-# ccr-rust
+# CCR-Rust
 
-> A high-throughput SSE proxy for running 100+ AI agents in parallel—without breaking a sweat.
+> Route your Claude Code requests to any LLM backend—DeepSeek, GLM-4, OpenRouter, and more.
 
-**ccr-rust** is a Rust rewrite of the [Claude Code Router](https://github.com/musistudio/claude-code-router), designed for orchestration systems like [AlphaHENG](https://github.com/RESMP-DEV/AlphaHENG) that need to fan out requests across dozens (or hundreds) of concurrent agents. It's drop-in compatible with existing CCR configurations.
+**CCR-Rust** is a Rust rewrite of the [Claude Code Router](https://github.com/musistudio/claude-code-router). It sits between Claude Code and your preferred LLM providers, letting you use cheaper or specialized models without changing your workflow. Drop-in compatible with existing CCR configurations.
 
-## Why Rust?
+## Why?
 
-The original Node.js router works great for single-user setups. But when you're dispatching 100+ parallel agent tasks, GC pauses and SSE string allocations start to hurt. This rewrite eliminates those bottlenecks:
+Love Claude Code's interface but want to use other models? CCR-Rust lets you:
 
-| Feature | Node.js CCR | ccr-rust |
-|---------|-------------|----------|
-| Concurrent streams | ~20-30 stable | 200+ tested |
-| SSE handling | String concat | Zero-copy buffers |
-| Memory under load | Spiky (GC) | Flat ~15MB |
-| Latency P99 | Variable | Predictable |
+- **Use any OpenAI-compatible API** as a Claude Code backend
+- **Chain multiple providers** with automatic fallback (try DeepSeek first, then GLM-4, then OpenRouter)
+- **Handle high concurrency** when running many agents or batch jobs
+
+### Why Rust over the Node.js version?
+
+For most users, either works fine. But if you're running multiple Claude Code instances, automated pipelines, or heavy workloads, ccr-rust handles the load better:
+
+- Supports 200+ concurrent streams (vs ~30 in Node.js)
+- Steady memory usage (~15MB) instead of GC spikes
+- More predictable response times under pressure
 
 ## Quick Start
 
@@ -116,7 +121,7 @@ We're actively working toward full feature parity with the Node.js version, plus
 
 ## Contributing
 
-PRs welcome. If you're hitting a specific bottleneck with high-concurrency agent setups, open an issue—this project exists to solve exactly those problems.
+PRs welcome! If you've got a provider that doesn't quite work, or you're hitting weird edge cases, open an issue. This project grew out of real-world frustrations with routing LLM traffic, and we'd love to hear about yours.
 
 ## License
 
