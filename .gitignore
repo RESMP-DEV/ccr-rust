@@ -18,3 +18,6 @@ config.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Task specification (internal planning doc)
+INTEGRATION_SPEC.md
