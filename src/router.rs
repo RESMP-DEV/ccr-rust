@@ -324,6 +324,48 @@ fn normalize_message_content(content: &serde_json::Value) -> String {
     }
 }
 
+/// Convert Anthropic tool format to OpenAI tool format.
+///
+/// Anthropic: `{name, description, input_schema}`
+/// OpenAI: `{type: "function", function: {name, description, parameters}}`
+fn convert_anthropic_tools_to_openai(
+    tools: &Option<Vec<serde_json::Value>>,
+) -> Option<Vec<serde_json::Value>> {
+    tools.as_ref().map(|tool_list| {
+        tool_list
+            .iter()
+            .map(|tool| {
+                // Check if already in OpenAI format (has "type": "function")
+                if tool.get("type").and_then(|t| t.as_str()) == Some("function") {
+                    return tool.clone();
+                }
+
+                // Convert from Anthropic format to OpenAI format
+                let name = tool.get("name").cloned().unwrap_or(serde_json::Value::Null);
+                let description = tool.get("description").cloned();
+                let parameters = tool
+                    .get("input_schema")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+
+                let mut function = serde_json::json!({
+                    "name": name,
+                    "parameters": parameters,
+                });
+
+                if let Some(desc) = description {
+                    function["description"] = desc;
+                }
+
+                serde_json::json!({
+                    "type": "function",
+                    "function": function,
+                })
+            })
+            .collect()
+    })
+}
+
 /// Translate Anthropic request format to OpenAI format.
 fn translate_request_anthropic_to_openai(
     anthropic_req: &AnthropicRequest,
@@ -445,7 +487,7 @@ fn translate_request_anthropic_to_openai(
         },
         temperature: anthropic_req.temperature,
         stream: anthropic_req.stream,
-        tools: anthropic_req.tools.clone(),
+        tools: convert_anthropic_tools_to_openai(&anthropic_req.tools),
         reasoning_effort: if is_reasoning_model {
             Some("high".to_string())
         } else {
