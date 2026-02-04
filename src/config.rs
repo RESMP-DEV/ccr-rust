@@ -296,7 +296,9 @@ impl Provider {
 
     /// Get model-specific transformers, if configured.
     pub fn model_transformers(&self, model: &str) -> Option<&[TransformerEntry]> {
-        self.transformer.as_ref().and_then(|t| t.model_transformers(model))
+        self.transformer
+            .as_ref()
+            .and_then(|t| t.model_transformers(model))
     }
 }
 
@@ -351,10 +353,10 @@ pub struct TierRetryConfig {
 
 impl Config {
     pub fn from_file(path: &str) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .context(format!("Failed to read config file: {}", path))?;
-        let file: ConfigFile = serde_json::from_str(&content)
-            .context("Failed to parse config JSON")?;
+        let content =
+            fs::read_to_string(path).context(format!("Failed to read config file: {}", path))?;
+        let file: ConfigFile =
+            serde_json::from_str(&content).context("Failed to parse config JSON")?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
         let mut client_builder = reqwest::Client::builder()
@@ -364,18 +366,14 @@ impl Config {
             .tcp_nodelay(true);
 
         if file.pool_idle_timeout_ms > 0 {
-            client_builder = client_builder.pool_idle_timeout(
-                std::time::Duration::from_millis(file.pool_idle_timeout_ms),
-            );
+            client_builder = client_builder
+                .pool_idle_timeout(std::time::Duration::from_millis(file.pool_idle_timeout_ms));
         }
 
         let http_client = client_builder.build()?;
 
         Ok(Config {
-            inner: Arc::new(ConfigInner {
-                file,
-                http_client,
-            }),
+            inner: Arc::new(ConfigInner { file, http_client }),
         })
     }
 
@@ -429,8 +427,7 @@ impl Default for TierRetryConfig {
 impl TierRetryConfig {
     /// Calculate backoff duration for a given attempt (0-indexed).
     pub fn backoff_duration(&self, attempt: usize) -> std::time::Duration {
-        let delay_ms = (self.base_backoff_ms as f64)
-            * self.backoff_multiplier.powi(attempt as i32);
+        let delay_ms = (self.base_backoff_ms as f64) * self.backoff_multiplier.powi(attempt as i32);
         let clamped_ms = delay_ms.min(self.max_backoff_ms as f64) as u64;
         std::time::Duration::from_millis(clamped_ms)
     }
@@ -462,8 +459,8 @@ impl TierRetryConfig {
         ewma_secs: Option<f64>,
     ) -> std::time::Duration {
         // Base exponential backoff
-        let base_delay_ms = (self.base_backoff_ms as f64)
-            * self.backoff_multiplier.powi(attempt as i32);
+        let base_delay_ms =
+            (self.base_backoff_ms as f64) * self.backoff_multiplier.powi(attempt as i32);
 
         // Apply latency scaling if we have EWMA data
         let scaled_delay_ms = match ewma_secs {
@@ -483,10 +480,11 @@ impl TierRetryConfig {
             _ => base_delay_ms,
         };
 
-        // Clamp to configured bounds
+        // Clamp to max backoff, and floor at 0.5x of base (from latency_factor clamp)
         let clamped_ms = scaled_delay_ms.min(self.max_backoff_ms as f64) as u64;
+        let min_backoff = (self.base_backoff_ms as f64 * 0.5) as u64;
 
-        std::time::Duration::from_millis(clamped_ms.max(self.base_backoff_ms))
+        std::time::Duration::from_millis(clamped_ms.max(min_backoff))
     }
 }
 
@@ -616,9 +614,9 @@ mod backoff_tests {
     #[test]
     fn ewma_backoff_never_below_base() {
         let config = default_retry_config();
-        // Very fast tier (0.1s EWMA) would scale to 0.1x, but should floor at 0.5x
+        // Very fast tier (0.1s EWMA) would scale to 0.1x, but floors at base_backoff_ms
         let duration = config.backoff_duration_with_ewma(0, Some(0.1));
-        assert_eq!(duration.as_millis(), 50); // 100ms * 0.5 (clamped min)
+        assert_eq!(duration.as_millis(), 100); // 100ms base_backoff_ms (floor)
     }
 
     #[test]
@@ -656,9 +654,8 @@ mod tests {
 
     #[test]
     fn tuple_with_options() {
-        let t = parse_transformer(
-            r#"{"use": [["maxtoken", {"max_tokens": 65536}], "enhancetool"]}"#,
-        );
+        let t =
+            parse_transformer(r#"{"use": [["maxtoken", {"max_tokens": 65536}], "enhancetool"]}"#);
         assert_eq!(t.use_list.len(), 2);
         assert_eq!(t.use_list[0].name(), "maxtoken");
         let opts = t.use_list[0].options().unwrap();
@@ -751,15 +748,11 @@ mod tests {
         assert!(!t.should_bypass("openai", "some-model"));
 
         // With a model override that matches
-        let t2 = parse_transformer(
-            r#"{"use": ["anthropic"], "model-a": {"use": ["anthropic"]}}"#,
-        );
+        let t2 = parse_transformer(r#"{"use": ["anthropic"], "model-a": {"use": ["anthropic"]}}"#);
         assert!(t2.should_bypass("anthropic", "model-a"));
 
         // With a model override that doesn't match
-        let t3 = parse_transformer(
-            r#"{"use": ["anthropic"], "model-a": {"use": ["tooluse"]}}"#,
-        );
+        let t3 = parse_transformer(r#"{"use": ["anthropic"], "model-a": {"use": ["tooluse"]}}"#);
         assert!(!t3.should_bypass("anthropic", "model-a"));
         // Unknown model still bypasses (no override present)
         assert!(t3.should_bypass("anthropic", "model-b"));

@@ -7,6 +7,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
 
 use crate::metrics::{
     increment_active_streams, record_stream_backpressure, record_usage, verify_token_usage,
@@ -41,7 +43,9 @@ fn extract_usage_from_sse_chunk(chunk: &[u8]) -> Option<StreamUsage> {
     let mut last_usage: Option<StreamUsage> = None;
 
     for line in text.lines() {
-        let data = line.strip_prefix("data:").or_else(|| line.strip_prefix("data: "));
+        let data = line
+            .strip_prefix("data:")
+            .or_else(|| line.strip_prefix("data: "));
         if let Some(json_str) = data {
             let json_str = json_str.trim();
             if json_str == "[DONE]" || json_str.is_empty() {
@@ -68,6 +72,7 @@ pub async fn stream_response(
     resp: reqwest::Response,
     buffer_size: usize,
     verify_ctx: Option<StreamVerifyCtx>,
+    cancel_token: CancellationToken,
 ) -> Response {
     increment_active_streams(1);
 
@@ -77,9 +82,24 @@ pub async fn stream_response(
         let mut stream = resp.bytes_stream();
         let mut last_usage: Option<StreamUsage> = None;
 
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                debug!("Stream cancelled by token");
+                // Drop the stream to abort the connection
+                drop(stream);
+                return;
+            }
+
+            _ = tx.closed() => {
+                debug!("Client disconnected");
+                // Abort the upstream request
+                drop(stream);
+                return;
+            }
+
+            chunk = stream.next() => {
+                match chunk {
+                Some(Ok(bytes)) => {
                     // Scan for usage data in SSE events before forwarding.
                     if verify_ctx.is_some() {
                         if let Some(usage) = extract_usage_from_sse_chunk(&bytes) {
@@ -92,18 +112,23 @@ pub async fn stream_response(
                         record_stream_backpressure();
                     }
                     if tx.send(Ok(bytes)).await.is_err() {
-                        break;
+                        return;
                     }
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     let _ = tx
                         .send(Err(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             e.to_string(),
                         )))
                         .await;
-                    break;
+                    return;
                 }
+                None => {
+                    // Stream ended
+                    return;
+                }
+            }
             }
         }
 

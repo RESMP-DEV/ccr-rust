@@ -1,0 +1,1403 @@
+# yaml-language-server: $schema=
+# CCR-Rust v1.0.0 — Full Replacement
+#
+# Complete feature parity with Node.js CCR plus production-ready deployment.
+# Atomic task list for AlphaHENG agent swarm.
+#
+# Run from AlphaHENG repo root:
+#   uv run alphaheng tasks add contrib/ccr-rust/tasks/ccr_rust_v10_full.yaml
+#   uv run alphaheng coordinator --local-workers 20
+
+tasks:
+  # ==========================================================================
+  # Phase 1: CLI Framework (P0)
+  # ==========================================================================
+
+  - name: ccr-cli-subcommands
+    priority: P0
+    prompt: |
+      Refactor `contrib/ccr-rust/src/main.rs` to use clap subcommands:
+
+      ```rust
+      use clap::{Parser, Subcommand};
+
+      #[derive(Parser)]
+      #[command(name = "ccr-rust")]
+      #[command(about = "Claude Code Router in Rust")]
+      struct Cli {
+          #[command(subcommand)]
+          command: Option<Commands>,
+          
+          // Global options
+          #[arg(short, long, env = "CCR_CONFIG")]
+          config: Option<String>,
+      }
+
+      #[derive(Subcommand)]
+      enum Commands {
+          /// Start the CCR server
+          Start {
+              #[arg(long, default_value = "127.0.0.1")]
+              host: String,
+              #[arg(short, long, default_value = "3456")]
+              port: u16,
+              #[arg(long, default_value = "30")]
+              shutdown_timeout: u64,
+          },
+          /// Check server status
+          Status,
+          /// Stop a running server
+          Stop,
+          /// Validate configuration file
+          Validate,
+          /// Show version and build info
+          Version,
+      }
+      ```
+
+      Default behavior (no subcommand) should run `Start` for backward compatibility.
+    verify_command: grep -q "enum Commands\|Subcommand" contrib/ccr-rust/src/main.rs
+
+  - name: ccr-cli-start-subcommand
+    priority: P0
+    dependencies: [ccr-cli-subcommands]
+    prompt: |
+      Implement the `start` subcommand in `contrib/ccr-rust/src/main.rs`:
+
+      Move the current server startup logic into a `run_server` async function.
+
+      In `main()`:
+      ```rust
+      match cli.command {
+          Some(Commands::Start { host, port, shutdown_timeout }) | None => {
+              run_server(config_path, host, port, shutdown_timeout).await?;
+          }
+          // ... other commands
+      }
+      ```
+
+      The `run_server` function should:
+      1. Load config from path
+      2. Initialize state (EWMA tracker, transformer registry, etc.)
+      3. Build router
+      4. Bind and serve with graceful shutdown
+    verify_command: grep -q "run_server\|Commands::Start" contrib/ccr-rust/src/main.rs
+
+  - name: ccr-cli-status-subcommand
+    priority: P0
+    dependencies: [ccr-cli-subcommands]
+    prompt: |
+      Implement the `status` subcommand in `contrib/ccr-rust/src/main.rs`:
+
+      ```rust
+      async fn check_status(host: &str, port: u16) -> anyhow::Result<()> {
+          let client = reqwest::Client::new();
+          let url = format!("http://{}:{}/health", host, port);
+          
+          match client.get(&url).timeout(Duration::from_secs(5)).send().await {
+              Ok(resp) if resp.status().is_success() => {
+                  println!("CCR-Rust is running on {}:{}", host, port);
+                  
+                  // Also fetch and display metrics summary
+                  let metrics_url = format!("http://{}:{}/v1/latencies", host, port);
+                  if let Ok(resp) = client.get(&metrics_url).send().await {
+                      if let Ok(json) = resp.json::<serde_json::Value>().await {
+                          println!("Tier latencies: {}", serde_json::to_string_pretty(&json)?);
+                      }
+                  }
+                  Ok(())
+              }
+              Ok(resp) => {
+                  eprintln!("CCR-Rust returned status: {}", resp.status());
+                  std::process::exit(1);
+              }
+              Err(e) => {
+                  eprintln!("CCR-Rust is not running: {}", e);
+                  std::process::exit(1);
+              }
+          }
+      }
+      ```
+
+      Call from main when `Commands::Status` is matched.
+    verify_command: grep -q "check_status\|Commands::Status" contrib/ccr-rust/src/main.rs
+
+  - name: ccr-cli-validate-subcommand
+    priority: P0
+    dependencies: [ccr-cli-subcommands]
+    prompt: |
+      Implement the `validate` subcommand in `contrib/ccr-rust/src/main.rs`:
+
+      ```rust
+      fn validate_config(config_path: &str) -> anyhow::Result<()> {
+          println!("Validating configuration: {}", config_path);
+          
+          let config = Config::from_file(config_path)?;
+          
+          // Check providers
+          let providers = config.providers();
+          println!("✓ {} provider(s) configured", providers.len());
+          for provider in providers {
+              println!("  - {}: {} model(s)", provider.name, provider.models.len());
+          }
+          
+          // Check router tiers
+          let tiers = config.backend_tiers();
+          println!("✓ {} tier(s) configured", tiers.len());
+          for (tier, name) in &tiers {
+              println!("  - {}: {}", name, tier);
+          }
+          
+          // Validate transformers if configured
+          let registry = TransformerRegistry::new();
+          for provider in providers {
+              if let Some(transformer) = &provider.transformer {
+                  let errors = registry.validate_entries(&transformer.provider_transformers());
+                  if !errors.is_empty() {
+                      for err in errors {
+                          eprintln!("✗ {}: {}", provider.name, err);
+                      }
+                      anyhow::bail!("Transformer validation failed");
+                  }
+              }
+          }
+          println!("✓ All transformers valid");
+          
+          println!("\nConfiguration is valid!");
+          Ok(())
+      }
+      ```
+    verify_command: grep -q "validate_config\|Commands::Validate" contrib/ccr-rust/src/main.rs
+
+  - name: ccr-cli-version-subcommand
+    priority: P0
+    dependencies: [ccr-cli-subcommands]
+    prompt: |
+      Implement the `version` subcommand in `contrib/ccr-rust/src/main.rs`:
+
+      Add build info to Cargo.toml:
+      ```toml
+      [package]
+      version = "1.0.0"
+      ```
+
+      In main.rs:
+      ```rust
+      fn show_version() {
+          println!("ccr-rust {}", env!("CARGO_PKG_VERSION"));
+          println!("rustc {}", rustc_version_runtime::version());
+          
+          #[cfg(debug_assertions)]
+          println!("Build: debug");
+          #[cfg(not(debug_assertions))]
+          println!("Build: release");
+          
+          println!("Features: streaming, ewma-routing, transformers");
+      }
+      ```
+
+      Add `rustc_version_runtime = "0.3"` to Cargo.toml dependencies.
+    verify_command: grep -q "show_version\|CARGO_PKG_VERSION" contrib/ccr-rust/src/main.rs
+
+  # ==========================================================================
+  # Phase 2: Preset Namespaces (P0)
+  # ==========================================================================
+
+  - name: ccr-preset-route-definition
+    priority: P0
+    prompt: |
+      Add preset routing to `contrib/ccr-rust/src/config.rs`:
+
+      ```rust
+      #[derive(Debug, Clone, Deserialize)]
+      pub struct PresetConfig {
+          /// Provider,model to use for this preset
+          pub route: String,
+          /// Optional transformer overrides
+          #[serde(default)]
+          pub transformer: Option<ProviderTransformer>,
+          /// Optional max_tokens override
+          pub max_tokens: Option<u32>,
+          /// Optional temperature override
+          pub temperature: Option<f32>,
+      }
+
+      // In Config struct:
+      #[serde(default)]
+      pub presets: HashMap<String, PresetConfig>,
+      ```
+
+      Example config:
+      ```json
+      {
+        "presets": {
+          "fast": { "route": "groq,llama-3" },
+          "smart": { "route": "anthropic,claude-3-opus", "max_tokens": 8192 },
+          "code": { "route": "deepseek,deepseek-coder", "transformer": {"use": ["tooluse"]} }
+        }
+      }
+      ```
+    verify_command: grep -q "PresetConfig\|presets.*HashMap" contrib/ccr-rust/src/config.rs
+
+  - name: ccr-preset-route-handler
+    priority: P0
+    dependencies: [ccr-preset-route-definition]
+    prompt: |
+      Add preset route handler to `contrib/ccr-rust/src/router.rs`:
+
+      ```rust
+      pub async fn handle_preset_messages(
+          State(state): State<AppState>,
+          Path(preset_name): Path<String>,
+          Json(request): Json<AnthropicRequest>,
+      ) -> Response {
+          // Look up preset config
+          let preset = match state.config.presets.get(&preset_name) {
+              Some(p) => p,
+              None => {
+                  return (
+                      StatusCode::NOT_FOUND,
+                      Json(ErrorResponse {
+                          error: format!("Preset '{}' not found", preset_name),
+                          tier: "preset".to_string(),
+                          attempts: 0,
+                      }),
+                  ).into_response();
+              }
+          };
+          
+          // Apply preset overrides to request
+          let mut modified_request = request;
+          if let Some(max_tokens) = preset.max_tokens {
+              modified_request.max_tokens = Some(max_tokens);
+          }
+          if let Some(temp) = preset.temperature {
+              modified_request.temperature = Some(temp);
+          }
+          
+          // Route to specific tier
+          // ... (use preset.route instead of tier cascade)
+      }
+      ```
+    verify_command: grep -q "handle_preset_messages\|preset_name.*Path" contrib/ccr-rust/src/router.rs
+
+  - name: ccr-preset-route-registration
+    priority: P0
+    dependencies: [ccr-preset-route-handler]
+    prompt: |
+      Register preset routes in `contrib/ccr-rust/src/main.rs`:
+
+      ```rust
+      let app = Router::new()
+          .route("/v1/messages", post(router::handle_messages))
+          .route("/preset/:preset_name/v1/messages", post(router::handle_preset_messages))
+          // ... other routes
+      ```
+
+      This enables URLs like:
+      - `/preset/fast/v1/messages` - Use the "fast" preset
+      - `/preset/smart/v1/messages` - Use the "smart" preset
+      - `/preset/code/v1/messages` - Use the "code" preset
+    verify_command: grep -q '/preset/:preset_name' contrib/ccr-rust/src/main.rs
+
+  - name: ccr-preset-list-endpoint
+    priority: P0
+    dependencies: [ccr-preset-route-definition]
+    prompt: |
+      Add endpoint to list available presets in `contrib/ccr-rust/src/router.rs`:
+
+      ```rust
+      #[derive(Serialize)]
+      struct PresetInfo {
+          name: String,
+          route: String,
+          max_tokens: Option<u32>,
+          temperature: Option<f32>,
+      }
+
+      pub async fn list_presets(
+          State(state): State<AppState>,
+      ) -> impl IntoResponse {
+          let presets: Vec<PresetInfo> = state.config.presets
+              .iter()
+              .map(|(name, config)| PresetInfo {
+                  name: name.clone(),
+                  route: config.route.clone(),
+                  max_tokens: config.max_tokens,
+                  temperature: config.temperature,
+              })
+              .collect();
+          
+          Json(presets)
+      }
+      ```
+
+      Register: `.route("/v1/presets", get(router::list_presets))`
+    verify_command: grep -q "list_presets\|PresetInfo" contrib/ccr-rust/src/router.rs
+
+  # ==========================================================================
+  # Phase 3: Web Search Integration (P1)
+  # ==========================================================================
+
+  - name: ccr-websearch-config
+    priority: P1
+    prompt: |
+      Add web search configuration to `contrib/ccr-rust/src/config.rs`:
+
+      ```rust
+      #[derive(Debug, Clone, Deserialize, Default)]
+      pub struct WebSearchConfig {
+          /// Enable web search for requests with [search] tag
+          #[serde(default)]
+          pub enabled: bool,
+          /// Provider to use for search-enabled requests
+          pub search_provider: Option<String>,
+          /// Search API key (e.g., Perplexity, Exa)
+          pub search_api_key: Option<String>,
+          /// Max search results to include
+          #[serde(default = "default_max_results")]
+          pub max_results: u32,
+      }
+
+      fn default_max_results() -> u32 { 5 }
+
+      // In Router config:
+      #[serde(default)]
+      pub web_search: WebSearchConfig,
+      ```
+
+      Example config:
+      ```json
+      {
+        "Router": {
+          "web_search": {
+            "enabled": true,
+            "search_provider": "perplexity,sonar-small",
+            "max_results": 3
+          }
+        }
+      }
+      ```
+    verify_command: grep -q "WebSearchConfig\|search_provider" contrib/ccr-rust/src/config.rs
+
+  - name: ccr-websearch-detector
+    priority: P1
+    dependencies: [ccr-websearch-config]
+    prompt: |
+      Add web search detection to `contrib/ccr-rust/src/router.rs`:
+
+      ```rust
+      /// Check if request needs web search based on content patterns
+      fn needs_web_search(request: &AnthropicRequest) -> bool {
+          // Check for [search] tag in messages
+          for msg in &request.messages {
+              if let Some(content) = msg.content.as_str() {
+                  if content.contains("[search]") || content.contains("[web]") {
+                      return true;
+                  }
+              }
+              if let Some(arr) = msg.content.as_array() {
+                  for block in arr {
+                      if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                          if text.contains("[search]") || text.contains("[web]") {
+                              return true;
+                          }
+                      }
+                  }
+              }
+          }
+          false
+      }
+      ```
+
+      In `handle_messages`, check before routing:
+      ```rust
+      let use_search = state.config.router.web_search.enabled && needs_web_search(&request);
+      if use_search {
+          // Route to search provider
+      }
+      ```
+    verify_command: grep -q "needs_web_search\|\[search\]" contrib/ccr-rust/src/router.rs
+
+  - name: ccr-websearch-route
+    priority: P1
+    dependencies: [ccr-websearch-detector]
+    prompt: |
+      Implement web search routing in `contrib/ccr-rust/src/router.rs`:
+
+      When `needs_web_search` returns true:
+
+      1. Strip the [search] tag from the request
+      2. Route to the configured search provider
+      3. Add search context header
+
+      ```rust
+      fn strip_search_tag(request: &mut AnthropicRequest) {
+          for msg in &mut request.messages {
+              if let Some(content) = msg.content.as_str() {
+                  msg.content = serde_json::Value::String(
+                      content.replace("[search]", "").replace("[web]", "").trim().to_string()
+                  );
+              }
+          }
+      }
+
+      // In handle_messages:
+      if use_search {
+          strip_search_tag(&mut request);
+          if let Some(search_tier) = &config.router.web_search.search_provider {
+              // Use search provider as tier-0
+              ordered.insert(0, (search_tier.clone(), "search".to_string()));
+          }
+      }
+      ```
+    verify_command: grep -q "strip_search_tag\|search_provider" contrib/ccr-rust/src/router.rs
+
+  # ==========================================================================
+  # Phase 4: Installation & Deployment (P1)
+  # ==========================================================================
+
+  - name: ccr-install-script
+    priority: P1
+    prompt: |
+      Create `contrib/ccr-rust/scripts/install.sh`:
+
+      ```bash
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      VERSION="${1:-latest}"
+      INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+      CONFIG_DIR="${CONFIG_DIR:-$HOME/.claude-code-router}"
+
+      echo "Installing CCR-Rust ${VERSION}..."
+
+      # Detect platform
+      OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+      ARCH=$(uname -m)
+      case "$ARCH" in
+          x86_64) ARCH="x86_64" ;;
+          aarch64|arm64) ARCH="aarch64" ;;
+          *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+      esac
+
+      # Build from source (or download binary if available)
+      if command -v cargo &> /dev/null; then
+          echo "Building from source..."
+          cargo build --release
+          sudo cp target/release/ccr-rust "$INSTALL_DIR/"
+      else
+          echo "Cargo not found. Please install Rust or download a pre-built binary."
+          exit 1
+      fi
+
+      # Create config directory
+      mkdir -p "$CONFIG_DIR"
+
+      # Create default config if none exists
+      if [[ ! -f "$CONFIG_DIR/config.json" ]]; then
+          cat > "$CONFIG_DIR/config.json" << 'EOF'
+      {
+        "Providers": [],
+        "Router": {
+          "default": ""
+        }
+      }
+      EOF
+          echo "Created default config at $CONFIG_DIR/config.json"
+      fi
+
+      echo "CCR-Rust installed successfully!"
+      echo "Run: ccr-rust start"
+      ```
+    verify_command: test -f contrib/ccr-rust/scripts/install.sh
+
+  - name: ccr-systemd-service
+    priority: P1
+    prompt: |
+      Create `contrib/ccr-rust/deploy/ccr-rust.service`:
+
+      ```ini
+      [Unit]
+      Description=Claude Code Router (Rust)
+      Documentation=https://github.com/RESMP-DEV/ccr-rust
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=ccr
+      Group=ccr
+      WorkingDirectory=/var/lib/ccr
+
+      ExecStart=/usr/local/bin/ccr-rust start \
+          --config /etc/ccr/config.json \
+          --host 0.0.0.0 \
+          --port 3456
+
+      ExecReload=/bin/kill -HUP $MAINPID
+
+      Restart=always
+      RestartSec=5
+
+      # Security
+      NoNewPrivileges=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      PrivateTmp=yes
+
+      # Environment
+      Environment=RUST_LOG=info
+      EnvironmentFile=-/etc/ccr/environment
+
+      # Limits
+      LimitNOFILE=65536
+
+      [Install]
+      WantedBy=multi-user.target
+      ```
+    verify_command: test -f contrib/ccr-rust/deploy/ccr-rust.service
+
+  - name: ccr-launchd-plist
+    priority: P1
+    prompt: |
+      Create `contrib/ccr-rust/deploy/com.ccr.rust.plist` for macOS:
+
+      ```xml
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+          <key>Label</key>
+          <string>com.ccr.rust</string>
+          
+          <key>ProgramArguments</key>
+          <array>
+              <string>/usr/local/bin/ccr-rust</string>
+              <string>start</string>
+              <string>--config</string>
+              <string>/Users/Shared/.claude-code-router/config.json</string>
+          </array>
+          
+          <key>RunAtLoad</key>
+          <true/>
+          
+          <key>KeepAlive</key>
+          <dict>
+              <key>SuccessfulExit</key>
+              <false/>
+          </dict>
+          
+          <key>StandardOutPath</key>
+          <string>/usr/local/var/log/ccr-rust.log</string>
+          
+          <key>StandardErrorPath</key>
+          <string>/usr/local/var/log/ccr-rust.err</string>
+          
+          <key>EnvironmentVariables</key>
+          <dict>
+              <key>RUST_LOG</key>
+              <string>info</string>
+          </dict>
+      </dict>
+      </plist>
+      ```
+    verify_command: test -f contrib/ccr-rust/deploy/com.ccr.rust.plist
+
+  - name: ccr-dockerfile
+    priority: P1
+    prompt: |
+      Create `contrib/ccr-rust/Dockerfile`:
+
+      ```dockerfile
+      # Build stage
+      FROM rust:1.75-bookworm AS builder
+
+      WORKDIR /app
+      COPY Cargo.toml Cargo.lock ./
+      COPY src ./src
+
+      # Build release binary
+      RUN cargo build --release
+
+      # Runtime stage
+      FROM debian:bookworm-slim
+
+      # Install CA certificates for HTTPS
+      RUN apt-get update && \
+          apt-get install -y --no-install-recommends ca-certificates && \
+          rm -rf /var/lib/apt/lists/*
+
+      # Create non-root user
+      RUN useradd -r -u 1000 -s /bin/false ccr
+
+      # Copy binary
+      COPY --from=builder /app/target/release/ccr-rust /usr/local/bin/
+
+      # Create config directory
+      RUN mkdir -p /etc/ccr && chown ccr:ccr /etc/ccr
+
+      USER ccr
+
+      EXPOSE 3456
+
+      HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+          CMD curl -f http://localhost:3456/health || exit 1
+
+      ENTRYPOINT ["ccr-rust"]
+      CMD ["start", "--host", "0.0.0.0", "--port", "3456", "--config", "/etc/ccr/config.json"]
+      ```
+    verify_command: test -f contrib/ccr-rust/Dockerfile
+
+  - name: ccr-docker-compose
+    priority: P1
+    dependencies: [ccr-dockerfile]
+    prompt: |
+      Create `contrib/ccr-rust/docker-compose.yml`:
+
+      ```yaml
+      version: '3.8'
+
+      services:
+        ccr-rust:
+          build: .
+          container_name: ccr-rust
+          ports:
+            - "3456:3456"
+          volumes:
+            - ./config.json:/etc/ccr/config.json:ro
+          environment:
+            - RUST_LOG=info
+          restart: unless-stopped
+          healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:3456/health"]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
+          deploy:
+            resources:
+              limits:
+                memory: 256M
+              reservations:
+                memory: 64M
+
+        prometheus:
+          image: prom/prometheus:latest
+          container_name: ccr-prometheus
+          ports:
+            - "9090:9090"
+          volumes:
+            - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+          command:
+            - '--config.file=/etc/prometheus/prometheus.yml'
+          depends_on:
+            - ccr-rust
+      ```
+    verify_command: test -f contrib/ccr-rust/docker-compose.yml
+
+  - name: ccr-prometheus-config
+    priority: P1
+    dependencies: [ccr-docker-compose]
+    prompt: |
+      Create `contrib/ccr-rust/deploy/prometheus.yml`:
+
+      ```yaml
+      global:
+        scrape_interval: 15s
+        evaluation_interval: 15s
+
+      scrape_configs:
+        - job_name: 'ccr-rust'
+          static_configs:
+            - targets: ['ccr-rust:3456']
+          metrics_path: /metrics
+
+      alerting:
+        alertmanagers:
+          - static_configs:
+              - targets: []
+
+      rule_files:
+        - /etc/prometheus/rules/*.yml
+      ```
+
+      Create `contrib/ccr-rust/deploy/prometheus-rules.yml`:
+
+      ```yaml
+      groups:
+        - name: ccr-rust-alerts
+          rules:
+            - alert: CCRHighLatency
+              expr: ccr_tier_ewma_latency_seconds > 5
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "High latency on tier {{ $labels.tier }}"
+            
+            - alert: CCRHighFailureRate
+              expr: rate(ccr_failures_total[5m]) > 0.1
+              for: 5m
+              labels:
+                severity: critical
+              annotations:
+                summary: "High failure rate on tier {{ $labels.tier }}"
+            
+            - alert: CCRTokenDriftHigh
+              expr: ccr_token_drift_pct > 25
+              for: 10m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Token drift >25% on tier {{ $labels.tier }}"
+      ```
+    verify_command: test -f contrib/ccr-rust/deploy/prometheus.yml
+
+  # ==========================================================================
+  # Phase 5: Kubernetes Support (P2)
+  # ==========================================================================
+
+  - name: ccr-k8s-deployment
+    priority: P2
+    prompt: |
+      Create `contrib/ccr-rust/k8s/deployment.yaml`:
+
+      ```yaml
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ccr-rust
+        labels:
+          app: ccr-rust
+      spec:
+        replicas: 2
+        selector:
+          matchLabels:
+            app: ccr-rust
+        template:
+          metadata:
+            labels:
+              app: ccr-rust
+            annotations:
+              prometheus.io/scrape: "true"
+              prometheus.io/port: "3456"
+              prometheus.io/path: "/metrics"
+          spec:
+            containers:
+              - name: ccr-rust
+                image: ghcr.io/resmp-dev/ccr-rust:latest
+                ports:
+                  - containerPort: 3456
+                    name: http
+                env:
+                  - name: RUST_LOG
+                    value: "info"
+                resources:
+                  requests:
+                    memory: "64Mi"
+                    cpu: "100m"
+                  limits:
+                    memory: "256Mi"
+                    cpu: "500m"
+                livenessProbe:
+                  httpGet:
+                    path: /health
+                    port: 3456
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 3456
+                  initialDelaySeconds: 5
+                  periodSeconds: 5
+                volumeMounts:
+                  - name: config
+                    mountPath: /etc/ccr
+                    readOnly: true
+            volumes:
+              - name: config
+                configMap:
+                  name: ccr-rust-config
+      ```
+    verify_command: test -f contrib/ccr-rust/k8s/deployment.yaml
+
+  - name: ccr-k8s-service
+    priority: P2
+    dependencies: [ccr-k8s-deployment]
+    prompt: |
+      Create `contrib/ccr-rust/k8s/service.yaml`:
+
+      ```yaml
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ccr-rust
+        labels:
+          app: ccr-rust
+      spec:
+        type: ClusterIP
+        ports:
+          - port: 3456
+            targetPort: 3456
+            protocol: TCP
+            name: http
+        selector:
+          app: ccr-rust
+      ---
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ccr-rust-metrics
+        labels:
+          app: ccr-rust
+      spec:
+        type: ClusterIP
+        ports:
+          - port: 3456
+            targetPort: 3456
+            protocol: TCP
+            name: metrics
+        selector:
+          app: ccr-rust
+      ```
+    verify_command: test -f contrib/ccr-rust/k8s/service.yaml
+
+  - name: ccr-k8s-configmap
+    priority: P2
+    dependencies: [ccr-k8s-deployment]
+    prompt: |
+      Create `contrib/ccr-rust/k8s/configmap.yaml`:
+
+      ```yaml
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: ccr-rust-config
+      data:
+        config.json: |
+          {
+            "Providers": [
+              {
+                "name": "deepseek",
+                "api_base_url": "https://api.deepseek.com/v1",
+                "models": ["deepseek-chat", "deepseek-reasoner"]
+              }
+            ],
+            "Router": {
+              "default": "deepseek,deepseek-chat",
+              "think": "deepseek,deepseek-reasoner"
+            }
+          }
+      ---
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: ccr-rust-secrets
+      type: Opaque
+      stringData:
+        DEEPSEEK_API_KEY: "your-api-key-here"
+      ```
+    verify_command: test -f contrib/ccr-rust/k8s/configmap.yaml
+
+  - name: ccr-k8s-ingress
+    priority: P2
+    dependencies: [ccr-k8s-service]
+    prompt: |
+      Create `contrib/ccr-rust/k8s/ingress.yaml`:
+
+      ```yaml
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: ccr-rust
+        annotations:
+          nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+          nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+          nginx.ingress.kubernetes.io/proxy-buffering: "off"
+      spec:
+        ingressClassName: nginx
+        rules:
+          - host: ccr.example.com
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: ccr-rust
+                      port:
+                        number: 3456
+        tls:
+          - hosts:
+              - ccr.example.com
+            secretName: ccr-rust-tls
+      ```
+    verify_command: test -f contrib/ccr-rust/k8s/ingress.yaml
+
+  # ==========================================================================
+  # Phase 6: Integration Testing (P2)
+  # ==========================================================================
+
+  - name: ccr-test-cli-commands
+    priority: P2
+    dependencies: [ccr-cli-validate-subcommand]
+    prompt: |
+      Create `contrib/ccr-rust/tests/test_cli.rs`:
+
+      ```rust
+      use assert_cmd::Command;
+      use predicates::prelude::*;
+
+      #[test]
+      fn test_version_command() {
+          let mut cmd = Command::cargo_bin("ccr-rust").unwrap();
+          cmd.arg("version")
+              .assert()
+              .success()
+              .stdout(predicate::str::contains("ccr-rust"));
+      }
+
+      #[test]
+      fn test_validate_missing_config() {
+          let mut cmd = Command::cargo_bin("ccr-rust").unwrap();
+          cmd.args(["validate", "--config", "/nonexistent/config.json"])
+              .assert()
+              .failure();
+      }
+
+      #[test]
+      fn test_validate_valid_config() {
+          let config = r#"{"Providers": [], "Router": {"default": ""}}"#;
+          let temp_dir = tempfile::tempdir().unwrap();
+          let config_path = temp_dir.path().join("config.json");
+          std::fs::write(&config_path, config).unwrap();
+          
+          let mut cmd = Command::cargo_bin("ccr-rust").unwrap();
+          cmd.args(["validate", "--config", config_path.to_str().unwrap()])
+              .assert()
+              .success()
+              .stdout(predicate::str::contains("Configuration is valid"));
+      }
+      ```
+
+      Add `assert_cmd = "2"` and `predicates = "3"` to dev-dependencies.
+    verify_command: "cd contrib/ccr-rust && cargo test test_cli 2>&1 | grep -q 'test result'"
+
+  - name: ccr-test-preset-routing
+    priority: P2
+    dependencies: [ccr-preset-route-registration]
+    prompt: |
+      Create `contrib/ccr-rust/tests/test_presets.rs`:
+
+      ```rust
+      use wiremock::{MockServer, Mock, ResponseTemplate};
+      use wiremock::matchers::{method, path};
+
+      #[tokio::test]
+      async fn test_preset_routes_to_configured_provider() {
+          let mock_server = MockServer::start().await;
+          
+          Mock::given(method("POST"))
+              .and(path("/chat/completions"))
+              .respond_with(ResponseTemplate::new(200)
+                  .set_body_json(serde_json::json!({
+                      "id": "test",
+                      "choices": [{"message": {"role": "assistant", "content": "Hello"}, "finish_reason": "stop"}],
+                      "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+                  })))
+              .mount(&mock_server)
+              .await;
+          
+          // Create config with preset
+          let config = serde_json::json!({
+              "Providers": [{
+                  "name": "mock",
+                  "api_base_url": mock_server.uri(),
+                  "api_key": "test",
+                  "models": ["test-model"]
+              }],
+              "Router": {
+                  "default": "mock,test-model"
+              },
+              "presets": {
+                  "fast": {"route": "mock,test-model", "max_tokens": 100}
+              }
+          });
+          
+          // ... test that /preset/fast/v1/messages routes correctly
+      }
+      ```
+    verify_command: "cd contrib/ccr-rust && cargo test test_preset 2>&1 | grep -q 'test result'"
+
+  # ==========================================================================
+  # Phase 7: Final Documentation (P2)
+  # ==========================================================================
+
+  - name: ccr-docs-cli-reference
+    priority: P2
+    dependencies: [ccr-cli-version-subcommand]
+    prompt: |
+      Create `contrib/ccr-rust/docs/cli.md`:
+
+      # CCR-Rust CLI Reference
+
+      ## Commands
+
+      ### `ccr-rust start`
+      Start the CCR server.
+
+      ```bash
+      ccr-rust start [OPTIONS]
+
+      Options:
+        --config <PATH>           Path to config file [env: CCR_CONFIG]
+        --host <HOST>             Server host [default: 127.0.0.1]
+        --port <PORT>             Server port [default: 3456]
+        --shutdown-timeout <SECS> Graceful shutdown timeout [default: 30]
+      ```
+
+      ### `ccr-rust status`
+      Check if a CCR server is running.
+
+      ```bash
+      ccr-rust status [OPTIONS]
+
+      Options:
+        --host <HOST>  Server host [default: 127.0.0.1]
+        --port <PORT>  Server port [default: 3456]
+      ```
+
+      ### `ccr-rust validate`
+      Validate a configuration file.
+
+      ```bash
+      ccr-rust validate [OPTIONS]
+
+      Options:
+        --config <PATH>  Path to config file
+      ```
+
+      ### `ccr-rust version`
+      Show version and build information.
+
+      ## Environment Variables
+
+      - `CCR_CONFIG` - Default config file path
+      - `RUST_LOG` - Log level (trace, debug, info, warn, error)
+
+      ## Examples
+
+      ```bash
+      # Start with default config
+      ccr-rust start
+
+      # Start with custom port
+      ccr-rust start --port 8080
+
+      # Check status
+      ccr-rust status
+
+      # Validate config before deployment
+      ccr-rust validate --config /etc/ccr/config.json
+      ```
+    verify_command: test -f contrib/ccr-rust/docs/cli.md
+
+  - name: ccr-docs-presets
+    priority: P2
+    dependencies: [ccr-preset-list-endpoint]
+    prompt: |
+      Create `contrib/ccr-rust/docs/presets.md`:
+
+      # CCR-Rust Presets
+
+      Presets allow you to define named routing configurations that can be
+      accessed via path-based URLs.
+
+      ## Configuration
+
+      ```json
+      {
+        "presets": {
+          "fast": {
+            "route": "groq,llama-3-70b",
+            "max_tokens": 2048
+          },
+          "smart": {
+            "route": "anthropic,claude-3-opus",
+            "max_tokens": 8192,
+            "temperature": 0.7
+          },
+          "code": {
+            "route": "deepseek,deepseek-coder",
+            "transformer": {
+              "use": ["tooluse"]
+            }
+          }
+        }
+      }
+      ```
+
+      ## Usage
+
+      Access presets via URL path:
+
+      ```bash
+      # Use the "fast" preset
+      curl http://localhost:3456/preset/fast/v1/messages \
+        -H "Content-Type: application/json" \
+        -d '{"model": "ignored", "messages": [{"role": "user", "content": "Hi"}]}'
+
+      # Use the "smart" preset
+      curl http://localhost:3456/preset/smart/v1/messages ...
+      ```
+
+      ## Listing Presets
+
+      ```bash
+      curl http://localhost:3456/v1/presets
+      ```
+
+      Returns:
+      ```json
+      [
+        {"name": "fast", "route": "groq,llama-3-70b", "max_tokens": 2048},
+        {"name": "smart", "route": "anthropic,claude-3-opus", "max_tokens": 8192}
+      ]
+      ```
+
+      ## Claude Code Integration
+
+      Configure Claude Code to use a specific preset:
+
+      ```bash
+      export ANTHROPIC_BASE_URL=http://localhost:3456/preset/fast
+      ```
+    verify_command: test -f contrib/ccr-rust/docs/presets.md
+
+  - name: ccr-docs-websearch
+    priority: P2
+    dependencies: [ccr-websearch-route]
+    prompt: |
+      Create `contrib/ccr-rust/docs/websearch.md`:
+
+      # Web Search Integration
+
+      CCR-Rust can route search-tagged requests to search-enabled providers
+      like Perplexity or models with web access.
+
+      ## Configuration
+
+      ```json
+      {
+        "Router": {
+          "web_search": {
+            "enabled": true,
+            "search_provider": "perplexity,sonar-small"
+          }
+        },
+        "Providers": [
+          {
+            "name": "perplexity",
+            "api_base_url": "https://api.perplexity.ai",
+            "api_key": "pplx-...",
+            "models": ["sonar-small", "sonar-medium"]
+          }
+        ]
+      }
+      ```
+
+      ## Usage
+
+      Include `[search]` or `[web]` tag in your message:
+
+      ```
+      User: [search] What are the latest developments in quantum computing?
+      ```
+
+      CCR-Rust will:
+      1. Detect the search tag
+      2. Strip the tag from the message
+      3. Route to the configured search provider
+
+      ## Supported Providers
+
+      - Perplexity (sonar models)
+      - OpenRouter models with search capability
+      - Any provider that returns search-grounded responses
+    verify_command: test -f contrib/ccr-rust/docs/websearch.md
+
+  # ==========================================================================
+  # Phase 8: Release Preparation (P3)
+  # ==========================================================================
+
+  - name: ccr-cargo-metadata
+    priority: P3
+    prompt: |
+      Update `contrib/ccr-rust/Cargo.toml` with release metadata:
+
+      ```toml
+      [package]
+      name = "ccr-rust"
+      version = "1.0.0"
+      edition = "2021"
+      authors = ["RESMP-DEV"]
+      description = "High-performance Claude Code Router in Rust"
+      license = "MIT"
+      repository = "https://github.com/RESMP-DEV/ccr-rust"
+      documentation = "https://github.com/RESMP-DEV/ccr-rust/tree/main/docs"
+      keywords = ["llm", "proxy", "anthropic", "openai", "router"]
+      categories = ["network-programming", "web-programming"]
+      readme = "README.md"
+
+      [package.metadata.release]
+      sign-commit = true
+      sign-tag = true
+
+      [badges]
+      github = { repository = "RESMP-DEV/ccr-rust", workflow = "CI" }
+      ```
+    verify_command: grep -q 'version = "1.0.0"' contrib/ccr-rust/Cargo.toml
+
+  - name: ccr-github-actions-ci
+    priority: P3
+    prompt: |
+      Create `contrib/ccr-rust/.github/workflows/ci.yml`:
+
+      ```yaml
+      name: CI
+
+      on:
+        push:
+          branches: [main]
+        pull_request:
+          branches: [main]
+
+      jobs:
+        test:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+            - name: Run tests
+              run: cargo test --all-features
+            - name: Run clippy
+              run: cargo clippy -- -D warnings
+            - name: Check formatting
+              run: cargo fmt --check
+
+        build:
+          strategy:
+            matrix:
+              os: [ubuntu-latest, macos-latest]
+          runs-on: ${{ matrix.os }}
+          steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+            - name: Build release
+              run: cargo build --release
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                name: ccr-rust-${{ matrix.os }}
+                path: target/release/ccr-rust
+      ```
+    verify_command: test -f contrib/ccr-rust/.github/workflows/ci.yml
+
+  - name: ccr-github-actions-release
+    priority: P3
+    dependencies: [ccr-github-actions-ci]
+    prompt: |
+      Create `contrib/ccr-rust/.github/workflows/release.yml`:
+
+      ```yaml
+      name: Release
+
+      on:
+        push:
+          tags:
+            - 'v*'
+
+      jobs:
+        release:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            
+            - name: Build Linux
+              run: cargo build --release
+            
+            - name: Build Docker
+              run: docker build -t ghcr.io/resmp-dev/ccr-rust:${{ github.ref_name }} .
+            
+            - name: Push Docker
+              run: |
+                echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+                docker push ghcr.io/resmp-dev/ccr-rust:${{ github.ref_name }}
+                docker tag ghcr.io/resmp-dev/ccr-rust:${{ github.ref_name }} ghcr.io/resmp-dev/ccr-rust:latest
+                docker push ghcr.io/resmp-dev/ccr-rust:latest
+            
+            - name: Create Release
+              uses: softprops/action-gh-release@v1
+              with:
+                files: target/release/ccr-rust
+                generate_release_notes: true
+      ```
+    verify_command: test -f contrib/ccr-rust/.github/workflows/release.yml
+
+  - name: ccr-readme-final-update
+    priority: P3
+    prompt: |
+      Update `contrib/ccr-rust/README.md` roadmap section:
+
+      Replace the Roadmap section with:
+
+      ```markdown
+      ## What's Implemented
+
+      ### ✅ Core Features (v0.1.0)
+      [existing list]
+
+      ### ✅ Format Parity (v0.2.0)
+      [existing list]
+
+      ### ✅ Production Hardening (v0.3.0)
+      - [x] Graceful shutdown with stream draining
+      - [x] Request cancellation on client disconnect
+      - [x] Rate limit awareness with exponential backoff
+      - [x] Think-tag stripping for reasoning models
+
+      ### ✅ Full Feature Set (v1.0.0)
+      - [x] CLI with subcommands (start, status, validate, version)
+      - [x] Preset namespaces (`/preset/name/v1/messages`)
+      - [x] Web search integration via `[search]` tag
+      - [x] Docker and Kubernetes deployment
+      - [x] Systemd and launchd service files
+      - [x] Comprehensive documentation
+
+      ---
+
+      ## Installation
+
+      ### From Source
+      ```bash
+      cargo install --path .
+      ccr-rust start
+      ```
+
+      ### Docker
+      ```bash
+      docker run -v ./config.json:/etc/ccr/config.json ghcr.io/resmp-dev/ccr-rust:latest
+      ```
+
+      ### Systemd (Linux)
+      ```bash
+      sudo cp deploy/ccr-rust.service /etc/systemd/system/
+      sudo systemctl enable --now ccr-rust
+      ```
+      ```
+    verify_command: grep -q "Full Feature Set (v1.0.0)" contrib/ccr-rust/README.md

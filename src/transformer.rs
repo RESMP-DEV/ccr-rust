@@ -115,7 +115,10 @@ impl Transformer for DeepSeekTransformer {
                                 // Generate a deterministic ID if missing
                                 block_obj.insert(
                                     "id".to_string(),
-                                    Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                                    Value::String(format!(
+                                        "toolu_{}",
+                                        uuid_nopanic::timestamp_ms()
+                                    )),
                                 );
                             }
                         }
@@ -143,8 +146,10 @@ impl Transformer for OpenRouterTransformer {
 ///
 /// Converts Anthropic API format to OpenAI API format.
 /// Handles:
+/// - Message content blocks (array → string or keep array for multimodal)
 /// - Tool definitions (input_schema → parameters)
 /// - Tool choice (type conversion)
+/// - Remove Anthropic-specific fields (metadata, stop_sequences)
 #[derive(Debug, Clone)]
 pub struct AnthropicToOpenaiTransformer;
 
@@ -154,6 +159,127 @@ impl Transformer for AnthropicToOpenaiTransformer {
     }
 
     fn transform_request(&self, mut request: Value) -> Result<Value> {
+        // Extract and handle the system field (Anthropic-specific)
+        // Anthropic: system field at top level
+        // OpenAI: system message prepended to messages array
+        if let Some(request_obj) = request.as_object_mut() {
+            if let Some(system) = request_obj.remove("system") {
+                // Convert system prompt to string (Anthropic allows string or array of blocks)
+                let system_content: String = if let Some(s) = system.as_str() {
+                    s.to_string()
+                } else if let Some(blocks) = system.as_array() {
+                    // Handle array of content blocks
+                    let text_blocks: Vec<&str> = blocks
+                        .iter()
+                        .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+                        .collect();
+                    text_blocks.join("\n\n")
+                } else {
+                    // Unknown format, convert to string
+                    system.to_string()
+                };
+
+                // Prepend system message to messages array
+                if let Some(messages) = request_obj.get_mut("messages") {
+                    if let Some(messages_array) = messages.as_array_mut() {
+                        let system_message = serde_json::json!({
+                            "role": "system",
+                            "content": system_content
+                        });
+                        messages_array.insert(0, system_message);
+                    }
+                } else {
+                    // No messages array yet, create one with just the system message
+                    let messages = serde_json::json!([{
+                        "role": "system",
+                        "content": system_content
+                    }]);
+                    request_obj.insert("messages".to_string(), messages);
+                }
+            }
+        }
+
+        // Transform messages from Anthropic content blocks to OpenAI format
+        if let Some(messages) = request.get_mut("messages") {
+            if let Some(messages_array) = messages.as_array_mut() {
+                for message in messages_array {
+                    if let Some(message_obj) = message.as_object_mut() {
+                        if let Some(content) = message_obj.get_mut("content") {
+                            // Anthropic: content can be a string or an array of content blocks
+                            // OpenAI: content can be a string or an array (for multimodal)
+
+                            // If content is a string, leave it as is (both formats support strings)
+                            if content.is_string() {
+                                continue;
+                            }
+
+                            // If content is an array, check if we need to convert it
+                            if let Some(content_array) = content.as_array_mut() {
+                                // Check if all blocks are text blocks with no special handling
+                                let all_simple_text = content_array.iter().all(|block| {
+                                    matches!(
+                                        block.get("type").and_then(|t| t.as_str()),
+                                        Some("text")
+                                    )
+                                });
+
+                                if all_simple_text {
+                                    // Convert single or multiple text blocks to a simple string
+                                    let combined_text: String = content_array
+                                        .iter()
+                                        .filter_map(|block| {
+                                            block.get("text").and_then(|t| t.as_str())
+                                        })
+                                        .collect::<Vec<&str>>()
+                                        .join("\n\n");
+                                    *content = Value::String(combined_text);
+                                } else {
+                                    // Mixed content (text + image, etc.) - convert to OpenAI format
+                                    // Anthropic: {"type": "image", "source": {"type": "base64", ...}}
+                                    // OpenAI: {"type": "image_url", "image_url": {"url": "..."}}
+                                    for block in content_array.iter_mut() {
+                                        if let Some(block_obj) = block.as_object_mut() {
+                                            if block_obj.get("type")
+                                                == Some(&Value::String("image".to_string()))
+                                            {
+                                                if let Some(source) = block_obj.get("source") {
+                                                    let image_url =
+                                                        if let Some(data) = source.get("data") {
+                                                            // Base64 encoded data
+                                                            let media_type = source
+                                                                .get("media_type")
+                                                                .and_then(|m| m.as_str())
+                                                                .unwrap_or("image/jpeg");
+                                                            format!(
+                                                                "data:{};base64,{}",
+                                                                media_type,
+                                                                data.as_str().unwrap_or("")
+                                                            )
+                                                        } else {
+                                                            // URL-based source
+                                                            source
+                                                                .get("url")
+                                                                .and_then(|u| u.as_str())
+                                                                .unwrap_or("")
+                                                                .to_string()
+                                                        };
+
+                                                    *block = serde_json::json!({
+                                                        "type": "image_url",
+                                                        "image_url": {"url": image_url}
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Transform tools from Anthropic to OpenAI format
         if let Some(tools) = request.get_mut("tools") {
             if let Some(tools_array) = tools.as_array_mut() {
@@ -186,7 +312,9 @@ impl Transformer for AnthropicToOpenaiTransformer {
             let new_tool_choice = match tool_choice {
                 // Anthropic: {"type": "tool", "name": "..."}
                 // OpenAI: {"type": "function", "function": {"name": "..."}}
-                Value::Object(map) if map.get("type") == Some(&Value::String("tool".to_string())) => {
+                Value::Object(map)
+                    if map.get("type") == Some(&Value::String("tool".to_string())) =>
+                {
                     if let Some(name) = map.get("name").cloned() {
                         Some(serde_json::json!({
                             "type": "function",
@@ -201,7 +329,9 @@ impl Transformer for AnthropicToOpenaiTransformer {
                 // "auto" stays the same
                 Value::String(s) if s == "auto" => None,
                 // Already in OpenAI format, leave as is
-                Value::Object(map) if map.get("type") == Some(&Value::String("function".to_string())) => {
+                Value::Object(map)
+                    if map.get("type") == Some(&Value::String("function".to_string())) =>
+                {
                     None
                 }
                 _ => None,
@@ -209,6 +339,21 @@ impl Transformer for AnthropicToOpenaiTransformer {
 
             if let Some(tc) = new_tool_choice {
                 *tool_choice = tc;
+            }
+        }
+
+        // max_tokens is required in Anthropic but optional in OpenAI - keep it as-is
+
+        // Remove Anthropic-specific fields
+        if let Some(request_obj) = request.as_object_mut() {
+            // Remove metadata field (Anthropic-specific)
+            request_obj.remove("metadata");
+
+            // Convert stop_sequences to stop (if present)
+            if let Some(stop_sequences) = request_obj.remove("stop_sequences") {
+                // Anthropic: stop_sequences: ["string", ...]
+                // OpenAI: stop: "string" or stop: ["string", ...]
+                request_obj.insert("stop".to_string(), stop_sequences);
             }
         }
 
@@ -226,7 +371,10 @@ impl Transformer for AnthropicToOpenaiTransformer {
                             if !block_obj.contains_key("id") {
                                 block_obj.insert(
                                     "id".to_string(),
-                                    Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                                    Value::String(format!(
+                                        "toolu_{}",
+                                        uuid_nopanic::timestamp_ms()
+                                    )),
                                 );
                             }
                         }
@@ -279,7 +427,10 @@ impl Transformer for ToolUseTransformer {
                             if !block_obj.contains_key("id") {
                                 block_obj.insert(
                                     "id".to_string(),
-                                    Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                                    Value::String(format!(
+                                        "toolu_{}",
+                                        uuid_nopanic::timestamp_ms()
+                                    )),
                                 );
                             }
                         }
@@ -341,15 +492,18 @@ impl Transformer for ReasoningTransformer {
 
     fn transform_response(&self, mut response: Value) -> Result<Value> {
         // Extract thinking field before mutable borrow of content
-        let thinking_text = response.get("thinking").and_then(|t| t.as_str()).map(String::from);
+        let thinking_text = response
+            .get("thinking")
+            .and_then(|t| t.as_str())
+            .map(String::from);
 
         // Ensure reasoning content is properly formatted in content blocks
         if let Some(content) = response.get_mut("content") {
             if let Some(content_array) = content.as_array_mut() {
                 // Check if there's a thinking block
-                let has_thinking = content_array.iter().any(|block| {
-                    block.get("type") == Some(&Value::String("thinking".to_string()))
-                });
+                let has_thinking = content_array
+                    .iter()
+                    .any(|block| block.get("type") == Some(&Value::String("thinking".to_string())));
 
                 // Some providers return reasoning in a different format
                 if !has_thinking {
@@ -390,8 +544,14 @@ impl Transformer for EnhanceToolTransformer {
                             // Add cache control if missing
                             if !block_obj.contains_key("cache_control") {
                                 let mut cache_control = serde_json::Map::new();
-                                cache_control.insert("type".to_string(), Value::String("ephemeral".to_string()));
-                                block_obj.insert("cache_control".to_string(), Value::Object(cache_control));
+                                cache_control.insert(
+                                    "type".to_string(),
+                                    Value::String("ephemeral".to_string()),
+                                );
+                                block_obj.insert(
+                                    "cache_control".to_string(),
+                                    Value::Object(cache_control),
+                                );
                             }
                         }
                     }
@@ -489,7 +649,10 @@ impl TransformerRegistry {
 
         // Register default transformers
         registry.register("anthropic", Arc::new(AnthropicTransformer));
-        registry.register("anthropic-to-openai", Arc::new(AnthropicToOpenaiTransformer));
+        registry.register(
+            "anthropic-to-openai",
+            Arc::new(AnthropicToOpenaiTransformer),
+        );
         registry.register("deepseek", Arc::new(DeepSeekTransformer));
         registry.register("openrouter", Arc::new(OpenRouterTransformer));
         registry.register("tooluse", Arc::new(ToolUseTransformer));
@@ -513,11 +676,7 @@ impl TransformerRegistry {
     /// Create a transformer with options.
     ///
     /// Some transformers accept configuration via a JSON options object.
-    pub fn create_with_options(
-        &self,
-        name: &str,
-        options: &Value,
-    ) -> Option<Arc<dyn Transformer>> {
+    pub fn create_with_options(&self, name: &str, options: &Value) -> Option<Arc<dyn Transformer>> {
         match name {
             "maxtoken" => {
                 if let Some(max_tokens) = options.get("max_tokens").and_then(|v| v.as_u64()) {
@@ -553,9 +712,7 @@ impl TransformerRegistry {
     pub fn validate_entries(&self, entries: &[TransformerEntry]) -> Vec<String> {
         let mut errors = Vec::new();
         for entry in entries {
-            if self.get(entry.name()).is_none()
-                && !matches!(entry.name(), "maxtoken")
-            {
+            if self.get(entry.name()).is_none() && !matches!(entry.name(), "maxtoken") {
                 errors.push(format!("Unknown transformer: {}", entry.name()));
             }
         }
@@ -744,5 +901,87 @@ mod tests {
         let chain = TransformerChain::new();
         assert!(chain.is_passthrough(&test_request()));
         assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn anthropic_to_openai_converts_string_system() {
+        let transformer = AnthropicToOpenaiTransformer;
+        let mut request = serde_json::json!({
+            "model": "claude-3",
+            "system": "You are a helpful assistant.",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1000
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+
+        // System field should be removed
+        assert!(result.get("system").is_none());
+
+        // System message should be prepended to messages
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are a helpful assistant.");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn anthropic_to_openai_converts_array_system() {
+        let transformer = AnthropicToOpenaiTransformer;
+        let mut request = serde_json::json!({
+            "model": "claude-3",
+            "system": [
+                {"type": "text", "text": "First instruction"},
+                {"type": "text", "text": "Second instruction"}
+            ],
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1000
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+
+        // System field should be removed
+        assert!(result.get("system").is_none());
+
+        // System message should be prepended to messages with combined text
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(
+            messages[0]["content"],
+            "First instruction\n\nSecond instruction"
+        );
+    }
+
+    #[test]
+    fn anthropic_to_openai_system_creates_messages_if_missing() {
+        let transformer = AnthropicToOpenaiTransformer;
+        let mut request = serde_json::json!({
+            "model": "claude-3",
+            "system": "You are helpful",
+            "max_tokens": 1000
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+
+        // System message should create messages array
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are helpful");
+    }
+
+    #[test]
+    fn anthropic_to_openai_no_system_field_passthrough() {
+        let transformer = AnthropicToOpenaiTransformer;
+        let request = test_request();
+
+        let result = transformer.transform_request(request).unwrap();
+
+        // Should have original messages without system prefix
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
     }
 }

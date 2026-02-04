@@ -5,13 +5,15 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, trace, warn};
 
 use crate::config::Config;
 use crate::metrics::{
-    record_failure, record_pre_request_tokens, record_request,
-    record_request_duration, record_usage, sync_ewma_gauge, verify_token_usage,
+    record_failure, record_pre_request_tokens, record_request, record_request_duration,
+    record_usage, sync_ewma_gauge, verify_token_usage,
 };
 use crate::routing::{AttemptTimer, EwmaTracker};
 use crate::sse::StreamVerifyCtx;
@@ -25,6 +27,7 @@ pub struct AppState {
     pub config: Config,
     pub ewma_tracker: Arc<EwmaTracker>,
     pub transformer_registry: Arc<TransformerRegistry>,
+    pub active_streams: Arc<AtomicUsize>,
 }
 
 // ============================================================================
@@ -64,8 +67,6 @@ pub struct ErrorResponse {
     pub tier: String,
     pub attempts: usize,
 }
-
-
 
 // ============================================================================
 // OpenAI Format Types
@@ -170,7 +171,7 @@ struct OpenAIDelta {
 // ============================================================================
 
 /// Anthropic non-streaming response format.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct AnthropicResponse {
     id: String,
     #[serde(rename = "type")]
@@ -182,7 +183,7 @@ struct AnthropicResponse {
     stop_reason: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum AnthropicContentBlock {
     #[serde(rename = "text")]
@@ -191,7 +192,7 @@ enum AnthropicContentBlock {
     Thinking { thinking: String, signature: String },
 }
 
-#[derive(Debug, Serialize, Default, Clone)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 struct AnthropicUsage {
     input_tokens: u64,
     output_tokens: u64,
@@ -311,7 +312,11 @@ fn translate_request_anthropic_to_openai(
         model: model.to_string(),
         messages,
         // Use max_completion_tokens for reasoning models to allow for reasoning
-        max_tokens: if is_reasoning_model { None } else { anthropic_req.max_tokens },
+        max_tokens: if is_reasoning_model {
+            None
+        } else {
+            anthropic_req.max_tokens
+        },
         max_completion_tokens: if is_reasoning_model {
             anthropic_req.max_tokens
         } else {
@@ -362,10 +367,13 @@ fn translate_response_openai_to_anthropic(
         vec![]
     };
 
-    let usage = openai_resp.usage.map(|u| AnthropicUsage {
-        input_tokens: u.prompt_tokens,
-        output_tokens: u.completion_tokens,
-    }).unwrap_or_default();
+    let usage = openai_resp
+        .usage
+        .map(|u| AnthropicUsage {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+        })
+        .unwrap_or_default();
 
     AnthropicResponse {
         id: openai_resp.id,
@@ -548,10 +556,7 @@ pub async fn handle_messages(
         .iter()
         .filter_map(|m| serde_json::to_value(m).ok())
         .collect();
-    let tool_values: Option<Vec<serde_json::Value>> = request
-        .tools
-        .as_ref()
-        .map(|t| t.clone());
+    let tool_values: Option<Vec<serde_json::Value>> = request.tools.as_ref().map(|t| t.clone());
 
     // Try each tier with retries
     for (tier, tier_name) in ordered.iter() {
@@ -567,7 +572,13 @@ pub async fn handle_messages(
         let max_retries = retry_config.max_retries;
 
         for attempt in 0..max_retries {
-            info!("Trying {} ({}), attempt {}/{}", tier, tier_name, attempt + 1, max_retries);
+            info!(
+                "Trying {} ({}), attempt {}/{}",
+                tier,
+                tier_name,
+                attempt + 1,
+                max_retries
+            );
 
             // Override model with current tier
             request.model = tier.clone();
@@ -575,7 +586,17 @@ pub async fn handle_messages(
             // Start per-attempt latency timer for EWMA tracking
             let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
 
-            match try_request(config, &request, tier, tier_name, local_estimate).await {
+            match try_request(
+                config,
+                &state.transformer_registry,
+                &request,
+                tier,
+                tier_name,
+                local_estimate,
+                &state.active_streams,
+            )
+            .await
+            {
                 Ok(response) => {
                     let attempt_duration = timer.finish_success();
                     let total_duration = start.elapsed().as_secs_f64();
@@ -602,7 +623,9 @@ pub async fn handle_messages(
                             tier = tier_name,
                             attempt = attempt + 1,
                             backoff_ms = backoff.as_millis(),
-                            ewma = ewma.map(|e| format!("{:.3}s", e)).unwrap_or_else(|| "N/A".to_string()),
+                            ewma = ewma
+                                .map(|e| format!("{:.3}s", e))
+                                .unwrap_or_else(|| "N/A".to_string()),
                             "sleeping before retry"
                         );
                         tokio::time::sleep(backoff).await;
@@ -626,16 +649,24 @@ pub async fn handle_messages(
 
 async fn try_request(
     config: &Config,
+    registry: &TransformerRegistry,
     request: &AnthropicRequest,
     tier: &str,
     tier_name: &str,
     local_estimate: u64,
+    active_streams: &Arc<AtomicUsize>,
 ) -> anyhow::Result<Response> {
     let provider = config
         .resolve_provider(tier)
         .ok_or_else(|| anyhow::anyhow!("Provider not found for tier: {}", tier))?;
 
-    let url = format!("{}/chat/completions", provider.api_base_url.trim_end_matches('/'));
+    // Build transformer chain from provider config
+    let chain = build_transformer_chain(registry, provider, tier.split(',').nth(1).unwrap_or(tier));
+
+    let url = format!(
+        "{}/chat/completions",
+        provider.api_base_url.trim_end_matches('/')
+    );
 
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -647,8 +678,19 @@ async fn try_request(
     // Extract the actual model name from the tier (format: "provider,model")
     let model_name = tier.split(',').nth(1).unwrap_or(tier);
 
+    // Apply request transformers if chain is not empty
+    let transformed_request = if chain.is_empty() {
+        serde_json::to_value(request)?
+    } else {
+        let req_value = serde_json::to_value(request)?;
+        chain.apply_request(req_value)?
+    };
+
+    // Deserialize back to AnthropicRequest for translation
+    let request: AnthropicRequest = serde_json::from_value(transformed_request)?;
+
     // Translate Anthropic request to OpenAI format
-    let openai_request = translate_request_anthropic_to_openai(request, model_name);
+    let openai_request = translate_request_anthropic_to_openai(&request, model_name);
 
     let resp = config
         .http_client()
@@ -671,7 +713,16 @@ async fn try_request(
             tier_name: tier_name.to_string(),
             local_estimate,
         };
-        Ok(stream_response_translated(resp, config.sse_buffer_size(), Some(ctx), model_name).await)
+        Ok(
+            stream_response_translated(
+                resp,
+                config.sse_buffer_size(),
+                Some(ctx),
+                model_name,
+                chain,
+            )
+            .await,
+        )
     } else {
         // For non-streaming, translate the full response
         let body = resp.bytes().await?;
@@ -692,12 +743,24 @@ async fn try_request(
 
             // Translate to Anthropic format
             let anthropic_resp = translate_response_openai_to_anthropic(openai_resp, model_name);
-            let response_body = serde_json::to_vec(&anthropic_resp)?;
+
+            // Apply response transformers if chain is not empty
+            let final_resp = if chain.is_empty() {
+                anthropic_resp
+            } else {
+                let resp_value = serde_json::to_value(&anthropic_resp)?;
+                let transformed = chain.apply_response(resp_value)?;
+                serde_json::from_value::<AnthropicResponse>(transformed).unwrap_or(anthropic_resp)
+            };
+
+            let response_body = serde_json::to_vec(&final_resp)?;
 
             let mut response = (StatusCode::OK, response_body).into_response();
             response.headers_mut().insert(
                 "x-ccr-tier",
-                tier_name.parse().unwrap_or(axum::http::HeaderValue::from_static("unknown")),
+                tier_name
+                    .parse()
+                    .unwrap_or(axum::http::HeaderValue::from_static("unknown")),
             );
             return Ok(response);
         }
@@ -706,7 +769,9 @@ async fn try_request(
         let mut response = (StatusCode::OK, body).into_response();
         response.headers_mut().insert(
             "x-ccr-tier",
-            tier_name.parse().unwrap_or(axum::http::HeaderValue::from_static("unknown")),
+            tier_name
+                .parse()
+                .unwrap_or(axum::http::HeaderValue::from_static("unknown")),
         );
         Ok(response)
     }
@@ -721,9 +786,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::metrics::{
-    increment_active_streams, record_stream_backpressure,
-};
+use crate::metrics::{increment_active_streams, record_stream_backpressure};
 
 /// Stream response with OpenAI -> Anthropic translation.
 pub async fn stream_response_translated(
@@ -731,6 +794,7 @@ pub async fn stream_response_translated(
     buffer_size: usize,
     verify_ctx: Option<StreamVerifyCtx>,
     model_name: &str,
+    chain: TransformerChain,
 ) -> Response {
     increment_active_streams(1);
 
@@ -746,13 +810,20 @@ pub async fn stream_response_translated(
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
 
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
+        loop {
+            tokio::select! {
+                chunk = stream.next() => {
+                    let Some(chunk) = chunk else {
+                        break;
+                    };
+                    match chunk {
+                        Ok(bytes) => {
                     // Parse SSE data lines
                     if let Ok(text) = std::str::from_utf8(&bytes) {
                         for line in text.lines() {
-                            let data = line.strip_prefix("data:").or_else(|| line.strip_prefix("data: "));
+                            let data = line
+                                .strip_prefix("data:")
+                                .or_else(|| line.strip_prefix("data: "));
                             if let Some(json_str) = data {
                                 let json_str = json_str.trim();
                                 if json_str == "[DONE]" || json_str.is_empty() {
@@ -760,7 +831,9 @@ pub async fn stream_response_translated(
                                 }
 
                                 // Try to parse as OpenAI stream chunk
-                                if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(json_str) {
+                                if let Ok(chunk) =
+                                    serde_json::from_str::<OpenAIStreamChunk>(json_str)
+                                {
                                     // Accumulate usage info
                                     if let Some(ref usage) = chunk.usage {
                                         input_tokens = usage.prompt_tokens;
@@ -768,13 +841,18 @@ pub async fn stream_response_translated(
                                     }
 
                                     // Translate to Anthropic events
-                                    let events = translate_stream_chunk_to_anthropic(&chunk, is_first);
+                                    let events =
+                                        translate_stream_chunk_to_anthropic(&chunk, is_first);
                                     is_first = false;
 
                                     for event in events {
-                                        let event_json = serde_json::to_string(&event).unwrap_or_default();
-                                        let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
-                                        
+                                        let event_json =
+                                            serde_json::to_string(&event).unwrap_or_default();
+                                        let sse_data = format!(
+                                            "event: {}\ndata: {}\n\n",
+                                            event.event_type, event_json
+                                        );
+
                                         if tx.capacity() == 0 {
                                             record_stream_backpressure();
                                         }
@@ -788,7 +866,8 @@ pub async fn stream_response_translated(
                                         if let Some(ref content) = choice.delta.content {
                                             accumulated_content.push_str(content);
                                         }
-                                        if let Some(ref reasoning) = choice.delta.reasoning_content {
+                                        if let Some(ref reasoning) = choice.delta.reasoning_content
+                                        {
                                             accumulated_reasoning.push_str(reasoning);
                                             _has_reasoning = true;
                                         }
@@ -827,12 +906,19 @@ pub async fn stream_response_translated(
                         .await;
                     break;
                 }
+                _ = tx.closed() => {
+                    tracing::debug!("Client disconnected, aborting upstream");
+                    break;
+                }
             }
         }
 
         // Send final stop events
         let usage = if input_tokens > 0 || output_tokens > 0 {
-            Some(AnthropicUsage { input_tokens, output_tokens })
+            Some(AnthropicUsage {
+                input_tokens,
+                output_tokens,
+            })
         } else {
             // Estimate from accumulated content if no usage reported
             let estimated_output = (accumulated_content.len() + accumulated_reasoning.len()) / 4;
@@ -841,6 +927,40 @@ pub async fn stream_response_translated(
                 output_tokens: estimated_output as u64,
             })
         };
+
+        // Apply response transformers to final accumulated content if chain is not empty
+        // For streaming, we apply transforms to the final accumulated message structure
+        if !chain.is_empty() {
+            // Build a minimal Anthropic-like response for transformation
+            let mut content_blocks = Vec::new();
+            if !accumulated_reasoning.is_empty() {
+                content_blocks.push(serde_json::json!({
+                    "type": "thinking",
+                    "thinking": accumulated_reasoning,
+                    "signature": ""
+                }));
+            }
+            if !accumulated_content.is_empty() {
+                content_blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": accumulated_content
+                }));
+            }
+
+            let resp_value = serde_json::json!({
+                "content": content_blocks,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens
+                }
+            });
+
+            if let Ok(transformed) = chain.apply_response(resp_value) {
+                // Extract transformed values (for potential future use)
+                trace!(transformed_response = %serde_json::to_string(&transformed).unwrap_or_default(),
+                       "streaming response transformed");
+            }
+        }
 
         let stop_events = create_stream_stop_events(usage.clone());
         for event in stop_events {
@@ -904,12 +1024,10 @@ mod tests {
     fn test_translate_request_with_system() {
         let request = AnthropicRequest {
             model: "claude-3".to_string(),
-            messages: vec![
-                Message {
-                    role: "human".to_string(),
-                    content: serde_json::Value::String("Hello".to_string()),
-                },
-            ],
+            messages: vec![Message {
+                role: "human".to_string(),
+                content: serde_json::Value::String("Hello".to_string()),
+            }],
             system: Some(serde_json::Value::String("You are Claude.".to_string())),
             max_tokens: Some(1000),
             temperature: Some(0.7),
@@ -918,10 +1036,13 @@ mod tests {
         };
 
         let openai_req = translate_request_anthropic_to_openai(&request, "gpt-4");
-        
+
         assert_eq!(openai_req.messages.len(), 2);
         assert_eq!(openai_req.messages[0].role, "system");
-        assert_eq!(openai_req.messages[0].content, Some("You are Claude.".to_string()));
+        assert_eq!(
+            openai_req.messages[0].content,
+            Some("You are Claude.".to_string())
+        );
         assert_eq!(openai_req.messages[1].role, "user");
         assert_eq!(openai_req.messages[1].content, Some("Hello".to_string()));
     }
@@ -930,12 +1051,10 @@ mod tests {
     fn test_translate_request_reasoning_model() {
         let request = AnthropicRequest {
             model: "deepseek-reasoner".to_string(),
-            messages: vec![
-                Message {
-                    role: "user".to_string(),
-                    content: serde_json::Value::String("Solve this.".to_string()),
-                },
-            ],
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: serde_json::Value::String("Solve this.".to_string()),
+            }],
             system: None,
             max_tokens: Some(4000),
             temperature: None,
@@ -944,7 +1063,7 @@ mod tests {
         };
 
         let openai_req = translate_request_anthropic_to_openai(&request, "deepseek-reasoner");
-        
+
         // Should use max_completion_tokens for reasoning models
         assert!(openai_req.max_tokens.is_none());
         assert_eq!(openai_req.max_completion_tokens, Some(4000));
@@ -974,11 +1093,18 @@ mod tests {
             }),
         };
 
-        let anthropic_resp = translate_response_openai_to_anthropic(openai_resp, "deepseek-reasoner");
-        
+        let anthropic_resp =
+            translate_response_openai_to_anthropic(openai_resp, "deepseek-reasoner");
+
         assert_eq!(anthropic_resp.content.len(), 2);
-        assert!(matches!(anthropic_resp.content[0], AnthropicContentBlock::Thinking { .. }));
-        assert!(matches!(anthropic_resp.content[1], AnthropicContentBlock::Text { .. }));
+        assert!(matches!(
+            anthropic_resp.content[0],
+            AnthropicContentBlock::Thinking { .. }
+        ));
+        assert!(matches!(
+            anthropic_resp.content[1],
+            AnthropicContentBlock::Text { .. }
+        ));
         assert_eq!(anthropic_resp.usage.input_tokens, 10);
         assert_eq!(anthropic_resp.usage.output_tokens, 20);
     }
@@ -1003,7 +1129,7 @@ mod tests {
         };
 
         let events = translate_stream_chunk_to_anthropic(&chunk, true);
-        
+
         assert!(!events.is_empty());
         assert_eq!(events[0].event_type, "message_start");
         assert_eq!(events[1].event_type, "content_block_start");
@@ -1029,7 +1155,7 @@ mod tests {
         };
 
         let events = translate_stream_chunk_to_anthropic(&chunk, false);
-        
+
         // Should have a thinking_delta event
         assert!(!events.is_empty());
         let delta = events[0].delta.as_ref().unwrap();

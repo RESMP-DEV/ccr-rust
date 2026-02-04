@@ -195,7 +195,9 @@ pub fn record_request(tier: &str) {
 /// Record request duration in the Prometheus histogram. EWMA tracking is handled
 /// by `routing::EwmaTracker` directly; this only updates the histogram.
 pub fn record_request_duration(tier: &str, duration: f64) {
-    REQUEST_DURATION.with_label_values(&[tier]).observe(duration);
+    REQUEST_DURATION
+        .with_label_values(&[tier])
+        .observe(duration);
 }
 
 /// Sync the Prometheus EWMA gauge from the routing tracker. Called after the
@@ -325,20 +327,34 @@ pub fn record_pre_request_tokens(
 }
 
 /// Record token usage from a backend response.
-pub fn record_usage(tier: &str, input_tokens: u64, output_tokens: u64, cache_read: u64, cache_creation: u64) {
+pub fn record_usage(
+    tier: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read: u64,
+    cache_creation: u64,
+) {
     if input_tokens > 0 {
-        INPUT_TOKENS_TOTAL.with_label_values(&[tier]).inc_by(input_tokens as f64);
+        INPUT_TOKENS_TOTAL
+            .with_label_values(&[tier])
+            .inc_by(input_tokens as f64);
         TOTAL_INPUT_TOKENS.fetch_add(input_tokens, Ordering::Relaxed);
     }
     if output_tokens > 0 {
-        OUTPUT_TOKENS_TOTAL.with_label_values(&[tier]).inc_by(output_tokens as f64);
+        OUTPUT_TOKENS_TOTAL
+            .with_label_values(&[tier])
+            .inc_by(output_tokens as f64);
         TOTAL_OUTPUT_TOKENS.fetch_add(output_tokens, Ordering::Relaxed);
     }
     if cache_read > 0 {
-        CACHE_READ_TOKENS_TOTAL.with_label_values(&[tier]).inc_by(cache_read as f64);
+        CACHE_READ_TOKENS_TOTAL
+            .with_label_values(&[tier])
+            .inc_by(cache_read as f64);
     }
     if cache_creation > 0 {
-        CACHE_CREATION_TOKENS_TOTAL.with_label_values(&[tier]).inc_by(cache_creation as f64);
+        CACHE_CREATION_TOKENS_TOTAL
+            .with_label_values(&[tier])
+            .inc_by(cache_creation as f64);
     }
 }
 
@@ -361,9 +377,7 @@ pub fn verify_token_usage(tier: &str, local_estimate: u64, upstream_input: u64) 
     TOKEN_DRIFT_ABS
         .with_label_values(&[tier])
         .set(drift_abs as f64);
-    TOKEN_DRIFT_PCT
-        .with_label_values(&[tier])
-        .set(drift_pct);
+    TOKEN_DRIFT_PCT.with_label_values(&[tier]).set(drift_pct);
 
     // Classify severity and fire alert counters
     let abs_pct = drift_pct.abs();
@@ -574,7 +588,8 @@ pub async fn usage_handler() -> impl IntoResponse {
     }
 
     // Collect cache read tokens
-    let cache_read_metrics: Vec<prometheus::proto::MetricFamily> = CACHE_READ_TOKENS_TOTAL.collect();
+    let cache_read_metrics: Vec<prometheus::proto::MetricFamily> =
+        CACHE_READ_TOKENS_TOTAL.collect();
     for mf in &cache_read_metrics {
         for m in mf.get_metric() {
             for label in m.get_label() {
@@ -589,7 +604,8 @@ pub async fn usage_handler() -> impl IntoResponse {
     }
 
     // Collect cache creation tokens
-    let cache_create_metrics: Vec<prometheus::proto::MetricFamily> = CACHE_CREATION_TOKENS_TOTAL.collect();
+    let cache_create_metrics: Vec<prometheus::proto::MetricFamily> =
+        CACHE_CREATION_TOKENS_TOTAL.collect();
     for mf in &cache_create_metrics {
         for m in mf.get_metric() {
             for label in m.get_label() {
@@ -643,10 +659,7 @@ pub async fn metrics_handler() -> impl IntoResponse {
     let mut buffer = vec![];
     encoder.encode(&metric_families, &mut buffer).unwrap();
 
-    (
-        [("content-type", "text/plain; version=0.0.4")],
-        buffer,
-    )
+    ([("content-type", "text/plain; version=0.0.4")], buffer)
 }
 
 /// Per-tier latency entry for the /v1/latencies JSON endpoint.

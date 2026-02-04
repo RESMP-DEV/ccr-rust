@@ -44,6 +44,7 @@ impl TierState {
 /// a penalty multiplier to the current EWMA rather than recording wall-clock
 /// time, since failure latency (timeouts, connection refused) doesn't correlate
 /// with backend speed.
+#[derive(Debug)]
 pub struct EwmaTracker {
     state: RwLock<HashMap<String, TierState>>,
     alpha: f64,
@@ -74,9 +75,7 @@ impl EwmaTracker {
     /// Record a successful request's latency for a tier.
     pub fn record_success(&self, tier: &str, duration_secs: f64) {
         let mut state = self.state.write();
-        let entry = state
-            .entry(tier.to_string())
-            .or_insert_with(TierState::new);
+        let entry = state.entry(tier.to_string()).or_insert_with(TierState::new);
 
         if entry.samples == 0 {
             entry.ewma = duration_secs;
@@ -99,9 +98,7 @@ impl EwmaTracker {
     /// that don't reflect backend speed).
     pub fn record_failure(&self, tier: &str) {
         let mut state = self.state.write();
-        let entry = state
-            .entry(tier.to_string())
-            .or_insert_with(TierState::new);
+        let entry = state.entry(tier.to_string()).or_insert_with(TierState::new);
 
         entry.consecutive_failures += 1;
         entry.samples += 1;
@@ -172,11 +169,9 @@ impl EwmaTracker {
         if tracing::enabled!(tracing::Level::DEBUG) {
             let order: Vec<String> = entries
                 .iter()
-                .map(|(_, _, name, ewma)| {
-                    match ewma {
-                        Some(e) => format!("{}({:.3}s)", name, e),
-                        None => format!("{}(?)", name),
-                    }
+                .map(|(_, _, name, ewma)| match ewma {
+                    Some(e) => format!("{}({:.3}s)", name, e),
+                    None => format!("{}(?)", name),
                 })
                 .collect();
             debug!(order = ?order, "tier routing order");
@@ -272,8 +267,16 @@ mod tests {
             tracker.record_success("tier-0", 2.0);
         }
         let (ewma_after, _) = tracker.get_latency("tier-0").unwrap();
-        assert!(ewma_after > 1.5, "EWMA should approach 2.0, got {}", ewma_after);
-        assert!(ewma_after < 2.0, "EWMA should not exceed 2.0, got {}", ewma_after);
+        assert!(
+            ewma_after > 1.5,
+            "EWMA should approach 2.0, got {}",
+            ewma_after
+        );
+        assert!(
+            ewma_after < 2.0,
+            "EWMA should not exceed 2.0, got {}",
+            ewma_after
+        );
     }
 
     #[test]
@@ -319,11 +322,14 @@ mod tests {
     #[test]
     fn test_sort_tiers_by_latency() {
         let tracker = EwmaTracker::with_params(0.3, 1, 2.0); // min_samples=1 for test
-        // tier-0 is slow (5s), tier-1 is fast (0.5s)
+                                                             // tier-0 is slow (5s), tier-1 is fast (0.5s)
         tracker.record_success("tier-0", 5.0);
         tracker.record_success("tier-1", 0.5);
 
-        let tiers = vec!["provider-a,model-a".to_string(), "provider-b,model-b".to_string()];
+        let tiers = vec![
+            "provider-a,model-a".to_string(),
+            "provider-b,model-b".to_string(),
+        ];
         let sorted = tracker.sort_tiers(&tiers);
 
         assert_eq!(sorted[0].1, "tier-1", "faster tier should come first");
@@ -333,7 +339,7 @@ mod tests {
     #[test]
     fn test_unmeasured_tiers_keep_config_order() {
         let tracker = EwmaTracker::new(); // min_samples=3
-        // Only 1 sample for tier-0 (below threshold), none for tier-1
+                                          // Only 1 sample for tier-0 (below threshold), none for tier-1
         tracker.record_success("tier-0", 1.0);
 
         let tiers = vec!["a".to_string(), "b".to_string(), "c".to_string()];

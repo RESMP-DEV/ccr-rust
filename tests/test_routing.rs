@@ -268,7 +268,11 @@ fn get_tier_retry_with_custom_and_fallback() {
         }
     });
 
-    std::fs::write(&config_path, serde_json::to_string_pretty(&config_json).unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&config_json).unwrap(),
+    )
+    .unwrap();
     let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
 
     // tier-0 has custom config
@@ -292,10 +296,7 @@ fn get_tier_retry_with_custom_and_fallback() {
 // ---------------------------------------------------------------------------
 
 /// Helper: build a Config pointing at the given mock server URL.
-fn make_test_config(
-    mock_url: &str,
-    tier_retries: HashMap<String, TierRetryConfig>,
-) -> String {
+fn make_test_config(mock_url: &str, tier_retries: HashMap<String, TierRetryConfig>) -> String {
     let config = json!({
         "Providers": [
             {
@@ -324,9 +325,12 @@ fn make_test_config(
 
 fn build_app(config: ccr_rust::config::Config) -> Router {
     let ewma_tracker = std::sync::Arc::new(ccr_rust::routing::EwmaTracker::new());
+    let transformer_registry =
+        std::sync::Arc::new(ccr_rust::transformer::TransformerRegistry::new());
     let state = ccr_rust::router::AppState {
         config,
         ewma_tracker,
+        transformer_registry,
     };
     Router::new()
         .route("/v1/messages", post(ccr_rust::router::handle_messages))
@@ -369,7 +373,9 @@ async fn successful_request_no_retry() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -415,7 +421,9 @@ async fn retries_on_backend_failure_then_succeeds() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -450,7 +458,9 @@ async fn all_retries_exhausted_returns_503() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -490,7 +500,9 @@ async fn backoff_introduces_measurable_delay() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -689,7 +701,9 @@ async fn adaptive_backoff_applies_configured_delays() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -747,7 +761,9 @@ async fn adaptive_backoff_clamps_to_max() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -842,7 +858,9 @@ async fn adaptive_backoff_per_tier_configuration() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -902,7 +920,9 @@ async fn adaptive_backoff_zero_base_no_delay() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -956,7 +976,9 @@ async fn adaptive_backoff_constant_multiplier() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -1010,7 +1032,9 @@ async fn adaptive_backoff_fractional_multiplier() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -1058,7 +1082,9 @@ async fn adaptive_backoff_fallback_to_default_when_unconfigured() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&test_request_body()).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
                 .unwrap(),
         )
         .await

@@ -6,11 +6,17 @@ use axum::{
 };
 use clap::Parser;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+use tokio::signal::ctrl_c;
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
 mod metrics;
+mod proxy;
 mod router;
 mod routing;
 mod sse;
@@ -26,7 +32,12 @@ use transformer::TransformerRegistry;
 #[command(about = "Claude Code Router in Rust", long_about = None)]
 struct Cli {
     /// Path to CCR config file
-    #[arg(short, long, env = "CCR_CONFIG", default_value = "~/.claude-code-router/config.json")]
+    #[arg(
+        short,
+        long,
+        env = "CCR_CONFIG",
+        default_value = "~/.claude-code-router/config.json"
+    )]
     config: String,
 
     /// Server host
@@ -66,6 +77,7 @@ async fn main() -> Result<()> {
         config,
         ewma_tracker,
         transformer_registry,
+        active_streams: Arc::new(AtomicUsize::new(0)),
     };
 
     let app = Router::new()
@@ -79,21 +91,37 @@ async fn main() -> Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let addr = SocketAddr::from((
-        cli.host.parse::<std::net::IpAddr>()?,
-        cli.port,
-    ));
+    let addr = SocketAddr::from((cli.host.parse::<std::net::IpAddr>()?, cli.port));
     tracing::info!("CCR-Rust listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
 }
 
-async fn latencies_handler(
-    State(state): State<AppState>,
-) -> impl axum::response::IntoResponse {
+async fn shutdown_signal() {
+    let ctrl_c = async { ctrl_c().await.expect("failed to listen for ctrl+c") };
+    #[cfg(unix)]
+    let terminate = async {
+        signal(SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received SIGINT"),
+        _ = terminate => tracing::info!("Received SIGTERM"),
+    }
+    tracing::info!("Received shutdown signal, draining connections...");
+}
+
+async fn latencies_handler(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     axum::Json(metrics::get_latency_entries(&state.ewma_tracker))
 }
 
