@@ -41,10 +41,7 @@ pub type SharedDashboardState = Arc<RwLock<Option<DashboardData>>>;
 ///
 /// Returns a `SharedDashboardState` that holds the latest data fetched from
 /// `http://{host}:{port}/v1/usage`, `/v1/latencies`, and `/v1/token-drift`.
-pub fn spawn_dashboard_fetcher(
-    host: String,
-    port: u16,
-) -> SharedDashboardState {
+pub fn spawn_dashboard_fetcher(host: String, port: u16) -> SharedDashboardState {
     let state: SharedDashboardState = Arc::new(RwLock::new(None));
     let state_clone = Arc::clone(&state);
 
@@ -121,6 +118,8 @@ struct UiState {
     tier_latencies: Vec<TierLatency>,
     last_update: Option<Instant>,
     error: Option<String>,
+    /// Global stats from the server (not local atomics)
+    global_stats: GlobalStats,
 }
 
 /// Session information containing environment stats
@@ -180,19 +179,6 @@ pub struct GlobalStats {
     pub total_output_tokens: u64,
 }
 
-/// Fetch current global stats from the metrics module.
-fn fetch_global_stats() -> GlobalStats {
-    use std::sync::atomic::Ordering;
-
-    GlobalStats {
-        active_streams: crate::metrics::get_active_streams(),
-        total_requests: crate::metrics::TOTAL_REQUESTS.load(Ordering::Relaxed),
-        total_failures: crate::metrics::TOTAL_FAILURES.load(Ordering::Relaxed),
-        total_input_tokens: crate::metrics::TOTAL_INPUT_TOKENS.load(Ordering::Relaxed),
-        total_output_tokens: crate::metrics::TOTAL_OUTPUT_TOKENS.load(Ordering::Relaxed),
-    }
-}
-
 /// Sync UI state from shared dashboard data
 fn sync_ui_state(shared: &SharedDashboardState, ui_state: &mut UiState) {
     match shared.read() {
@@ -203,6 +189,14 @@ fn sync_ui_state(shared: &SharedDashboardState, ui_state: &mut UiState) {
                 ui_state.tier_usages = data.usage.tiers.clone();
                 ui_state.last_update = Some(data.last_updated);
                 ui_state.error = None;
+                // Extract global stats from the fetched UsageSummary
+                ui_state.global_stats = GlobalStats {
+                    active_streams: data.usage.active_streams,
+                    total_requests: data.usage.total_requests,
+                    total_failures: data.usage.total_failures,
+                    total_input_tokens: data.usage.total_input_tokens,
+                    total_output_tokens: data.usage.total_output_tokens,
+                };
             } else {
                 ui_state.error = Some("Waiting for data...".to_string());
             }
@@ -262,8 +256,7 @@ fn run_loop<B: Backend>(
             last_tick = Instant::now();
         }
 
-        let stats = fetch_global_stats();
-        terminal.draw(|f| ui(f, &host, port, &ui_state, &session_info, &stats))?;
+        terminal.draw(|f| ui(f, &host, port, &ui_state, &session_info))?;
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -280,14 +273,7 @@ fn run_loop<B: Backend>(
     }
 }
 
-fn ui(
-    f: &mut ratatui::Frame,
-    host: &str,
-    port: u16,
-    state: &UiState,
-    session_info: &SessionInfo,
-    stats: &GlobalStats,
-) {
+fn ui(f: &mut ratatui::Frame, host: &str, port: u16, state: &UiState, session_info: &SessionInfo) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -297,8 +283,8 @@ fn ui(
         ])
         .split(f.area());
 
-    // Render the header widget with global stats
-    render_header(f, main_chunks[0], host, port, stats);
+    // Render the header widget with global stats from fetched data
+    render_header(f, main_chunks[0], host, port, &state.global_stats);
 
     // Token Drift Monitor section
     let drift_widget = create_token_drift_table(state);
@@ -313,11 +299,7 @@ fn ui(
     // Session Info panel
     let session_lines = session_info.format_lines();
     let session_info_widget = Paragraph::new(session_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Session Info"),
-        )
+        .block(Block::default().borders(Borders::ALL).title("Session Info"))
         .wrap(Wrap { trim: true });
     f.render_widget(session_info_widget, body_chunks[0]);
 
@@ -408,7 +390,10 @@ fn render_header(f: &mut ratatui::Frame, area: Rect, host: &str, port: u16, stat
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("{:.1}k", input_k), Style::default().fg(Color::White)),
+        Span::styled(
+            format!("{:.1}k", input_k),
+            Style::default().fg(Color::White),
+        ),
         Span::raw(" / "),
         Span::styled(
             "Out: ",
@@ -416,19 +401,42 @@ fn render_header(f: &mut ratatui::Frame, area: Rect, host: &str, port: u16, stat
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("{:.1}k", output_k), Style::default().fg(Color::White)),
+        Span::styled(
+            format!("{:.1}k", output_k),
+            Style::default().fg(Color::White),
+        ),
     ]))
-    .block(Block::default().borders(Borders::ALL).title("Token Throughput"))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Token Throughput"),
+    )
     .alignment(Alignment::Right);
     f.render_widget(tokens_paragraph, stats_chunks[2]);
 }
 
 fn create_token_drift_table(state: &UiState) -> Table<'_> {
     let header_cells = vec![
-        Cell::from("Tier").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Cell::from("Samples").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Cell::from("Cumulative Drift %").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Cell::from("Last Sample Drift %").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Cell::from("Tier").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Samples").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Cumulative Drift %").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Last Sample Drift %").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
     let header = Row::new(header_cells)
         .style(Style::default().bg(Color::Blue))
@@ -457,8 +465,8 @@ fn create_token_drift_table(state: &UiState) -> Table<'_> {
 
                 // Determine color for last sample drift (>25% red, >10% yellow)
                 let last_drift_style = get_drift_style(drift.last_drift_pct);
-                let last_drift = Cell::from(format!("{:.1}%", drift.last_drift_pct))
-                    .style(last_drift_style);
+                let last_drift =
+                    Cell::from(format!("{:.1}%", drift.last_drift_pct)).style(last_drift_style);
 
                 Row::new(vec![tier, samples, cum_drift, last_drift]).height(1)
             })
@@ -471,9 +479,7 @@ fn create_token_drift_table(state: &UiState) -> Table<'_> {
         "Token Drift Monitor".to_string()
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(block_title);
+    let block = Block::default().borders(Borders::ALL).title(block_title);
 
     Table::new(
         rows,
@@ -507,11 +513,31 @@ fn get_drift_style(drift_pct: f64) -> Style {
 /// Create a table widget showing per-tier statistics with latency, requests, tokens, and duration.
 fn create_tier_stats_table(state: &UiState) -> Table<'_> {
     let header_cells = vec![
-        Cell::from("Tier").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Cell::from("EWMA Latency (ms)").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Cell::from("Requests (Success/Fail)").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Cell::from("Tokens (In/Out)").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Cell::from("Avg Duration (s)").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Cell::from("Tier").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("EWMA Latency (ms)").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Requests (Success/Fail)").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Tokens (In/Out)").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Avg Duration (s)").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
     let header = Row::new(header_cells)
         .style(Style::default().bg(Color::Blue))
@@ -569,8 +595,12 @@ fn create_tier_stats_table(state: &UiState) -> Table<'_> {
                 } else {
                     Style::default().fg(Color::Green)
                 };
-                let requests_cell = Cell::from(format!("{}/{}", format_number(success), format_number(usage.failures)))
-                    .style(requests_style);
+                let requests_cell = Cell::from(format!(
+                    "{}/{}",
+                    format_number(success),
+                    format_number(usage.failures)
+                ))
+                .style(requests_style);
 
                 // Tokens (In/Out)
                 let tokens_cell = Cell::from(format!(
@@ -582,7 +612,14 @@ fn create_tier_stats_table(state: &UiState) -> Table<'_> {
                 // Avg Duration
                 let duration_cell = Cell::from(format!("{:.2}", usage.avg_duration_seconds));
 
-                Row::new(vec![tier_cell, latency_cell, requests_cell, tokens_cell, duration_cell]).height(1)
+                Row::new(vec![
+                    tier_cell,
+                    latency_cell,
+                    requests_cell,
+                    tokens_cell,
+                    duration_cell,
+                ])
+                .height(1)
             })
             .collect()
     };
@@ -616,4 +653,3 @@ fn format_number(n: u64) -> String {
         .collect::<Vec<_>>()
         .join(",")
 }
-
