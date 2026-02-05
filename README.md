@@ -2,7 +2,7 @@
 
 > **Never get blocked by rate limits again.** Keep using Claude Code's interface while seamlessly falling back to DeepSeek, GLM-4, MiniMax, or any OpenAI-compatible API.
 
-Claude Code has the best AI coding interface—but hit a rate limit and your flow is broken. You're stuck waiting, or worse, context-switching to a different tool.
+Claude Code has the best AI coding interface, but hit a rate limit and your flow is broken. You're stuck waiting, or worse, context-switching to a different tool.
 
 **CCR-Rust** is a local proxy that sits between Claude Code and your LLM providers. When one backend is rate-limited, overloaded, or down, requests automatically cascade to the next tier. Same interface, uninterrupted workflow.
 
