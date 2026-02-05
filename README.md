@@ -1,29 +1,18 @@
 # CCR-Rust
 
-> **Cut your Claude Code costs by 90%+** by routing requests to DeepSeek, GLM-4, Llama, or any OpenAI-compatible API.
+> **Never get blocked by rate limits again.** Keep using Claude Code's interface while seamlessly falling back to DeepSeek, GLM-4.7, Llama, or any OpenAI-compatible API.
 
-Claude Code is the best AI coding assistant—but at $0.015/1K input tokens and $0.075/1K output tokens, heavy usage adds up fast. A single day of active coding can easily cost $20-50.
+Claude Code has the best AI coding interface—but hit a rate limit and your flow is broken. You're stuck waiting, or worse, context-switching to a different tool.
 
-**CCR-Rust** is a local proxy that intercepts Claude Code requests and routes them to any LLM backend you choose. Same interface, same workflow, fraction of the cost.
+**CCR-Rust** is a local proxy that sits between Claude Code and your LLM providers. When one backend is rate-limited, overloaded, or down, requests automatically cascade to the next tier. Same interface, uninterrupted workflow.
 
-## The Math
+## Why CCR-Rust?
 
-| Provider | Input | Output | Monthly Savings* |
-|----------|-------|--------|------------------|
-| Claude 3.5 Sonnet | $3.00/M | $15.00/M | — |
-| DeepSeek V3 | $0.27/M | $1.10/M | **~90%** |
-| GLM-4.7 (Z.AI) | $0.14/M | $0.56/M | **~95%** |
-| Llama 3.3 70B (Groq) | Free tier | Free tier | **~100%** |
-
-*Based on 5M input + 1M output tokens/month (~moderate daily use)
-
-## What You Get
-
-- **Drop-in replacement**: Point Claude Code at `localhost:3456`, keep your workflow
-- **Multi-tier fallback**: Chain providers (try DeepSeek → GLM-4 → OpenRouter) with automatic retry
-- **Protocol translation**: OpenAI ↔ Anthropic format handling built-in
-- **Real-time monitoring**: TUI dashboard, Prometheus metrics, token tracking
-- **Zero config migration**: Compatible with existing CCR configurations
+- **Automatic failover**: Hit Claude's rate limit? Requests silently fall back to DeepSeek, then GLM-4, then OpenRouter—no manual switching
+- **Keep your workflow**: Point Claude Code at `localhost:3456`, everything else stays the same
+- **Smart retry logic**: Per-tier backoff with EWMA-based latency tracking—fast tiers retry aggressively, slow tiers back off
+- **Real-time visibility**: TUI dashboard shows which tier is handling requests, latencies, and failure rates
+- **Protocol translation**: OpenAI ↔ Anthropic format handling built-in—use any compatible provider
 
 ### Why Rust?
 
@@ -328,7 +317,7 @@ See `benchmarks/README.md` for options and metrics collected.
 
 ## Contributing
 
-PRs welcome! If you've got a provider that doesn't quite work, or you're hitting weird edge cases, open an issue. This project started because we wanted Claude Code's UX without Claude Code's pricing—if that resonates, we'd love your help making it better.
+PRs welcome! If you've got a provider that doesn't quite work, or you're hitting weird edge cases, open an issue. This project started because we got tired of rate limits interrupting our flow—if that resonates, we'd love your help making it better.
 
 ## License
 
