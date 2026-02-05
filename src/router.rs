@@ -19,8 +19,6 @@ use crate::routing::{AttemptTimer, EwmaTracker};
 use crate::sse::StreamVerifyCtx;
 use crate::transformer::{TransformerChain, TransformerRegistry};
 
-const MAX_RETRIES: usize = 3;
-
 /// Extract rate limit information from upstream response headers.
 fn extract_rate_limit_headers(
     resp: &reqwest::Response,
@@ -798,13 +796,13 @@ pub async fn handle_messages(
         let retry_config = config.get_tier_retry(tier_name);
         let max_retries = retry_config.max_retries;
 
-        for attempt in 0..max_retries {
+        for attempt in 0..=max_retries {
             info!(
                 "Trying {} ({}), attempt {}/{}",
                 tier,
                 tier_name,
                 attempt + 1,
-                max_retries
+                max_retries + 1
             );
 
             // Override model with current tier
@@ -858,7 +856,7 @@ pub async fn handle_messages(
                     warn!("Failed {} attempt {}: {}", tier_name, attempt + 1, e);
                     record_failure(tier_name, "request_failed");
 
-                    if attempt < max_retries - 1 {
+                    if attempt < max_retries {
                         // Get current EWMA for this tier for dynamic backoff scaling
                         let ewma = state.ewma_tracker.get_latency(tier_name).map(|(e, _)| e);
                         let backoff = retry_config.backoff_duration_with_ewma(attempt, ewma);
@@ -879,7 +877,10 @@ pub async fn handle_messages(
     }
 
     // All tiers exhausted
-    let total_attempts = ordered.len() * MAX_RETRIES;
+    let total_attempts: usize = ordered
+        .iter()
+        .map(|(_, tier_name)| config.get_tier_retry(tier_name).max_retries + 1)
+        .sum();
     error!("All tiers exhausted after {} tier(s)", ordered.len());
     let error_resp = ErrorResponse {
         error: "All backend tiers failed".to_string(),
@@ -1035,7 +1036,7 @@ async fn try_request(
             serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?;
         chain
             .apply_request(req_value)
-            .map_err(|e| TryRequestError::Other(e))?
+            .map_err(TryRequestError::Other)?
     };
 
     // Deserialize back to AnthropicRequest for translation
@@ -1135,7 +1136,7 @@ async fn try_request(
                     .map_err(|e| TryRequestError::Other(e.into()))?;
                 let transformed = chain
                     .apply_response(resp_value)
-                    .map_err(|e| TryRequestError::Other(e))?;
+                    .map_err(TryRequestError::Other)?;
                 serde_json::from_value::<AnthropicResponse>(transformed).unwrap_or(anthropic_resp)
             };
 
@@ -1286,10 +1287,7 @@ pub async fn stream_response_translated(
                 }
                         Err(e) => {
                             let _ = tx
-                                .send(Err(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    e.to_string(),
-                                )))
+                                .send(Err(std::io::Error::other(e.to_string())))
                                 .await;
                             break;
                         }

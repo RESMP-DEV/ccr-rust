@@ -25,6 +25,6 @@
         "default": "deepseek,deepseek-reasoner",
         "background": "deepseek,deepseek-chat",
         "longContext": "openrouter,minimax/minimax-m2.1",
-        "longContextThreshold": 60000
+        "longContextThreshold": 1048576
     }
 }

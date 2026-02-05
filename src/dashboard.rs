@@ -609,17 +609,11 @@ fn create_tier_stats_table(state: &UiState) -> Table<'_> {
 /// Format a large number with commas as thousands separators.
 fn format_number(n: u64) -> String {
     let s = n.to_string();
-    let mut result = String::new();
-    let mut count = 0;
-
-    for ch in s.chars().rev() {
-        if count > 0 && count % 3 == 0 {
-            result.push(',');
-        }
-        result.push(ch);
-        count += 1;
-    }
-
-    result.chars().rev().collect()
+    s.as_bytes()
+        .rchunks(3)
+        .rev()
+        .map(|chunk| std::str::from_utf8(chunk).unwrap())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 

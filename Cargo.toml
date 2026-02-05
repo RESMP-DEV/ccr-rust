@@ -8,10 +8,10 @@ license = "MIT"
 repository = "https://github.com/resmp-dev/ccr-rust"
 
 [dependencies]
-tokio = { version = "1.40", features = ["full"] }
-axum = "0.7"
+tokio = { version = "1.43", features = ["full"] }
+axum = "0.8"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 reqwest = { version = "0.12", features = ["stream", "json", "http2", "blocking"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -19,7 +19,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 thiserror = "1.0"
-bytes = "1.7"
+bytes = "1.10"
 futures = "0.3"
 prometheus = "0.13"
 lazy_static = "1.5"
@@ -30,9 +30,9 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 tiktoken-rs = "0.6"
 parking_lot = "0.12"
 humantime = "2.1"
-regex = "1"
-ratatui = "0.28"
-crossterm = "0.28"
+regex = "1.11"
+ratatui = "0.29"
+crossterm = "0.29"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

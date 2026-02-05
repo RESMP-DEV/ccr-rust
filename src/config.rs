@@ -559,7 +559,7 @@ fn default_timeout() -> u64 {
 }
 
 fn default_long_context_threshold() -> u32 {
-    60000
+    1048576
 }
 
 fn default_max_retries() -> usize {

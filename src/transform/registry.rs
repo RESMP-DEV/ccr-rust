@@ -56,7 +56,7 @@ impl TransformerRegistry {
         let mut chain = TransformerChain::new();
         for entry in entries {
             if let Some(transformer) = self.build(entry) {
-                chain = chain.add(std::sync::Arc::from(transformer));
+                chain = chain.with_transformer(std::sync::Arc::from(transformer));
             }
         }
         chain

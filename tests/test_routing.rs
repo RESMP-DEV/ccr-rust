@@ -445,7 +445,7 @@ async fn all_retries_exhausted_returns_503() {
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(500).set_body_string("always fails"))
-        .expect(3) // MAX_RETRIES = 3, single tier
+        .expect(4) // initial + 3 retries = 4 total
         .mount(&mock_server)
         .await;
 
@@ -478,15 +478,16 @@ async fn all_retries_exhausted_returns_503() {
 async fn backoff_introduces_measurable_delay() {
     let mock_server = MockServer::start().await;
 
-    // All 3 attempts fail. With default backoff (100ms base, 2x multiplier):
+    // All 4 attempts fail. With default backoff (100ms base, 2x multiplier):
     // attempt 0 fails -> sleep 100ms
     // attempt 1 fails -> sleep 200ms
-    // attempt 2 fails -> no sleep (last attempt)
-    // Total backoff: ~300ms minimum
+    // attempt 2 fails -> sleep 400ms
+    // attempt 3 fails -> no sleep (last attempt)
+    // Total backoff: ~700ms minimum
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(500).set_body_string("fail"))
-        .expect(3)
+        .expect(4)
         .mount(&mock_server)
         .await;
 
@@ -515,11 +516,11 @@ async fn backoff_introduces_measurable_delay() {
     let elapsed = start.elapsed();
 
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    // Backoff sleeps: 100ms + 200ms = 300ms minimum.
-    // Allow generous lower bound (250ms) for CI jitter.
+    // Backoff sleeps: 100ms + 200ms + 400ms = 700ms minimum.
+    // Allow generous lower bound (600ms) for CI jitter.
     assert!(
-        elapsed >= Duration::from_millis(250),
-        "Expected >= 250ms of backoff delay, got {:?}",
+        elapsed >= Duration::from_millis(600),
+        "Expected >= 600ms of backoff delay, got {:?}",
         elapsed,
     );
 }
@@ -856,6 +857,14 @@ async fn adaptive_backoff_per_tier_configuration() {
     let cfg = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
     let app = build_app(cfg);
 
+    // Use a request body WITHOUT comma in model name to test tier cascading
+    // (comma triggers direct routing which bypasses tier cascade)
+    let request_body = json!({
+        "model": "claude-3-5",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 100
+    });
+
     let start = Instant::now();
     let resp = app
         .oneshot(
@@ -864,7 +873,7 @@ async fn adaptive_backoff_per_tier_configuration() {
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::to_vec(&test_request_body()).unwrap(),
+                    serde_json::to_vec(&request_body).unwrap(),
                 ))
                 .unwrap(),
         )

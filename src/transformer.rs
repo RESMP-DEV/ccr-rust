@@ -111,14 +111,14 @@ impl Transformer for DeepSeekTransformer {
             for block in content_array {
                 if let Some(block_obj) = block.as_object_mut() {
                     // Normalize tool use blocks
-                    if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
-                        if !block_obj.contains_key("id") {
-                            // Generate a deterministic ID if missing
-                            block_obj.insert(
-                                "id".to_string(),
-                                Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
-                            );
-                        }
+                    if block_obj.get("type") == Some(&Value::String("tool_use".to_string()))
+                        && !block_obj.contains_key("id")
+                    {
+                        // Generate a deterministic ID if missing
+                        block_obj.insert(
+                            "id".to_string(),
+                            Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                        );
                     }
                 }
             }
@@ -312,14 +312,12 @@ impl Transformer for AnthropicToOpenaiTransformer {
                 Value::Object(map)
                     if map.get("type") == Some(&Value::String("tool".to_string())) =>
                 {
-                    if let Some(name) = map.get("name").cloned() {
-                        Some(serde_json::json!({
+                    map.get("name").cloned().map(|name| {
+                        serde_json::json!({
                             "type": "function",
                             "function": {"name": name}
-                        }))
-                    } else {
-                        None
-                    }
+                        })
+                    })
                 }
                 // Anthropic: "any" → OpenAI: "required"
                 Value::String(s) if s == "any" => Some(Value::String("required".to_string())),
@@ -364,16 +362,13 @@ impl Transformer for AnthropicToOpenaiTransformer {
                 for block in content_array {
                     if let Some(block_obj) = block.as_object_mut() {
                         // Ensure tool_use blocks have IDs
-                        if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
-                            if !block_obj.contains_key("id") {
-                                block_obj.insert(
-                                    "id".to_string(),
-                                    Value::String(format!(
-                                        "toolu_{}",
-                                        uuid_nopanic::timestamp_ms()
-                                    )),
-                                );
-                            }
+                        if block_obj.get("type") == Some(&Value::String("tool_use".to_string()))
+                            && !block_obj.contains_key("id")
+                        {
+                            block_obj.insert(
+                                "id".to_string(),
+                                Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                            );
                         }
                     }
                 }
@@ -417,13 +412,13 @@ impl Transformer for ToolUseTransformer {
         if let Some(content_array) = response.get_mut("content").and_then(|c| c.as_array_mut()) {
             for block in content_array {
                 if let Some(block_obj) = block.as_object_mut() {
-                    if block_obj.get("type") == Some(&Value::String("tool_use".to_string())) {
-                        if !block_obj.contains_key("id") {
-                            block_obj.insert(
-                                "id".to_string(),
-                                Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
-                            );
-                        }
+                    if block_obj.get("type") == Some(&Value::String("tool_use".to_string()))
+                        && !block_obj.contains_key("id")
+                    {
+                        block_obj.insert(
+                            "id".to_string(),
+                            Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                        );
                     }
                 }
             }
@@ -607,7 +602,7 @@ impl TransformerChain {
     }
 
     /// Add a transformer to the chain.
-    pub fn add(mut self, transformer: Arc<dyn Transformer>) -> Self {
+    pub fn with_transformer(mut self, transformer: Arc<dyn Transformer>) -> Self {
         self.transformers.push(transformer);
         self
     }
@@ -729,7 +724,7 @@ impl TransformerRegistry {
                 .and_then(|opts| self.create_with_options(entry.name(), opts))
                 .or_else(|| self.get(entry.name()))
             {
-                chain = chain.add(transformer);
+                chain = chain.with_transformer(transformer);
             } else {
                 tracing::warn!(name = entry.name(), "transformer not found, skipping");
             }
@@ -788,19 +783,6 @@ mod tests {
         })
     }
 
-    fn test_response() -> Value {
-        serde_json::json!({
-            "id": "msg_123",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-3",
-            "content": [
-                {"type": "text", "text": "Hello!"}
-            ],
-            "stop_reason": "end_turn"
-        })
-    }
-
     #[test]
     fn identity_passthrough() {
         let transformer = IdentityTransformer;
@@ -840,7 +822,7 @@ mod tests {
     #[test]
     fn tooluse_adds_id_to_tool_use() {
         let transformer = ToolUseTransformer;
-        let mut response = serde_json::json!({
+        let response = serde_json::json!({
             "content": [
                 {"type": "tool_use", "name": "calculator", "input": {}}
             ]
@@ -855,8 +837,8 @@ mod tests {
     #[test]
     fn transformer_chain_applies_in_order() {
         let chain = TransformerChain::new()
-            .add(Arc::new(MaxTokenTransformer::new(100)))
-            .add(Arc::new(IdentityTransformer));
+            .with_transformer(Arc::new(MaxTokenTransformer::new(100)))
+            .with_transformer(Arc::new(IdentityTransformer));
 
         let mut request = test_request();
         request["max_tokens"] = Value::Number(1000.into());
@@ -868,10 +850,10 @@ mod tests {
     #[test]
     fn transformer_chain_reverses_for_response() {
         let chain = TransformerChain::new()
-            .add(Arc::new(ToolUseTransformer))
-            .add(Arc::new(DeepSeekTransformer));
+            .with_transformer(Arc::new(ToolUseTransformer))
+            .with_transformer(Arc::new(DeepSeekTransformer));
 
-        let mut response = serde_json::json!({
+        let response = serde_json::json!({
             "content": [
                 {"type": "tool_use", "name": "test", "input": {}}
             ]
@@ -956,7 +938,7 @@ mod tests {
     #[test]
     fn anthropic_to_openai_converts_string_system() {
         let transformer = AnthropicToOpenaiTransformer;
-        let mut request = serde_json::json!({
+        let request = serde_json::json!({
             "model": "claude-3",
             "system": "You are a helpful assistant.",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -979,7 +961,7 @@ mod tests {
     #[test]
     fn anthropic_to_openai_converts_array_system() {
         let transformer = AnthropicToOpenaiTransformer;
-        let mut request = serde_json::json!({
+        let request = serde_json::json!({
             "model": "claude-3",
             "system": [
                 {"type": "text", "text": "First instruction"},
@@ -1007,7 +989,7 @@ mod tests {
     #[test]
     fn anthropic_to_openai_system_creates_messages_if_missing() {
         let transformer = AnthropicToOpenaiTransformer;
-        let mut request = serde_json::json!({
+        let request = serde_json::json!({
             "model": "claude-3",
             "system": "You are helpful",
             "max_tokens": 1000
