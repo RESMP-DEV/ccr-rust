@@ -193,10 +193,10 @@ ccr-rust dashboard --port 3456
 │ Active Streams: 5    │ Requests: 1,234 / Failures: 12 (99.0%)       │
 │                      │ In: 450.2k / Out: 89.1k                      │
 ├─────────────────────────────────────────────────────────────────────┤
-│ Token Drift Monitor                                                  │
+│ Token Drift Monitor                                                 │
 │ Tier      │ Samples │ Cumulative Drift % │ Last Sample Drift %      │
-│ tier-0    │ 117     │ 2.3%               │ 1.8%                      │
-│ tier-1    │ 66      │ -1.2%              │ 0.5%                      │
+│ tier-0    │ 117     │ 2.3%               │ 1.8%                     │
+│ tier-1    │ 66      │ -1.2%              │ 0.5%                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │ Session Info         │ Tier Statistics                              │
 │ CWD: /path/to/proj   │ Tier   │ EWMA (ms) │ Requests │ Tokens       │
