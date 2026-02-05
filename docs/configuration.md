@@ -31,7 +31,7 @@ CCR-Rust reads its configuration from a JSON file. The location is determined by
     "background": "provider,model",
     "think": "provider,model",
     "longContext": "provider,model",
-    "longContextThreshold": 60000,
+    "longContextThreshold": 1048576,
     "webSearch": "provider,model",
     "tierRetries": {
       "tier-0": {
@@ -123,7 +123,7 @@ The `Router` section configures how incoming requests are routed to providers.
 | `background` | string | No | - | Route for background tasks. |
 | `think` | string | No | - | Route for reasoning/thinking models. |
 | `longContext` | string | No | - | Route for long-context requests. |
-| `longContextThreshold` | number | No | 60000 | Token threshold for `longContext` route. |
+| `longContextThreshold` | number | No | 1048576 | Token threshold for `longContext` route. |
 | `webSearch` | string | No | - | Route for web search requests. |
 | `tierRetries` | object | No | - | Per-tier retry configuration. |
 
@@ -241,7 +241,7 @@ With defaults (100ms base, 2.0 multiplier, 10000ms max):
     "default": "deepseek,deepseek-chat",
     "think": "deepseek,deepseek-reasoner",
     "longContext": "openrouter,google/gemini-2.5-pro-preview",
-    "longContextThreshold": 60000,
+    "longContextThreshold": 1048576,
     "tierRetries": {
       "tier-0": { "max_retries": 3, "base_backoff_ms": 100 },
       "tier-1": { "max_retries": 2, "base_backoff_ms": 200 }

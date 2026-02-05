@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser as ClapParser;
 use std::collections::HashMap;
-use std::net::SocketAddr;
+
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -90,7 +90,6 @@ data: {{"type":"content_block_delta","delta":{{"type":"text_delta","text":"chunk
 /// Statistics for a single stream's lifecycle.
 #[derive(Debug)]
 struct StreamStats {
-    id: u64,
     start_time: Instant,
     end_time: Option<Instant>,
     chunks_sent: usize,
@@ -99,9 +98,8 @@ struct StreamStats {
 }
 
 impl StreamStats {
-    fn new(id: u64) -> Self {
+    fn new(_id: u64) -> Self {
         Self {
-            id,
             start_time: Instant::now(),
             end_time: None,
             chunks_sent: 0,
@@ -144,8 +142,6 @@ struct StressTestResults {
     chunks_sent: AtomicU64,
     /// Total bytes sent
     bytes_sent: AtomicU64,
-    /// Total errors
-    total_errors: AtomicU64,
     /// Peak concurrent streams
     peak_concurrent: AtomicUsize,
     /// Start time of the test
@@ -166,7 +162,7 @@ impl StressTestResults {
             streams_errored: AtomicU64::new(0),
             chunks_sent: AtomicU64::new(0),
             bytes_sent: AtomicU64::new(0),
-            total_errors: AtomicU64::new(0),
+
             peak_concurrent: AtomicUsize::new(0),
             start_time: parking_lot::Mutex::new(None),
             end_time: parking_lot::Mutex::new(None),
@@ -185,15 +181,6 @@ impl StressTestResults {
         self.streams_completed.fetch_add(1, Ordering::Relaxed);
         let mut stats = self.stream_stats.lock();
         if let Some(s) = stats.get_mut(&id) {
-            s.finish();
-        }
-    }
-
-    fn record_stream_error(&self, id: u64) {
-        self.streams_errored.fetch_add(1, Ordering::Relaxed);
-        let mut stats = self.stream_stats.lock();
-        if let Some(s) = stats.get_mut(&id) {
-            s.record_error();
             s.finish();
         }
     }
@@ -314,11 +301,12 @@ fn get_current_rss() -> u64 {
     // On macOS, use libproc (if available) or estimate
     #[cfg(target_os = "linux")]
     {
-        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let statm = std::fs::read_to_string("/proc/self/statm").ok();
         statm
-            .split_whitespace()
-            .next()
-            .map(|s| s.parse::<u64>().unwrap_or(0) * 4096)
+            .and_then(|s| s.split_whitespace().next().map(|v| v.to_string()))
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|v| v * 4096)
+            .unwrap_or(0)
     }
     #[cfg(target_os = "macos")]
     {
@@ -330,41 +318,6 @@ fn get_current_rss() -> u64 {
     {
         0
     }
-}
-
-/// Simulate a single SSE stream client.
-/// This creates a connection, sends a request, and consumes the stream.
-async fn simulate_stream_client(
-    id: u64,
-    _addr: SocketAddr,
-    results: Arc<StressTestResults>,
-    chunks_per_stream: usize,
-    bytes_per_chunk: usize,
-    chunk_delay_ms: u64,
-) {
-    results.record_stream_start(id);
-
-    // Create a mock stream
-    let mock_stream = MockStream {
-        id,
-        chunk_count: chunks_per_stream,
-        bytes_per_chunk,
-        delay_ms: chunk_delay_ms,
-    };
-
-    // Simulate receiving chunks
-    for chunk_idx in 0..chunks_per_stream {
-        if let Some(bytes) = mock_stream.next_chunk(chunk_idx) {
-            results.record_chunk(id, &bytes);
-
-            // Simulate processing delay
-            if chunk_delay_ms > 0 {
-                time::sleep(Duration::from_millis(chunk_delay_ms)).await;
-            }
-        }
-    }
-
-    results.record_stream_complete(id);
 }
 
 /// Run a single stress test phase.
@@ -531,6 +484,7 @@ fn print_results(results: &StressTestResults) {
 }
 
 /// Run ramp-up stress test.
+#[allow(clippy::too_many_arguments)]
 async fn run_ramp_test(
     start: usize,
     end: usize,

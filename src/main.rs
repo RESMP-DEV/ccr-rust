@@ -23,9 +23,6 @@ mod dashboard {
 mod metrics {
     pub use ccr_rust::metrics::*;
 }
-mod proxy {
-    pub use ccr_rust::proxy::*;
-}
 mod ratelimit {
     pub use ccr_rust::ratelimit::*;
 }
@@ -34,9 +31,6 @@ mod router {
 }
 mod routing {
     pub use ccr_rust::routing::*;
-}
-mod sse {
-    pub use ccr_rust::sse::*;
 }
 mod transformer {
     pub use ccr_rust::transformer::*;
@@ -144,7 +138,7 @@ async fn run_server(
             post(router::handle_chat_completions),
         )
         .route(
-            "/preset/:name/v1/messages",
+            "/preset/{name}/v1/messages",
             post(router::handle_preset_messages),
         )
         .route("/v1/presets", get(router::list_presets))

@@ -77,7 +77,7 @@ Uses the standard CCR JSON format—your existing `config.json` should just work
     "default": "zai,glm-4.7",
     "think": "deepseek,deepseek-reasoner",
     "longContext": "openrouter,minimax-m2.1",
-    "longContextThreshold": 60000,
+    "longContextThreshold": 1048576,
     "tierRetries": {
       "tier-0": { "max_retries": 5, "base_backoff_ms": 50, "backoff_multiplier": 1.5 },
       "tier-1": { "max_retries": 3, "base_backoff_ms": 100 }
@@ -92,7 +92,7 @@ New in ccr-rust: fine-tune retry behavior for each tier.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `max_retries` | 3 | Maximum retry attempts per tier |
+| `max_retries` | 3 | Retry attempts per tier (total = 1 initial + max_retries) |
 | `base_backoff_ms` | 100 | Initial backoff delay |
 | `backoff_multiplier` | 2.0 | Exponential multiplier per attempt |
 | `max_backoff_ms` | 10000 | Maximum backoff cap |
@@ -151,7 +151,7 @@ Tags are stripped before sending to the provider.
 | Endpoint | Description |
 |----------|-------------|
 | `POST /v1/messages` | Anthropic-compatible chat completions |
-| `POST /preset/:name/v1/messages` | Route via named preset |
+| `POST /preset/{name}/v1/messages` | Route via named preset |
 | `GET /v1/presets` | List all configured presets |
 | `GET /v1/usage` | Aggregate token usage per tier (JSON) |
 | `GET /v1/latencies` | Real-time EWMA latency stats (JSON) |
@@ -236,8 +236,10 @@ Requests cascade through your configured tiers with exponential backoff:
 ```
 Request
    ↓
-Tier 0 (default) ──[3 retries]──→ Tier 1 (think) ──[3 retries]──→ Tier 2 (long) ──→ Error
+Tier 0 (default) ──[4 attempts]──→ Tier 1 (think) ──[4 attempts]──→ Tier 2 (long) ──→ Error
 ```
+
+Each tier makes **1 initial + N retries** attempts (default: 1+3=4). The `max_retries` setting controls the retry count, not total attempts.
 
 **Dynamic tier reordering:** Tiers are automatically reordered by observed latency (EWMA). If Tier 2 is consistently faster than Tier 1, it gets promoted. Tiers with fewer than 3 samples keep their configured priority.
 
