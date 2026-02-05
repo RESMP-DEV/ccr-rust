@@ -1,24 +1,37 @@
 # CCR-Rust
 
-> Route your Claude Code requests to any LLM backend—DeepSeek, GLM-4, OpenRouter, and more.
+> **Cut your Claude Code costs by 90%+** by routing requests to DeepSeek, GLM-4, Llama, or any OpenAI-compatible API.
 
-**CCR-Rust** is a Rust rewrite of the [Claude Code Router](https://github.com/musistudio/claude-code-router). It sits between Claude Code and your preferred LLM providers, letting you use cheaper or specialized models without changing your workflow. Drop-in compatible with existing CCR configurations.
+Claude Code is the best AI coding assistant—but at $0.015/1K input tokens and $0.075/1K output tokens, heavy usage adds up fast. A single day of active coding can easily cost $20-50.
 
-## Why?
+**CCR-Rust** is a local proxy that intercepts Claude Code requests and routes them to any LLM backend you choose. Same interface, same workflow, fraction of the cost.
 
-Love Claude Code's interface but want to use other models? CCR-Rust lets you:
+## The Math
 
-- **Use any OpenAI-compatible API** as a Claude Code backend
-- **Chain multiple providers** with automatic fallback (try DeepSeek first, then GLM-4.7 via Z.AI, then OpenRouter)
-- **Handle high concurrency** when running many agents or batch jobs
+| Provider | Input | Output | Monthly Savings* |
+|----------|-------|--------|------------------|
+| Claude 3.5 Sonnet | $3.00/M | $15.00/M | — |
+| DeepSeek V3 | $0.27/M | $1.10/M | **~90%** |
+| GLM-4.7 (Z.AI) | $0.14/M | $0.56/M | **~95%** |
+| Llama 3.3 70B (Groq) | Free tier | Free tier | **~100%** |
 
-### Why Rust over the Node.js version?
+*Based on 5M input + 1M output tokens/month (~moderate daily use)
 
-For most users, either works fine. But if you're running multiple Claude Code instances, automated pipelines, or heavy workloads, ccr-rust handles the load better:
+## What You Get
 
-- Supports 200+ concurrent streams (vs ~30 in Node.js)
-- Steady memory usage (~15MB) instead of GC spikes
-- More predictable response times under pressure
+- **Drop-in replacement**: Point Claude Code at `localhost:3456`, keep your workflow
+- **Multi-tier fallback**: Chain providers (try DeepSeek → GLM-4 → OpenRouter) with automatic retry
+- **Protocol translation**: OpenAI ↔ Anthropic format handling built-in
+- **Real-time monitoring**: TUI dashboard, Prometheus metrics, token tracking
+- **Zero config migration**: Compatible with existing CCR configurations
+
+### Why Rust?
+
+The original [Claude Code Router](https://github.com/musistudio/claude-code-router) is written in Node.js. CCR-Rust is a from-scratch rewrite that handles higher throughput with lower overhead:
+
+- Handles 200+ concurrent streams (vs ~30 in Node.js)
+- Steady ~15MB memory footprint (no GC pauses)
+- Sub-millisecond routing overhead
 
 ## Quick Start
 
@@ -302,16 +315,11 @@ See `docs/` for detailed deployment guides.
 
 ## Stress Testing
 
-The `benchmarks/` directory contains a self-contained stress test suite:
+The `benchmarks/` directory contains a self-contained stress test suite for validating throughput:
 
 ```bash
-# Run the full orchestrated test (starts mock backend + ccr-rust + 100 streams)
+# Run the full orchestrated test
 ./benchmarks/run_stress_test.sh --streams 100 --chunks 20
-
-# Manual setup for debugging
-uv run python benchmarks/mock_sse_backend.py --port 9999 &
-./target/release/ccr-rust --config benchmarks/config_mock.json &
-uv run python benchmarks/stress_sse_streams.py --streams 100
 ```
 
 See `benchmarks/README.md` for options and metrics collected.
@@ -320,7 +328,7 @@ See `benchmarks/README.md` for options and metrics collected.
 
 ## Contributing
 
-PRs welcome! If you've got a provider that doesn't quite work, or you're hitting weird edge cases, open an issue. This project grew out of real-world frustrations with routing LLM traffic, and we'd love to hear about yours.
+PRs welcome! If you've got a provider that doesn't quite work, or you're hitting weird edge cases, open an issue. This project started because we wanted Claude Code's UX without Claude Code's pricing—if that resonates, we'd love your help making it better.
 
 ## License
 
