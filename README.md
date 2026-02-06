@@ -129,6 +129,34 @@ codex
 
 That's it. Your frontend now routes through CCR-Rust with automatic fallback.
 
+## Streaming and Responses Behavior
+
+CCR-Rust serves three wire-compatible endpoints:
+
+| Endpoint | Input Shape | Streaming Default | Output Shape |
+|----------|-------------|-------------------|--------------|
+| `/v1/messages` | Anthropic Messages API | `stream: false` when omitted | Anthropic JSON or Anthropic SSE |
+| `/v1/chat/completions` | OpenAI Chat Completions API | `stream: false` when omitted | OpenAI JSON or OpenAI SSE |
+| `/v1/responses` | OpenAI Responses API | `stream: true` when omitted | Responses JSON or Responses SSE |
+
+### `/v1/responses` behavior
+
+- Incoming Responses requests are normalized into an internal chat-completions request for backend routing.
+- `instructions` is treated as a system message before dispatch.
+- `input` message/tool items are converted into OpenAI-compatible chat/tool message forms.
+- Non-streaming requests return a Responses object (`"object": "response"`, `"status": "completed"`).
+- Streaming requests emit Responses-style SSE events in this order:
+  `response.created` → `response.output_item.added` → `response.output_text.delta` (and optional `response.reasoning_text.delta`) → `response.output_item.done` → `response.completed`.
+
+### Streaming failure semantics
+
+For `/v1/responses` with streaming enabled, CCR-Rust keeps the transport in SSE mode even when the upstream request fails. Instead of returning a non-2xx JSON body, it returns `200 OK` with `text/event-stream` and emits `response.failed`:
+
+```text
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_failed","object":"response","status":"failed","error":{"message":"{\"error\":{\"message\":\"upstream failed\"}}"}}}
+```
+
 ## Frontend-Specific Setup
 
 ### Claude Code Setup
@@ -183,6 +211,19 @@ ccr-rust validate --config ~/.claude-code-router/config.json
 ```
 
 Checks your config file for syntax errors and missing fields.
+
+### Provider Smoke Matrix
+
+Run a live matrix against all configured `provider,model` routes (discovered from `/v1/models`):
+
+```bash
+scripts/ccr_provider_smoke.py --base-url http://127.0.0.1:3456 --api-key test
+```
+
+This validates:
+- `/v1/chat/completions` (`stream: false` and `stream: true`)
+- `/v1/responses` (`stream: false` and `stream: true`)
+- SSE frame integrity (JSON parse + terminal markers/events)
 
 ## Configuration Reference
 
