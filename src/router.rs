@@ -15,12 +15,13 @@ use crate::config::{Config, ProviderProtocol};
 use crate::frontend::codex::CodexFrontend;
 use crate::frontend::{detect_frontend, Frontend};
 use crate::metrics::{
-    record_failure, record_pre_request_tokens, record_rate_limit_hit, record_request_duration_with_frontend,
-    record_request_with_frontend, record_usage, sync_ewma_gauge, verify_token_usage,
+    record_failure, record_pre_request_tokens, record_rate_limit_hit,
+    record_request_duration_with_frontend, record_request_with_frontend, record_usage,
+    sync_ewma_gauge, verify_token_usage,
 };
 use crate::ratelimit::RateLimitTracker;
 use crate::routing::{AttemptTimer, EwmaTracker};
-use crate::sse::StreamVerifyCtx;
+use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
 use crate::transform::anthropic_to_openai::AnthropicToOpenAiResponseTransformer;
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
@@ -1330,6 +1331,36 @@ async fn convert_anthropic_json_response_to_openai(response: Response) -> Respon
     };
 
     if parts.status != StatusCode::OK {
+        // Normalize rate limit errors
+        if parts.status == StatusCode::TOO_MANY_REQUESTS {
+            if let Ok(mut error_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                if let Some(error_obj) = error_json.get_mut("error").and_then(|e| e.as_object_mut())
+                {
+                    error_obj.insert(
+                        "type".to_string(),
+                        serde_json::Value::String("rate_limit_error".to_string()),
+                    );
+                    error_obj.insert(
+                        "code".to_string(),
+                        serde_json::Value::String("rate_limited".to_string()),
+                    );
+
+                    if let Some(retry_after) = parts
+                        .headers
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<i64>().ok())
+                    {
+                        error_obj.insert("retry_after".to_string(), serde_json::json!(retry_after));
+                    }
+                }
+
+                return Response::from_parts(
+                    parts,
+                    Body::from(serde_json::to_vec(&error_json).unwrap_or(body_bytes.to_vec())),
+                );
+            }
+        }
         return Response::from_parts(parts, Body::from(body_bytes));
     }
 
@@ -1360,79 +1391,132 @@ async fn convert_anthropic_json_response_to_openai(response: Response) -> Respon
 
 async fn convert_anthropic_stream_response_to_openai(response: Response) -> Response {
     let (mut parts, body) = response.into_parts();
-    let body_bytes = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            error!("Failed to read Anthropic stream: {}", err);
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": "Failed to read upstream stream"})),
-            )
-                .into_response();
-        }
-    };
 
     if parts.status != StatusCode::OK {
+        // For error responses, read the whole body (it's likely small)
+        let body_bytes = match to_bytes(body, usize::MAX).await {
+            Ok(bytes) => bytes,
+            Err(_) => return Response::from_parts(parts, Body::empty()),
+        };
+
+        // Normalize rate limit errors
+        if parts.status == StatusCode::TOO_MANY_REQUESTS {
+            if let Ok(mut error_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                if let Some(error_obj) = error_json.get_mut("error").and_then(|e| e.as_object_mut())
+                {
+                    error_obj.insert(
+                        "type".to_string(),
+                        serde_json::Value::String("rate_limit_error".to_string()),
+                    );
+                    error_obj.insert(
+                        "code".to_string(),
+                        serde_json::Value::String("rate_limited".to_string()),
+                    );
+
+                    if let Some(retry_after) = parts
+                        .headers
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<i64>().ok())
+                    {
+                        error_obj.insert("retry_after".to_string(), serde_json::json!(retry_after));
+                    }
+                }
+
+                return Response::from_parts(
+                    parts,
+                    Body::from(serde_json::to_vec(&error_json).unwrap_or(body_bytes.to_vec())),
+                );
+            }
+        }
+
         return Response::from_parts(parts, Body::from(body_bytes));
-    }
-
-    let payload = String::from_utf8_lossy(&body_bytes);
-    let transformer = AnthropicToOpenAiResponseTransformer;
-    let mut output = String::new();
-    let mut sent_done = false;
-
-    for (event_type, data) in parse_sse_frames(&payload) {
-        if data.trim() == "[DONE]" {
-            output.push_str("data: [DONE]\n\n");
-            sent_done = true;
-            continue;
-        }
-
-        let mut event_json: serde_json::Value = match serde_json::from_str(&data) {
-            Ok(value) => value,
-            Err(_) => {
-                output.push_str("data: ");
-                output.push_str(&data);
-                output.push_str("\n\n");
-                continue;
-            }
-        };
-
-        if event_json.get("type").is_none() {
-            if let Some(t) = event_type.as_deref() {
-                event_json["type"] = serde_json::Value::String(t.to_string());
-            }
-        }
-
-        let transformed = match transformer.transform_response(event_json) {
-            Ok(value) => value,
-            Err(_) => {
-                output.push_str("data: ");
-                output.push_str(&data);
-                output.push_str("\n\n");
-                continue;
-            }
-        };
-
-        output.push_str("data: ");
-        output.push_str(&serde_json::to_string(&transformed).unwrap_or_default());
-        output.push_str("\n\n");
-
-        if event_type.as_deref() == Some("message_stop") {
-            output.push_str("data: [DONE]\n\n");
-            sent_done = true;
-        }
-    }
-
-    if !sent_done {
-        output.push_str("data: [DONE]\n\n");
     }
 
     parts.headers.insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("text/event-stream"),
     );
-    Response::from_parts(parts, Body::from(output))
+
+    // Create a channel for streaming response
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(100);
+
+    tokio::spawn(async move {
+        let mut stream = body.into_data_stream();
+        let mut decoder = SseFrameDecoder::new();
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let mut sent_done = false;
+
+        loop {
+            tokio::select! {
+                chunk = stream.next() => {
+                    let Some(chunk_res) = chunk else { break; };
+                    match chunk_res {
+                        Ok(bytes) => {
+                            for frame in decoder.push(&bytes) {
+                                let data = frame.data;
+                                let event_type = frame.event;
+
+                                if data.trim() == "[DONE]" {
+                                    if !sent_done {
+                                        let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
+                                        sent_done = true;
+                                    }
+                                    continue;
+                                }
+
+                                let mut event_json: serde_json::Value = match serde_json::from_str(&data) {
+                                    Ok(value) => value,
+                                    Err(_) => {
+                                        // Pass through raw data if parsing fails
+                                        let msg = format!("data: {}\n\n", data);
+                                        let _ = tx.send(Ok(Bytes::from(msg))).await;
+                                        continue;
+                                    }
+                                };
+
+                                if event_json.get("type").is_none() {
+                                    if let Some(t) = event_type.as_deref() {
+                                        event_json["type"] = serde_json::Value::String(t.to_string());
+                                    }
+                                }
+
+                                let transformed = match transformer.transform_response(event_json) {
+                                    Ok(value) => value,
+                                    Err(_) => {
+                                        let msg = format!("data: {}\n\n", data);
+                                        let _ = tx.send(Ok(Bytes::from(msg))).await;
+                                        continue;
+                                    }
+                                };
+
+                                let msg = format!("data: {}\n\n", serde_json::to_string(&transformed).unwrap_or_default());
+                                if tx.send(Ok(Bytes::from(msg))).await.is_err() {
+                                    return; // Receiver closed
+                                }
+
+                                if event_type.as_deref() == Some("message_stop") && !sent_done {
+                                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
+                                    sent_done = true;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Stream read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+                _ = tx.closed() => break,
+            }
+        }
+
+        if !sent_done {
+            let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
+        }
+    });
+
+    Response::from_parts(parts, Body::from_stream(ReceiverStream::new(rx)))
 }
 
 fn map_openai_usage_to_responses_usage(usage: &serde_json::Value) -> serde_json::Value {
@@ -1807,18 +1891,49 @@ async fn convert_openai_json_response_to_responses(response: Response) -> Respon
     };
 
     if parts.status != StatusCode::OK {
+        // Check if this is a rate limit error (429)
+        let is_rate_limit = parts.status == StatusCode::TOO_MANY_REQUESTS;
+        let retry_after = parts
+            .headers
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+
+        let error_message = openai_json
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("upstream request failed");
+
+        let mut error_obj = serde_json::json!({
+            "message": error_message
+        });
+
+        if is_rate_limit {
+            error_obj["code"] = serde_json::Value::String("rate_limited".to_string());
+            if let Some(retry_after_secs) = retry_after {
+                error_obj["retry_after"] = serde_json::json!(retry_after_secs);
+            }
+        }
+
         let failed = serde_json::json!({
             "id": "resp_failed",
             "object": "response",
             "status": "failed",
-            "error": {
-                "message": openai_json
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("upstream request failed")
-            }
+            "error": error_obj
         });
+
+        // Preserve the original status code and retry-after header for rate limits
+        if is_rate_limit {
+            if let Some(retry_after_secs) = retry_after {
+                parts.headers.insert(
+                    "retry-after",
+                    axum::http::HeaderValue::from_str(&retry_after_secs.to_string())
+                        .unwrap_or(axum::http::HeaderValue::from_static("0")),
+                );
+            }
+        }
+
         parts.headers.insert(
             axum::http::header::CONTENT_TYPE,
             axum::http::HeaderValue::from_static("application/json"),
@@ -1852,16 +1967,36 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
     let payload = String::from_utf8_lossy(&body_bytes);
 
     if parts.status != StatusCode::OK {
+        // Check if this is a rate limit error (429)
+        let is_rate_limit = parts.status == StatusCode::TOO_MANY_REQUESTS;
+        let retry_after = parts
+            .headers
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+
         let error_text = String::from_utf8_lossy(&body_bytes).to_string();
+
+        let mut error_obj = serde_json::json!({
+            "message": error_text
+        });
+
+        if is_rate_limit {
+            error_obj["code"] = serde_json::Value::String("rate_limited".to_string());
+            if let Some(retry_after_secs) = retry_after {
+                error_obj["retry_after"] = serde_json::json!(retry_after_secs);
+            }
+        } else {
+            error_obj["code"] = serde_json::Value::String("upstream_error".to_string());
+        }
+
         let failed_event = serde_json::json!({
             "type": "response.failed",
             "response": {
                 "id": "resp_failed",
                 "object": "response",
                 "status": "failed",
-                "error": {
-                    "message": error_text
-                }
+                "error": error_obj
             }
         });
         output.push_str("event: response.failed\ndata: ");
@@ -2531,7 +2666,8 @@ async fn try_request_via_openai_protocol(
     if !resp.status().is_success() {
         let status = resp.status();
 
-        // Check for 429 rate limit
+        // For 429 rate limit, pass through the response to allow proper error handling upstream
+        // This allows the Responses API to return structured rate limit errors to clients
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             // Parse Retry-After header if present
             let retry_after = resp
@@ -2540,7 +2676,61 @@ async fn try_request_via_openai_protocol(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(std::time::Duration::from_secs);
-            return Err(TryRequestError::RateLimited(retry_after));
+
+            // Record the rate limit hit for tracking
+            record_rate_limit_hit(tier_name);
+            ratelimit_tracker.record_429(tier_name, retry_after);
+
+            // Pass through the 429 response as-is so it can be handled by response converters
+            let mut builder =
+                axum::response::Response::builder().status(reqwest_status_to_axum(status));
+
+            // Copy headers
+            for (key, value) in resp.headers() {
+                if let Ok(name) = axum::http::HeaderName::from_bytes(key.as_str().as_bytes()) {
+                    if let Ok(val) = axum::http::HeaderValue::from_bytes(value.as_bytes()) {
+                        builder = builder.header(name, val);
+                    }
+                }
+            }
+
+            // Insert x-ccr-tier header
+            builder = builder.header("x-ccr-tier", tier_name);
+
+            let body_bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| TryRequestError::Other(e.into()))?;
+
+            // Normalize the error response body to include required fields like 'code': 'rate_limited'
+            let normalized_body = if let Ok(mut error_json) =
+                serde_json::from_slice::<serde_json::Value>(&body_bytes)
+            {
+                if let Some(error_obj) = error_json.get_mut("error").and_then(|e| e.as_object_mut())
+                {
+                    error_obj.insert(
+                        "type".to_string(),
+                        serde_json::Value::String("rate_limit_error".to_string()),
+                    );
+                    error_obj.insert(
+                        "code".to_string(),
+                        serde_json::Value::String("rate_limited".to_string()),
+                    );
+                    if let Some(retry_after_secs) = retry_after {
+                        error_obj.insert(
+                            "retry_after".to_string(),
+                            serde_json::json!(retry_after_secs.as_secs()),
+                        );
+                    }
+                }
+                serde_json::to_vec(&error_json).unwrap_or(body_bytes.to_vec())
+            } else {
+                body_bytes.to_vec()
+            };
+
+            return builder.body(Body::from(normalized_body)).map_err(|e| {
+                TryRequestError::Other(anyhow::anyhow!("Failed to build response: {}", e))
+            });
         }
 
         let body = resp
@@ -2681,6 +2871,7 @@ async fn try_request_via_anthropic_protocol(
     if !resp.status().is_success() {
         let status = resp.status();
 
+        // For 429 rate limit, pass through the response to allow proper error handling upstream
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let retry_after = resp
                 .headers()
@@ -2688,7 +2879,61 @@ async fn try_request_via_anthropic_protocol(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(std::time::Duration::from_secs);
-            return Err(TryRequestError::RateLimited(retry_after));
+
+            // Record the rate limit hit for tracking
+            record_rate_limit_hit(tier_name);
+            ratelimit_tracker.record_429(tier_name, retry_after);
+
+            // Pass through the 429 response as-is
+            let mut builder =
+                axum::response::Response::builder().status(reqwest_status_to_axum(status));
+
+            // Copy headers
+            for (key, value) in resp.headers() {
+                if let Ok(name) = axum::http::HeaderName::from_bytes(key.as_str().as_bytes()) {
+                    if let Ok(val) = axum::http::HeaderValue::from_bytes(value.as_bytes()) {
+                        builder = builder.header(name, val);
+                    }
+                }
+            }
+
+            // Insert x-ccr-tier header
+            builder = builder.header("x-ccr-tier", tier_name);
+
+            let body_bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| TryRequestError::Other(e.into()))?;
+
+            // Normalize the error response body to include required fields like 'code': 'rate_limited'
+            let normalized_body = if let Ok(mut error_json) =
+                serde_json::from_slice::<serde_json::Value>(&body_bytes)
+            {
+                if let Some(error_obj) = error_json.get_mut("error").and_then(|e| e.as_object_mut())
+                {
+                    error_obj.insert(
+                        "type".to_string(),
+                        serde_json::Value::String("rate_limit_error".to_string()),
+                    );
+                    error_obj.insert(
+                        "code".to_string(),
+                        serde_json::Value::String("rate_limited".to_string()),
+                    );
+                    if let Some(retry_after_secs) = retry_after {
+                        error_obj.insert(
+                            "retry_after".to_string(),
+                            serde_json::json!(retry_after_secs.as_secs()),
+                        );
+                    }
+                }
+                serde_json::to_vec(&error_json).unwrap_or(body_bytes.to_vec())
+            } else {
+                body_bytes.to_vec()
+            };
+
+            return builder.body(Body::from(normalized_body)).map_err(|e| {
+                TryRequestError::Other(anyhow::anyhow!("Failed to build response: {}", e))
+            });
         }
 
         let body = resp
@@ -2794,6 +3039,7 @@ pub async fn stream_response_translated(
 
     tokio::spawn(async move {
         let mut stream = resp.bytes_stream();
+        let mut decoder = SseFrameDecoder::new();
         let mut is_first = true;
         let mut accumulated_content = String::new();
         let mut accumulated_reasoning = String::new();
@@ -2809,14 +3055,8 @@ pub async fn stream_response_translated(
                     };
                     match chunk {
                         Ok(bytes) => {
-                    // Parse SSE data lines
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        for line in text.lines() {
-                            let data = line
-                                .strip_prefix("data:")
-                                .or_else(|| line.strip_prefix("data: "));
-                            if let Some(json_str) = data {
-                                let json_str = json_str.trim();
+                            for frame in decoder.push(&bytes) {
+                                let json_str = frame.data.trim();
                                 if json_str == "[DONE]" || json_str.is_empty() {
                                     continue;
                                 }
@@ -2864,30 +3104,14 @@ pub async fn stream_response_translated(
                                         }
                                     }
                                 } else {
-                                    // Pass through lines that don't parse as OpenAI chunks
-                                    let sse_data = format!("{}\n", line);
+                                    // Pass through frames that don't parse as OpenAI chunks.
+                                    let sse_data = frame.to_sse_string();
                                     if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
                                         break;
                                     }
                                 }
-                            } else if !line.is_empty() {
-                                // Pass through non-data lines
-                                let sse_data = format!("{}\n", line);
-                                if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
-                                    break;
-                                }
                             }
                         }
-                    } else {
-                        // Pass through binary data
-                        if tx.capacity() == 0 {
-                            record_stream_backpressure();
-                        }
-                        if tx.send(Ok(bytes)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
                         Err(e) => {
                             let _ = tx
                                 .send(Err(std::io::Error::other(e.to_string())))
