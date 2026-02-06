@@ -1,23 +1,29 @@
 use axum::{
+    body::{to_bytes, Body},
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tracing::{error, info, trace, warn};
 
-use crate::config::Config;
+use crate::config::{Config, ProviderProtocol};
+use crate::frontend::codex::CodexFrontend;
+use crate::frontend::{detect_frontend, Frontend};
 use crate::metrics::{
-    record_failure, record_pre_request_tokens, record_rate_limit_hit, record_request,
-    record_request_duration, record_usage, sync_ewma_gauge, verify_token_usage,
+    record_failure, record_pre_request_tokens, record_rate_limit_hit, record_request_duration_with_frontend,
+    record_request_with_frontend, record_usage, sync_ewma_gauge, verify_token_usage,
 };
 use crate::ratelimit::RateLimitTracker;
 use crate::routing::{AttemptTimer, EwmaTracker};
 use crate::sse::StreamVerifyCtx;
-use crate::transformer::{TransformerChain, TransformerRegistry};
+use crate::transform::anthropic_to_openai::AnthropicToOpenAiResponseTransformer;
+use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
+use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
 
 /// Extract rate limit information from upstream response headers.
 fn extract_rate_limit_headers(
@@ -159,7 +165,7 @@ pub struct OpenAIRequest {
 pub struct OpenAIMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,9 +199,29 @@ struct OpenAIResponseMessage {
     #[allow(dead_code)] // TODO: Validate response role
     role: String,
     #[serde(default)]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(default, rename = "reasoning_content")]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAIToolCall>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct OpenAIToolCall {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default, rename = "type")]
+    tool_type: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAIToolFunction>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct OpenAIToolFunction {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    arguments: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -239,6 +265,26 @@ struct OpenAIDelta {
     content: Option<String>,
     #[serde(default, rename = "reasoning_content")]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAIStreamToolCall>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAIStreamToolCall {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAIStreamToolFunction>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAIStreamToolFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 // ============================================================================
@@ -247,30 +293,36 @@ struct OpenAIDelta {
 
 /// Anthropic non-streaming response format.
 #[derive(Debug, Serialize, Deserialize)]
-struct AnthropicResponse {
-    id: String,
+pub struct AnthropicResponse {
+    pub id: String,
     #[serde(rename = "type")]
-    response_type: String,
-    role: String,
-    model: String,
-    content: Vec<AnthropicContentBlock>,
-    usage: AnthropicUsage,
-    stop_reason: Option<String>,
+    pub response_type: String,
+    pub role: String,
+    pub model: String,
+    pub content: Vec<AnthropicContentBlock>,
+    pub usage: AnthropicUsage,
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
-enum AnthropicContentBlock {
+pub enum AnthropicContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "thinking")]
     Thinking { thinking: String, signature: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
-struct AnthropicUsage {
-    input_tokens: u64,
-    output_tokens: u64,
+pub struct AnthropicUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 /// Anthropic streaming event types.
@@ -296,30 +348,106 @@ struct AnthropicStreamEvent {
 // Request Translation: Anthropic -> OpenAI
 // ============================================================================
 
-/// Convert Anthropic message content to a plain string.
-/// Handles both string content and array of content blocks.
-fn normalize_message_content(content: &serde_json::Value) -> String {
+/// Convert Anthropic message content to OpenAI content format.
+///
+/// Preserves multimodal blocks where possible:
+/// - text blocks => OpenAI text blocks
+/// - image blocks => OpenAI image_url blocks
+/// - thinking blocks => rendered inline as text for compatibility
+fn normalize_message_content(content: &serde_json::Value) -> serde_json::Value {
     match content {
-        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
         serde_json::Value::Array(arr) => {
-            // Concatenate all text blocks from the array
-            let mut result = String::new();
+            let mut openai_blocks = Vec::new();
+            let mut text_fallback = String::new();
             for block in arr {
-                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                    result.push_str(text);
-                } else if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
-                    // Include thinking content inline for OpenAI
-                    if !result.is_empty() {
-                        result.push_str("\n\n");
+                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match block_type {
+                    "text" => {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            openai_blocks.push(serde_json::json!({
+                                "type": "text",
+                                "text": text
+                            }));
+                        }
                     }
-                    result.push_str("<thinking>");
-                    result.push_str(thinking);
-                    result.push_str("</thinking>");
+                    "image" => {
+                        if let Some(source) = block.get("source") {
+                            if let Some(data) = source.get("data").and_then(|v| v.as_str()) {
+                                let media_type = source
+                                    .get("media_type")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("image/jpeg");
+                                openai_blocks.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": format!("data:{};base64,{}", media_type, data)
+                                    }
+                                }));
+                            } else if let Some(url) = source.get("url").and_then(|v| v.as_str()) {
+                                openai_blocks.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": url
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                    "thinking" => {
+                        if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                            if !text_fallback.is_empty() {
+                                text_fallback.push_str("\n\n");
+                            }
+                            text_fallback.push_str("<thinking>");
+                            text_fallback.push_str(thinking);
+                            text_fallback.push_str("</thinking>");
+                        }
+                    }
+                    _ => {
+                        if !text_fallback.is_empty() {
+                            text_fallback.push('\n');
+                        }
+                        text_fallback.push_str(&block.to_string());
+                    }
                 }
             }
-            result
+
+            let text_only_blocks = !openai_blocks.is_empty()
+                && text_fallback.is_empty()
+                && openai_blocks
+                    .iter()
+                    .all(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"));
+
+            if text_only_blocks {
+                let concatenated_text = openai_blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+                    .collect::<String>();
+                serde_json::Value::String(concatenated_text)
+            } else if openai_blocks.is_empty() {
+                serde_json::Value::String(text_fallback)
+            } else {
+                if !text_fallback.is_empty() {
+                    openai_blocks.push(serde_json::json!({
+                        "type": "text",
+                        "text": text_fallback
+                    }));
+                }
+                serde_json::Value::Array(openai_blocks)
+            }
         }
-        _ => content.as_str().unwrap_or("").to_string(),
+        _ => content.clone(),
+    }
+}
+
+fn has_nonempty_content(content: &serde_json::Value) -> bool {
+    match content {
+        serde_json::Value::Null => false,
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Array(a) => !a.is_empty(),
+        serde_json::Value::Object(o) => !o.is_empty(),
+        _ => true,
     }
 }
 
@@ -395,7 +523,7 @@ fn translate_request_anthropic_to_openai(
         if !system_content.is_empty() {
             messages.push(OpenAIMessage {
                 role: "system".to_string(),
-                content: Some(system_content),
+                content: Some(serde_json::Value::String(system_content)),
                 reasoning_content: None,
                 tool_call_id: None,
             });
@@ -444,7 +572,7 @@ fn translate_request_anthropic_to_openai(
 
                     messages.push(OpenAIMessage {
                         role: "tool".to_string(),
-                        content: tool_content,
+                        content: tool_content.map(serde_json::Value::String),
                         tool_call_id,
                         ..Default::default()
                     });
@@ -455,7 +583,7 @@ fn translate_request_anthropic_to_openai(
         // Handle regular message content
         let content = normalize_message_content(&msg.content);
 
-        if !content.is_empty() || role != "user" {
+        if has_nonempty_content(&content) || role != "user" {
             messages.push(OpenAIMessage {
                 role: role.to_string(),
                 content: Some(content),
@@ -504,6 +632,12 @@ fn translate_response_openai_to_anthropic(
     openai_resp: OpenAIResponse,
     model: &str,
 ) -> AnthropicResponse {
+    let response_model = if openai_resp.model.is_empty() {
+        model.to_string()
+    } else {
+        openai_resp.model.clone()
+    };
+
     let content = if let Some(choice) = openai_resp.choices.first() {
         let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
 
@@ -518,9 +652,65 @@ fn translate_response_openai_to_anthropic(
         }
 
         // Main content
-        if let Some(text) = &choice.message.content {
-            if !text.is_empty() {
-                blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+        if let Some(content_value) = &choice.message.content {
+            match content_value {
+                serde_json::Value::String(text) if !text.is_empty() => {
+                    blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        let block_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        match block_type {
+                            "text" => {
+                                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                    if !text.is_empty() {
+                                        blocks.push(AnthropicContentBlock::Text {
+                                            text: text.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                            "image_url" => {
+                                blocks.push(AnthropicContentBlock::Text {
+                                    text: item.to_string(),
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                other => {
+                    if !other.is_null() {
+                        blocks.push(AnthropicContentBlock::Text {
+                            text: other.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(tool_calls) = &choice.message.tool_calls {
+            for (index, tool_call) in tool_calls.iter().enumerate() {
+                if tool_call.tool_type.as_deref().unwrap_or("function") != "function" {
+                    continue;
+                }
+                if let Some(function) = &tool_call.function {
+                    let input = serde_json::from_str::<serde_json::Value>(&function.arguments)
+                        .unwrap_or_else(|_| {
+                            serde_json::json!({
+                                "raw_arguments": function.arguments
+                            })
+                        });
+
+                    blocks.push(AnthropicContentBlock::ToolUse {
+                        id: tool_call
+                            .id
+                            .clone()
+                            .unwrap_or_else(|| format!("toolu_{}", index)),
+                        name: function.name.clone(),
+                        input,
+                    });
+                }
             }
         }
 
@@ -541,13 +731,18 @@ fn translate_response_openai_to_anthropic(
         id: openai_resp.id,
         response_type: "message".to_string(),
         role: "assistant".to_string(),
-        model: model.to_string(),
+        model: response_model,
         content,
         usage,
-        stop_reason: openai_resp
-            .choices
-            .first()
-            .and_then(|c| c.finish_reason.clone()),
+        stop_reason: openai_resp.choices.first().and_then(|c| {
+            c.finish_reason.as_deref().map(|reason| match reason {
+                "stop" => "end_turn".to_string(),
+                "length" => "max_tokens".to_string(),
+                "tool_calls" => "tool_use".to_string(),
+                "content_filter" => "stop_sequence".to_string(),
+                other => other.to_string(),
+            })
+        }),
     }
 }
 
@@ -626,6 +821,63 @@ fn translate_stream_chunk_to_anthropic(
                     usage: None,
                     stop_reason: None,
                 });
+            }
+        }
+
+        // Handle tool call deltas.
+        if let Some(tool_calls) = &choice.delta.tool_calls {
+            for tool_call in tool_calls {
+                let tool_index = tool_call.index + 1;
+                if tool_call.id.is_some()
+                    || tool_call
+                        .function
+                        .as_ref()
+                        .and_then(|f| f.name.as_ref())
+                        .is_some()
+                {
+                    events.push(AnthropicStreamEvent {
+                        event_type: "content_block_start".to_string(),
+                        message: None,
+                        index: Some(tool_index),
+                        content_block: Some(serde_json::json!({
+                            "type": "tool_use",
+                            "id": tool_call
+                                .id
+                                .clone()
+                                .unwrap_or_else(|| format!("toolu_stream_{}", tool_index)),
+                            "name": tool_call
+                                .function
+                                .as_ref()
+                                .and_then(|f| f.name.as_ref())
+                                .cloned()
+                                .unwrap_or_default(),
+                            "input": {}
+                        })),
+                        delta: None,
+                        usage: None,
+                        stop_reason: None,
+                    });
+                }
+
+                if let Some(arguments) = tool_call
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.arguments.as_ref())
+                    .filter(|a| !a.is_empty())
+                {
+                    events.push(AnthropicStreamEvent {
+                        event_type: "content_block_delta".to_string(),
+                        message: None,
+                        index: Some(tool_index),
+                        content_block: None,
+                        delta: Some(serde_json::json!({
+                            "type": "input_json_delta",
+                            "partial_json": arguments
+                        })),
+                        usage: None,
+                        stop_reason: None,
+                    });
+                }
             }
         }
 
@@ -726,6 +978,7 @@ fn strip_search_tags(request: &mut AnthropicRequest) {
 
 pub async fn handle_messages(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
     let start = std::time::Instant::now();
@@ -769,7 +1022,13 @@ pub async fn handle_messages(
         }
     }
 
-    info!("Incoming request for model: {}", request.model);
+    // Detect frontend type from headers and request
+    let body_json = serde_json::to_value(&request).unwrap_or_default();
+    let frontend = detect_frontend(&headers, &body_json);
+    info!(
+        "Incoming request for model: {} (frontend: {:?})",
+        request.model, frontend
+    );
 
     // Serialize messages to JSON values once for pre-request token audit
     let msg_values: Vec<serde_json::Value> = request
@@ -825,8 +1084,8 @@ pub async fn handle_messages(
                 Ok(response) => {
                     let attempt_duration = timer.finish_success();
                     let total_duration = start.elapsed().as_secs_f64();
-                    record_request(tier_name);
-                    record_request_duration(tier_name, total_duration);
+                    record_request_with_frontend(tier_name, frontend);
+                    record_request_duration_with_frontend(tier_name, total_duration, frontend);
                     sync_ewma_gauge(&state.ewma_tracker);
                     info!(
                         "Success on {} after {:.2}s (attempt {:.3}s)",
@@ -895,41 +1154,1103 @@ pub async fn handle_messages(
 // OpenAI-Compatible Endpoint
 // ============================================================================
 
-/// Handle OpenAI-format chat completion requests.
-/// Converts to Anthropic format internally.
-pub async fn handle_chat_completions(
-    State(state): State<AppState>,
-    Json(request): Json<OpenAIRequest>,
-) -> Response {
-    // Convert OpenAI request to Anthropic format
-    let anthropic_messages: Vec<Message> = request
-        .messages
-        .into_iter()
-        .map(|m| {
-            let content = if let Some(text) = m.content {
-                serde_json::Value::String(text)
-            } else {
-                serde_json::Value::String(String::new())
-            };
-            Message {
+fn internal_request_to_anthropic_request(
+    req: crate::frontend::InternalRequest,
+) -> AnthropicRequest {
+    AnthropicRequest {
+        model: req.model,
+        messages: req
+            .messages
+            .into_iter()
+            .map(|m| Message {
                 role: m.role,
-                content,
+                content: m.content,
+            })
+            .collect(),
+        system: req.system,
+        max_tokens: req.max_tokens,
+        temperature: req.temperature,
+        stream: req.stream,
+        tools: req.tools.map(|tools| {
+            tools
+                .into_iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.input_schema.unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}))
+                    })
+                })
+                .collect()
+        }),
+    }
+}
+
+fn anthropic_response_to_internal(
+    response: AnthropicResponse,
+) -> crate::frontend::InternalResponse {
+    let content = response
+        .content
+        .into_iter()
+        .map(|block| match block {
+            AnthropicContentBlock::Text { text } => crate::frontend::ContentBlock::Text { text },
+            AnthropicContentBlock::Thinking {
+                thinking,
+                signature,
+            } => crate::frontend::ContentBlock::Thinking {
+                thinking,
+                signature: if signature.is_empty() {
+                    None
+                } else {
+                    Some(signature)
+                },
+            },
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                crate::frontend::ContentBlock::ToolUse { id, name, input }
             }
         })
         .collect();
 
-    let anthropic_request = AnthropicRequest {
-        model: request.model,
-        messages: anthropic_messages,
-        system: None,
-        max_tokens: request.max_tokens,
-        temperature: request.temperature,
-        stream: request.stream,
-        tools: request.tools,
+    crate::frontend::InternalResponse {
+        id: response.id,
+        response_type: response.response_type,
+        role: response.role,
+        model: response.model,
+        content,
+        stop_reason: response.stop_reason,
+        usage: Some(crate::frontend::Usage {
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+            input_tokens_details: None,
+        }),
+        extra_data: None,
+    }
+}
+
+fn parse_sse_frames(payload: &str) -> Vec<(Option<String>, String)> {
+    let mut frames = Vec::new();
+    let normalized = payload.replace("\r\n", "\n");
+
+    for frame in normalized.split("\n\n") {
+        if frame.trim().is_empty() {
+            continue;
+        }
+
+        let mut event_type = None;
+        let mut data_lines: Vec<String> = Vec::new();
+        for line in frame.lines() {
+            if let Some(rest) = line.strip_prefix("event:") {
+                event_type = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest.trim_start().to_string());
+            }
+        }
+
+        if data_lines.is_empty() {
+            continue;
+        }
+        frames.push((event_type, data_lines.join("\n")));
+    }
+
+    frames
+}
+
+fn decode_request_body(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, String> {
+    let content_encoding = headers
+        .get(axum::http::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    if content_encoding.is_empty() || content_encoding == "identity" {
+        return Ok(bytes.to_vec());
+    }
+
+    if content_encoding.contains("zstd") || content_encoding.contains("zst") {
+        return zstd::stream::decode_all(std::io::Cursor::new(bytes))
+            .map_err(|e| format!("Failed to decode zstd request body: {}", e));
+    }
+
+    Err(format!(
+        "Unsupported content-encoding '{}'",
+        content_encoding
+    ))
+}
+
+fn parse_json_payload(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    if let Ok(value) = serde_json::from_slice(bytes) {
+        return Ok(value);
+    }
+
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("Request body was empty".to_string());
+    }
+
+    // Some clients may double-encode JSON as a string payload.
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let serde_json::Value::String(inner) = parsed {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&inner) {
+                return Ok(value);
+            }
+        }
+    }
+
+    // Defensive fallback: if there is envelope noise, parse the first JSON object span.
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        if end > start {
+            let candidate = &trimmed[start..=end];
+            if let Ok(value) = serde_json::from_str(candidate) {
+                return Ok(value);
+            }
+        }
+    }
+
+    let preview: String = trimmed.chars().take(200).collect();
+    Err(format!(
+        "Failed to parse request body as JSON (preview: {:?})",
+        preview
+    ))
+}
+
+async fn convert_anthropic_json_response_to_openai(response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let body_bytes = match to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            error!("Failed to read Anthropic response body: {}", err);
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Failed to read upstream response"})),
+            )
+                .into_response();
+        }
     };
 
-    // Delegate to the standard Anthropic handler
-    handle_messages(State(state), Json(anthropic_request)).await
+    if parts.status != StatusCode::OK {
+        return Response::from_parts(parts, Body::from(body_bytes));
+    }
+
+    let anthropic_response: AnthropicResponse = match serde_json::from_slice(&body_bytes) {
+        Ok(resp) => resp,
+        Err(_) => {
+            // If the payload is not Anthropic-shaped, pass through unchanged.
+            return Response::from_parts(parts, Body::from(body_bytes));
+        }
+    };
+
+    let internal_response = anthropic_response_to_internal(anthropic_response);
+    let frontend = CodexFrontend::new();
+    let serialized = match frontend.serialize_response(internal_response) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            error!("Failed to serialize OpenAI response: {}", err);
+            return Response::from_parts(parts, Body::from(body_bytes));
+        }
+    };
+
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    Response::from_parts(parts, Body::from(serialized))
+}
+
+async fn convert_anthropic_stream_response_to_openai(response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let body_bytes = match to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            error!("Failed to read Anthropic stream: {}", err);
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Failed to read upstream stream"})),
+            )
+                .into_response();
+        }
+    };
+
+    if parts.status != StatusCode::OK {
+        return Response::from_parts(parts, Body::from(body_bytes));
+    }
+
+    let payload = String::from_utf8_lossy(&body_bytes);
+    let transformer = AnthropicToOpenAiResponseTransformer;
+    let mut output = String::new();
+    let mut sent_done = false;
+
+    for (event_type, data) in parse_sse_frames(&payload) {
+        if data.trim() == "[DONE]" {
+            output.push_str("data: [DONE]\n\n");
+            sent_done = true;
+            continue;
+        }
+
+        let mut event_json: serde_json::Value = match serde_json::from_str(&data) {
+            Ok(value) => value,
+            Err(_) => {
+                output.push_str("data: ");
+                output.push_str(&data);
+                output.push_str("\n\n");
+                continue;
+            }
+        };
+
+        if event_json.get("type").is_none() {
+            if let Some(t) = event_type.as_deref() {
+                event_json["type"] = serde_json::Value::String(t.to_string());
+            }
+        }
+
+        let transformed = match transformer.transform_response(event_json) {
+            Ok(value) => value,
+            Err(_) => {
+                output.push_str("data: ");
+                output.push_str(&data);
+                output.push_str("\n\n");
+                continue;
+            }
+        };
+
+        output.push_str("data: ");
+        output.push_str(&serde_json::to_string(&transformed).unwrap_or_default());
+        output.push_str("\n\n");
+
+        if event_type.as_deref() == Some("message_stop") {
+            output.push_str("data: [DONE]\n\n");
+            sent_done = true;
+        }
+    }
+
+    if !sent_done {
+        output.push_str("data: [DONE]\n\n");
+    }
+
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    Response::from_parts(parts, Body::from(output))
+}
+
+fn map_openai_usage_to_responses_usage(usage: &serde_json::Value) -> serde_json::Value {
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(prompt_tokens + completion_tokens);
+    let cached_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(|v| v.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("completion_tokens_details")
+        .and_then(|v| v.get("reasoning_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    serde_json::json!({
+        "input_tokens": prompt_tokens,
+        "input_tokens_details": {
+            "cached_tokens": cached_tokens
+        },
+        "output_tokens": completion_tokens,
+        "output_tokens_details": {
+            "reasoning_tokens": reasoning_tokens
+        },
+        "total_tokens": total_tokens
+    })
+}
+
+fn openai_chat_completion_to_responses_json(openai: &serde_json::Value) -> serde_json::Value {
+    let response_id = openai
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("resp_unknown");
+    let created_at = openai
+        .get("created")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        });
+    let model = openai
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let mut output_items = Vec::new();
+    if let Some(choice) = openai
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+    {
+        if let Some(message) = choice.get("message") {
+            let mut content_blocks = Vec::new();
+            if let Some(content) = message.get("content") {
+                match content {
+                    serde_json::Value::String(text) if !text.is_empty() => {
+                        content_blocks.push(serde_json::json!({
+                            "type": "output_text",
+                            "text": text
+                        }));
+                    }
+                    serde_json::Value::Array(items) => {
+                        for item in items {
+                            if item.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                    content_blocks.push(serde_json::json!({
+                                        "type": "output_text",
+                                        "text": text
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            output_items.push(serde_json::json!({
+                "id": format!("msg_{}", response_id),
+                "type": "message",
+                "role": "assistant",
+                "content": content_blocks
+            }));
+
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                for tool_call in tool_calls {
+                    let call_id = tool_call
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("call_unknown");
+                    let name = tool_call
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
+                    let arguments = tool_call
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+
+                    output_items.push(serde_json::json!({
+                        "id": call_id,
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": arguments
+                    }));
+                }
+            }
+        }
+    }
+
+    let usage = openai
+        .get("usage")
+        .map(map_openai_usage_to_responses_usage)
+        .unwrap_or_else(|| map_openai_usage_to_responses_usage(&serde_json::json!({})));
+
+    serde_json::json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": "completed",
+        "model": model,
+        "output": output_items,
+        "usage": usage
+    })
+}
+
+fn responses_content_to_openai_content(content: &serde_json::Value) -> serde_json::Value {
+    match content {
+        serde_json::Value::Array(items) => {
+            let mut blocks = Vec::new();
+            for item in items {
+                let block_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match block_type {
+                    "input_text" | "output_text" => {
+                        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                            blocks.push(serde_json::json!({"type": "text", "text": text}));
+                        }
+                    }
+                    "input_image" => {
+                        if let Some(image_url) = item.get("image_url").and_then(|v| v.as_str()) {
+                            blocks.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": {"url": image_url}
+                            }));
+                        }
+                    }
+                    _ => {
+                        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                            blocks.push(serde_json::json!({"type": "text", "text": text}));
+                        }
+                    }
+                }
+            }
+            if blocks.len() == 1 && blocks[0].get("type").and_then(|v| v.as_str()) == Some("text") {
+                serde_json::Value::String(
+                    blocks[0]
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            } else {
+                serde_json::Value::Array(blocks)
+            }
+        }
+        serde_json::Value::String(text) => serde_json::Value::String(text.clone()),
+        _ => serde_json::Value::String(content.to_string()),
+    }
+}
+
+fn normalize_tool_output(output: &serde_json::Value) -> String {
+    match output {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(items) => {
+            let mut combined = String::new();
+            for item in items {
+                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                    combined.push_str(text);
+                }
+            }
+            if combined.is_empty() {
+                output.to_string()
+            } else {
+                combined
+            }
+        }
+        _ => output.to_string(),
+    }
+}
+
+fn normalize_responses_message_role(role: &str) -> &str {
+    match role {
+        // OpenAI Responses API `developer` role should be treated as `system`
+        // for providers that only accept classic OpenAI chat roles.
+        "developer" => "system",
+        _ => role,
+    }
+}
+
+fn responses_request_to_openai_chat_request(
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "responses request requires 'model'".to_string())?;
+
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+
+    if let Some(instructions) = body.get("instructions").and_then(|v| v.as_str()) {
+        if !instructions.is_empty() {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": instructions
+            }));
+        }
+    }
+
+    if let Some(input_items) = body.get("input").and_then(|v| v.as_array()) {
+        for item in input_items {
+            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match item_type {
+                "message" => {
+                    let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+                    let role = normalize_responses_message_role(role);
+                    let content = item
+                        .get("content")
+                        .map(responses_content_to_openai_content)
+                        .unwrap_or_else(|| serde_json::Value::String(String::new()));
+                    messages.push(serde_json::json!({
+                        "role": role,
+                        "content": content
+                    }));
+                }
+                "function_call_output" | "custom_tool_call_output" => {
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("call_unknown");
+                    let output = item
+                        .get("output")
+                        .map(normalize_tool_output)
+                        .unwrap_or_default();
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": output
+                    }));
+                }
+                "function_call" | "custom_tool_call" | "local_shell_call" => {
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.get("id").and_then(|v| v.as_str()))
+                        .unwrap_or("call_unknown");
+                    let name = match item_type {
+                        "function_call" => item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("function_call"),
+                        "custom_tool_call" => item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("custom_tool_call"),
+                        _ => "local_shell",
+                    };
+
+                    let arguments = match item_type {
+                        "function_call" => item
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                item.get("arguments")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({}))
+                                    .to_string()
+                            }),
+                        "custom_tool_call" => item
+                            .get("input")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                item.get("input")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({}))
+                                    .to_string()
+                            }),
+                        _ => item
+                            .get("action")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}))
+                            .to_string(),
+                    };
+
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": arguments
+                            }
+                        }]
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut request = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": body.get("stream").and_then(|v| v.as_bool()).unwrap_or(true)
+    });
+
+    if let Some(tools) = body.get("tools").cloned() {
+        request["tools"] = tools;
+    }
+    if let Some(tool_choice) = body.get("tool_choice").cloned() {
+        request["tool_choice"] = tool_choice;
+    }
+    if let Some(temperature) = body.get("temperature").cloned() {
+        request["temperature"] = temperature;
+    }
+    if let Some(top_p) = body.get("top_p").cloned() {
+        request["top_p"] = top_p;
+    }
+    if let Some(max_tokens) = body.get("max_output_tokens").cloned() {
+        request["max_tokens"] = max_tokens;
+    }
+
+    Ok(request)
+}
+
+async fn convert_openai_json_response_to_responses(response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let body_bytes = match to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            error!("Failed to read OpenAI response: {}", err);
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Failed to read upstream response"})),
+            )
+                .into_response();
+        }
+    };
+
+    let openai_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(value) => value,
+        Err(_) => return Response::from_parts(parts, Body::from(body_bytes)),
+    };
+
+    if parts.status != StatusCode::OK {
+        let failed = serde_json::json!({
+            "id": "resp_failed",
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "message": openai_json
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("upstream request failed")
+            }
+        });
+        parts.headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        return Response::from_parts(parts, Body::from(failed.to_string()));
+    }
+
+    let responses_json = openai_chat_completion_to_responses_json(&openai_json);
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    Response::from_parts(parts, Body::from(responses_json.to_string()))
+}
+
+async fn convert_openai_stream_response_to_responses(response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let body_bytes = match to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            error!("Failed to read OpenAI stream: {}", err);
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Failed to read upstream stream"})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut output = String::new();
+    let payload = String::from_utf8_lossy(&body_bytes);
+
+    if parts.status != StatusCode::OK {
+        let error_text = String::from_utf8_lossy(&body_bytes).to_string();
+        let failed_event = serde_json::json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_failed",
+                "object": "response",
+                "status": "failed",
+                "error": {
+                    "message": error_text
+                }
+            }
+        });
+        output.push_str("event: response.failed\ndata: ");
+        output.push_str(&failed_event.to_string());
+        output.push_str("\n\n");
+        parts.status = StatusCode::OK;
+        parts.headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        return Response::from_parts(parts, Body::from(output));
+    }
+
+    #[derive(Default)]
+    struct ToolAccum {
+        id: String,
+        name: String,
+        arguments: String,
+        added: bool,
+    }
+
+    let mut response_id = "resp_stream".to_string();
+    let mut created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut model = "unknown".to_string();
+    let mut created_sent = false;
+    let mut message_item_added = false;
+    let mut message_text = String::new();
+    let mut reasoning_text = String::new();
+    let mut tools: std::collections::BTreeMap<usize, ToolAccum> = std::collections::BTreeMap::new();
+    let mut usage = map_openai_usage_to_responses_usage(&serde_json::json!({}));
+
+    for (_event_type, data) in parse_sse_frames(&payload) {
+        if data.trim() == "[DONE]" {
+            break;
+        }
+
+        let chunk: serde_json::Value = match serde_json::from_str(&data) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
+            response_id = id.to_string();
+        }
+        if let Some(ts) = chunk.get("created").and_then(|v| v.as_i64()) {
+            created_at = ts;
+        }
+        if let Some(m) = chunk.get("model").and_then(|v| v.as_str()) {
+            model = m.to_string();
+        }
+
+        if !created_sent {
+            let created_event = serde_json::json!({
+                "type": "response.created",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "status": "in_progress",
+                    "model": model
+                }
+            });
+            output.push_str("event: response.created\ndata: ");
+            output.push_str(&created_event.to_string());
+            output.push_str("\n\n");
+            created_sent = true;
+        }
+
+        if let Some(u) = chunk.get("usage") {
+            usage = map_openai_usage_to_responses_usage(u);
+        }
+
+        let choice = chunk
+            .get("choices")
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first());
+        let Some(choice) = choice else {
+            continue;
+        };
+
+        let delta = choice.get("delta").cloned().unwrap_or_default();
+
+        if delta
+            .get("role")
+            .and_then(|v| v.as_str())
+            .is_some_and(|r| r == "assistant")
+            && !message_item_added
+        {
+            let added = serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": format!("msg_{}", response_id),
+                    "type": "message",
+                    "role": "assistant",
+                    "content": []
+                }
+            });
+            output.push_str("event: response.output_item.added\ndata: ");
+            output.push_str(&added.to_string());
+            output.push_str("\n\n");
+            message_item_added = true;
+        }
+
+        if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
+            if !message_item_added {
+                let added = serde_json::json!({
+                    "type": "response.output_item.added",
+                    "item": {
+                        "id": format!("msg_{}", response_id),
+                        "type": "message",
+                        "role": "assistant",
+                        "content": []
+                    }
+                });
+                output.push_str("event: response.output_item.added\ndata: ");
+                output.push_str(&added.to_string());
+                output.push_str("\n\n");
+                message_item_added = true;
+            }
+
+            message_text.push_str(text);
+            let delta_event = serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": text
+            });
+            output.push_str("event: response.output_text.delta\ndata: ");
+            output.push_str(&delta_event.to_string());
+            output.push_str("\n\n");
+        }
+
+        if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+            reasoning_text.push_str(reasoning);
+            let delta_event = serde_json::json!({
+                "type": "response.reasoning_text.delta",
+                "delta": reasoning,
+                "content_index": 0
+            });
+            output.push_str("event: response.reasoning_text.delta\ndata: ");
+            output.push_str(&delta_event.to_string());
+            output.push_str("\n\n");
+        }
+
+        if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+            for tool_call in tool_calls {
+                let index = tool_call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let entry = tools.entry(index).or_default();
+
+                if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
+                    entry.id = id.to_string();
+                }
+                if let Some(name) = tool_call
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|v| v.as_str())
+                {
+                    entry.name = name.to_string();
+                }
+                if let Some(args) = tool_call
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|v| v.as_str())
+                {
+                    entry.arguments.push_str(args);
+                }
+
+                if !entry.added && (!entry.id.is_empty() || !entry.name.is_empty()) {
+                    if entry.id.is_empty() {
+                        entry.id = format!("call_{}", index);
+                    }
+                    if entry.name.is_empty() {
+                        entry.name = "tool".to_string();
+                    }
+                    let added = serde_json::json!({
+                        "type": "response.output_item.added",
+                        "item": {
+                            "id": entry.id,
+                            "type": "function_call",
+                            "call_id": entry.id,
+                            "name": entry.name,
+                            "arguments": entry.arguments
+                        }
+                    });
+                    output.push_str("event: response.output_item.added\ndata: ");
+                    output.push_str(&added.to_string());
+                    output.push_str("\n\n");
+                    entry.added = true;
+                }
+            }
+        }
+    }
+
+    let mut output_items = Vec::new();
+
+    if message_item_added {
+        let mut message_content = Vec::new();
+        if !reasoning_text.is_empty() {
+            message_content.push(serde_json::json!({
+                "type": "output_text",
+                "text": reasoning_text
+            }));
+        }
+        if !message_text.is_empty() {
+            message_content.push(serde_json::json!({
+                "type": "output_text",
+                "text": message_text
+            }));
+        }
+        let message_item = serde_json::json!({
+            "id": format!("msg_{}", response_id),
+            "type": "message",
+            "role": "assistant",
+            "content": message_content
+        });
+        output_items.push(message_item.clone());
+        let done = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": message_item
+        });
+        output.push_str("event: response.output_item.done\ndata: ");
+        output.push_str(&done.to_string());
+        output.push_str("\n\n");
+    }
+
+    for tool in tools.values() {
+        let call_id = if tool.id.is_empty() {
+            "call_unknown"
+        } else {
+            &tool.id
+        };
+        let name = if tool.name.is_empty() {
+            "tool"
+        } else {
+            &tool.name
+        };
+        let item = serde_json::json!({
+            "id": call_id,
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": tool.arguments
+        });
+        output_items.push(item.clone());
+        let done = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": item
+        });
+        output.push_str("event: response.output_item.done\ndata: ");
+        output.push_str(&done.to_string());
+        output.push_str("\n\n");
+    }
+
+    let completed = serde_json::json!({
+        "type": "response.completed",
+        "response": {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": "completed",
+            "model": model,
+            "output": output_items,
+            "usage": usage
+        }
+    });
+    output.push_str("event: response.completed\ndata: ");
+    output.push_str(&completed.to_string());
+    output.push_str("\n\n");
+
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    parts.status = StatusCode::OK;
+    Response::from_parts(parts, Body::from(output))
+}
+
+/// Handle OpenAI-format chat completion requests.
+///
+/// Converts to Anthropic format internally, processes the request,
+/// then converts the response back to OpenAI format.
+pub async fn handle_chat_completions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request_body): Json<serde_json::Value>,
+) -> Response {
+    let frontend = CodexFrontend::new();
+    let internal_request = match frontend.parse_request(request_body) {
+        Ok(req) => req,
+        Err(e) => {
+            error!("Failed to parse OpenAI request: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid request: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+    let stream_requested = internal_request.stream.unwrap_or(false);
+    let anthropic_request = internal_request_to_anthropic_request(internal_request);
+    let response = handle_messages(State(state), headers, Json(anthropic_request)).await;
+
+    if stream_requested {
+        convert_anthropic_stream_response_to_openai(response).await
+    } else {
+        convert_anthropic_json_response_to_openai(response).await
+    }
+}
+
+/// Handle OpenAI Responses API requests.
+pub async fn handle_responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let body_bytes = match to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": format!("Failed to read request body: {}", err)
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let decoded = match decode_request_body(&body_bytes, &headers) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": err
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let request_body = match parse_json_payload(&decoded) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": err
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let stream_requested = request_body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let openai_chat_request = match responses_request_to_openai_chat_request(&request_body) {
+        Ok(request) => request,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": err
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let openai_response =
+        handle_chat_completions(State(state), headers, Json(openai_chat_request)).await;
+
+    if stream_requested {
+        convert_openai_stream_response_to_responses(openai_response).await
+    } else {
+        convert_openai_json_response_to_responses(openai_response).await
+    }
 }
 
 // ============================================================================
@@ -952,6 +2273,46 @@ pub async fn list_presets(State(state): State<AppState>) -> impl IntoResponse {
         })
         .collect();
     Json(presets)
+}
+
+/// List available models in OpenAI-compatible format.
+///
+/// Includes both explicit route IDs (`provider,model`) and raw model IDs.
+/// This is required by Codex/OpenAI clients that call `GET /v1/models`
+/// before first request dispatch.
+pub async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let mut seen = BTreeSet::new();
+    let mut data = Vec::new();
+
+    for provider in state.config.providers() {
+        for model in &provider.models {
+            let ids = [format!("{},{}", provider.name, model), model.to_string()];
+            for id in ids {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                data.push(serde_json::json!({
+                    "id": id,
+                    "object": "model",
+                    "created": created,
+                    "owned_by": provider.name,
+                }));
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+        // Codex currently expects a `models` field in `/v1/models` responses.
+        // Keep this present for compatibility even when rich model metadata is unavailable.
+        "models": []
+    }))
 }
 
 /// Handle messages via a named preset.
@@ -983,7 +2344,7 @@ pub async fn handle_preset_messages(
     request.model = preset.route.clone();
 
     // Delegate to normal handler
-    handle_messages(State(state), Json(request)).await
+    handle_messages(State(state), HeaderMap::new(), Json(request)).await
 }
 
 async fn try_request(
@@ -1002,11 +2363,86 @@ async fn try_request(
     // Build transformer chain from provider config
     let chain = build_transformer_chain(registry, provider, tier.split(',').nth(1).unwrap_or(tier));
 
-    let url = format!(
-        "{}/chat/completions",
-        provider.api_base_url.trim_end_matches('/')
-    );
+    // Extract the actual model name from the tier (format: "provider,model")
+    let model_name = tier.split(',').nth(1).unwrap_or(tier);
 
+    // Apply request transformers if chain is not empty
+    let transformed_request = if chain.is_empty() {
+        serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?
+    } else {
+        let req_value =
+            serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?;
+        chain
+            .apply_request(req_value)
+            .map_err(TryRequestError::Other)?
+    };
+
+    match provider.protocol {
+        ProviderProtocol::Openai => {
+            try_request_via_openai_protocol(
+                config,
+                provider,
+                transformed_request,
+                model_name,
+                tier_name,
+                local_estimate,
+                ratelimit_tracker,
+                chain,
+            )
+            .await
+        }
+        ProviderProtocol::Anthropic => {
+            try_request_via_anthropic_protocol(
+                config,
+                provider,
+                transformed_request,
+                model_name,
+                tier_name,
+                local_estimate,
+                ratelimit_tracker,
+                chain,
+            )
+            .await
+        }
+    }
+}
+
+const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+
+fn provider_endpoint_url(provider: &crate::config::Provider, endpoint: &str) -> String {
+    let base = provider.api_base_url.trim_end_matches('/');
+    let endpoint = endpoint.trim_start_matches('/');
+    if base.ends_with(endpoint) {
+        base.to_string()
+    } else {
+        format!("{}/{}", base, endpoint)
+    }
+}
+
+fn provider_openai_chat_completions_url(provider: &crate::config::Provider) -> String {
+    provider_endpoint_url(provider, "chat/completions")
+}
+
+fn provider_anthropic_messages_url(provider: &crate::config::Provider) -> String {
+    provider_endpoint_url(provider, "messages")
+}
+
+fn reqwest_status_to_axum(status: reqwest::StatusCode) -> StatusCode {
+    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+fn insert_ccr_tier_header(response: &mut Response, tier_name: &str) {
+    response.headers_mut().insert(
+        "x-ccr-tier",
+        tier_name
+            .parse()
+            .unwrap_or(axum::http::HeaderValue::from_static("unknown")),
+    );
+}
+
+fn build_openai_headers(
+    provider: &crate::config::Provider,
+) -> Result<reqwest::header::HeaderMap, TryRequestError> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "Authorization",
@@ -1024,26 +2460,63 @@ async fn try_request(
                 TryRequestError::Other(anyhow::anyhow!("{}", e))
             })?,
     );
+    Ok(headers)
+}
 
-    // Extract the actual model name from the tier (format: "provider,model")
-    let model_name = tier.split(',').nth(1).unwrap_or(tier);
+fn build_anthropic_headers(
+    provider: &crate::config::Provider,
+) -> Result<reqwest::header::HeaderMap, TryRequestError> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-api-key",
+        provider
+            .api_key
+            .parse()
+            .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                TryRequestError::Other(anyhow::anyhow!("{}", e))
+            })?,
+    );
+    headers.insert(
+        "anthropic-version",
+        provider
+            .anthropic_version
+            .as_deref()
+            .unwrap_or(DEFAULT_ANTHROPIC_VERSION)
+            .parse()
+            .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                TryRequestError::Other(anyhow::anyhow!("{}", e))
+            })?,
+    );
+    headers.insert(
+        "Content-Type",
+        "application/json"
+            .parse()
+            .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                TryRequestError::Other(anyhow::anyhow!("{}", e))
+            })?,
+    );
+    Ok(headers)
+}
 
-    // Apply request transformers if chain is not empty
-    let transformed_request = if chain.is_empty() {
-        serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?
-    } else {
-        let req_value =
-            serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?;
-        chain
-            .apply_request(req_value)
-            .map_err(TryRequestError::Other)?
-    };
+async fn try_request_via_openai_protocol(
+    config: &Config,
+    provider: &crate::config::Provider,
+    transformed_request: serde_json::Value,
+    model_name: &str,
+    tier_name: &str,
+    local_estimate: u64,
+    ratelimit_tracker: Arc<RateLimitTracker>,
+    chain: TransformerChain,
+) -> Result<Response, TryRequestError> {
+    let url = provider_openai_chat_completions_url(provider);
+    let headers = build_openai_headers(provider)?;
+    trace!(tier = tier_name, model = model_name, url = %url, "dispatching OpenAI-compatible upstream request");
 
-    // Deserialize back to AnthropicRequest for translation
+    // Deserialize back to AnthropicRequest for translation.
     let request: AnthropicRequest = serde_json::from_value(transformed_request)
         .map_err(|e| TryRequestError::Other(e.into()))?;
 
-    // Translate Anthropic request to OpenAI format
+    // Translate Anthropic request to OpenAI format.
     let openai_request = translate_request_anthropic_to_openai(&request, model_name);
 
     let resp = config
@@ -1075,15 +2548,16 @@ async fn try_request(
             .await
             .map_err(|e| TryRequestError::Other(e.into()))?;
         return Err(TryRequestError::Other(anyhow::anyhow!(
-            "Provider returned {}: {}",
+            "Provider returned {} from {}: {}",
             status,
+            url,
             body
         )));
     }
 
-    // Handle streaming vs non-streaming
+    // Handle streaming vs non-streaming.
     if request.stream.unwrap_or(false) {
-        // For streaming, we need to translate the SSE events
+        // For streaming, we need to translate OpenAI SSE events to Anthropic SSE.
         let rate_limit_info = extract_rate_limit_headers(&resp);
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
@@ -1102,18 +2576,19 @@ async fn try_request(
             .await,
         )
     } else {
-        // Extract rate limit headers for non-streaming
+        // Extract rate limit headers for non-streaming.
         let rate_limit_info = extract_rate_limit_headers(&resp);
         ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
-        // For non-streaming, translate the full response
+
+        // For non-streaming, translate the full response.
         let body = resp
             .bytes()
             .await
             .map_err(|e| TryRequestError::Other(e.into()))?;
 
-        // Try to parse as OpenAI response and translate
+        // Try to parse as OpenAI response and translate.
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
-            // Record usage from the response
+            // Record usage from the response.
             if let Some(ref usage) = openai_resp.usage {
                 record_usage(
                     tier_name,
@@ -1125,10 +2600,10 @@ async fn try_request(
                 verify_token_usage(tier_name, local_estimate, usage.prompt_tokens);
             }
 
-            // Translate to Anthropic format
+            // Translate to Anthropic format.
             let anthropic_resp = translate_response_openai_to_anthropic(openai_resp, model_name);
 
-            // Apply response transformers if chain is not empty
+            // Apply response transformers if chain is not empty.
             let final_resp = if chain.is_empty() {
                 anthropic_resp
             } else {
@@ -1144,23 +2619,152 @@ async fn try_request(
                 serde_json::to_vec(&final_resp).map_err(|e| TryRequestError::Other(e.into()))?;
 
             let mut response = (StatusCode::OK, response_body).into_response();
-            response.headers_mut().insert(
-                "x-ccr-tier",
-                tier_name
-                    .parse()
-                    .unwrap_or(axum::http::HeaderValue::from_static("unknown")),
-            );
+            insert_ccr_tier_header(&mut response, tier_name);
             return Ok(response);
         }
 
-        // Fallback: pass through original response if translation fails
+        // Fallback: pass through original response if translation fails.
         let mut response = (StatusCode::OK, body).into_response();
-        response.headers_mut().insert(
-            "x-ccr-tier",
-            tier_name
-                .parse()
-                .unwrap_or(axum::http::HeaderValue::from_static("unknown")),
+        insert_ccr_tier_header(&mut response, tier_name);
+        Ok(response)
+    }
+}
+
+async fn try_request_via_anthropic_protocol(
+    config: &Config,
+    provider: &crate::config::Provider,
+    transformed_request: serde_json::Value,
+    model_name: &str,
+    tier_name: &str,
+    local_estimate: u64,
+    ratelimit_tracker: Arc<RateLimitTracker>,
+    chain: TransformerChain,
+) -> Result<Response, TryRequestError> {
+    let url = provider_anthropic_messages_url(provider);
+    let headers = build_anthropic_headers(provider)?;
+    trace!(tier = tier_name, model = model_name, url = %url, "dispatching Anthropic-compatible upstream request");
+
+    let request: AnthropicRequest = serde_json::from_value(transformed_request)
+        .map_err(|e| TryRequestError::Other(e.into()))?;
+
+    // Canonicalize request shape for Anthropic-compatible providers.
+    //
+    // Codex/Responses inputs can introduce OpenAI-style message/tool structures
+    // (e.g., tool call/result shapes). Round-trip through OpenAI and run the
+    // dedicated OpenAI->Anthropic transformer to normalize roles/content/tools.
+    let openai_request = translate_request_anthropic_to_openai(&request, model_name);
+    let openai_request_value =
+        serde_json::to_value(openai_request).map_err(|e| TryRequestError::Other(e.into()))?;
+    let mut normalized_request_value = OpenAiToAnthropicTransformer
+        .transform_request(openai_request_value)
+        .map_err(TryRequestError::Other)?;
+
+    if let Some(obj) = normalized_request_value.as_object_mut() {
+        obj.insert(
+            "model".to_string(),
+            serde_json::Value::String(model_name.to_string()),
         );
+    }
+
+    let request: AnthropicRequest = serde_json::from_value(normalized_request_value)
+        .map_err(|e| TryRequestError::Other(e.into()))?;
+
+    let resp = config
+        .http_client()
+        .post(&url)
+        .headers(headers)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| TryRequestError::Other(e.into()))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
+            return Err(TryRequestError::RateLimited(retry_after));
+        }
+
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| TryRequestError::Other(e.into()))?;
+        return Err(TryRequestError::Other(anyhow::anyhow!(
+            "Provider returned {} from {}: {}",
+            status,
+            url,
+            body
+        )));
+    }
+
+    if request.stream.unwrap_or(false) {
+        let rate_limit_info = extract_rate_limit_headers(&resp);
+        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+
+        let status = reqwest_status_to_axum(resp.status());
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("text/event-stream")
+            .to_string();
+        let stream = resp
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string())));
+        let body = Body::from_stream(stream);
+        let mut response = Response::builder()
+            .status(status)
+            .header(axum::http::header::CONTENT_TYPE, content_type)
+            .body(body)
+            .map_err(|e| TryRequestError::Other(anyhow::anyhow!("{}", e)))?;
+        insert_ccr_tier_header(&mut response, tier_name);
+        Ok(response)
+    } else {
+        let rate_limit_info = extract_rate_limit_headers(&resp);
+        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+
+        let status = reqwest_status_to_axum(resp.status());
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| TryRequestError::Other(e.into()))?;
+
+        if let Ok(anthropic_resp) = serde_json::from_slice::<AnthropicResponse>(&body) {
+            record_usage(
+                tier_name,
+                anthropic_resp.usage.input_tokens,
+                anthropic_resp.usage.output_tokens,
+                0,
+                0,
+            );
+            verify_token_usage(tier_name, local_estimate, anthropic_resp.usage.input_tokens);
+
+            let final_resp = if chain.is_empty() {
+                anthropic_resp
+            } else {
+                let resp_value = serde_json::to_value(&anthropic_resp)
+                    .map_err(|e| TryRequestError::Other(e.into()))?;
+                let transformed = chain
+                    .apply_response(resp_value)
+                    .map_err(TryRequestError::Other)?;
+                serde_json::from_value::<AnthropicResponse>(transformed).unwrap_or(anthropic_resp)
+            };
+
+            let response_body =
+                serde_json::to_vec(&final_resp).map_err(|e| TryRequestError::Other(e.into()))?;
+            let mut response = (StatusCode::OK, response_body).into_response();
+            insert_ccr_tier_header(&mut response, tier_name);
+            return Ok(response);
+        }
+
+        let mut response = (status, body).into_response();
+        insert_ccr_tier_header(&mut response, tier_name);
         Ok(response)
     }
 }
@@ -1169,7 +2773,6 @@ async fn try_request(
 // Streaming Response Translation
 // ============================================================================
 
-use axum::body::Body;
 use bytes::Bytes;
 use futures::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
@@ -1403,7 +3006,10 @@ mod tests {
     #[test]
     fn test_normalize_string_content() {
         let content = serde_json::Value::String("Hello world".to_string());
-        assert_eq!(normalize_message_content(&content), "Hello world");
+        assert_eq!(
+            normalize_message_content(&content),
+            serde_json::Value::String("Hello world".to_string())
+        );
     }
 
     #[test]
@@ -1412,7 +3018,10 @@ mod tests {
             {"type": "text", "text": "Hello "},
             {"type": "text", "text": "world"}
         ]);
-        assert_eq!(normalize_message_content(&content), "Hello world");
+        assert_eq!(
+            normalize_message_content(&content),
+            serde_json::Value::String("Hello world".to_string())
+        );
     }
 
     #[test]
@@ -1436,10 +3045,13 @@ mod tests {
         assert_eq!(openai_req.messages[0].role, "system");
         assert_eq!(
             openai_req.messages[0].content,
-            Some("You are Claude.".to_string())
+            Some(serde_json::Value::String("You are Claude.".to_string()))
         );
         assert_eq!(openai_req.messages[1].role, "user");
-        assert_eq!(openai_req.messages[1].content, Some("Hello".to_string()));
+        assert_eq!(
+            openai_req.messages[1].content,
+            Some(serde_json::Value::String("Hello".to_string()))
+        );
     }
 
     #[test]
@@ -1476,8 +3088,9 @@ mod tests {
                 index: 0,
                 message: OpenAIResponseMessage {
                     role: "assistant".to_string(),
-                    content: Some("The answer is 42.".to_string()),
+                    content: Some(serde_json::Value::String("The answer is 42.".to_string())),
                     reasoning_content: Some("Let me think...".to_string()),
+                    tool_calls: None,
                 },
                 finish_reason: Some("stop".to_string()),
             }],
@@ -1517,6 +3130,7 @@ mod tests {
                     role: Some("assistant".to_string()),
                     content: Some("Hello".to_string()),
                     reasoning_content: None,
+                    tool_calls: None,
                 },
                 finish_reason: None,
             }],
@@ -1543,6 +3157,7 @@ mod tests {
                     role: None,
                     content: None,
                     reasoning_content: Some("Analyzing...".to_string()),
+                    tool_calls: None,
                 },
                 finish_reason: None,
             }],
@@ -1599,7 +3214,31 @@ mod tests {
             .iter()
             .find(|m| m.role == "tool")
             .expect("Should have tool message");
-        assert_eq!(tool_msg.content, Some("4".to_string()));
+        assert_eq!(
+            tool_msg.content,
+            Some(serde_json::Value::String("4".to_string()))
+        );
         assert_eq!(tool_msg.tool_call_id, Some("toolu_123".to_string()));
+    }
+
+    #[test]
+    fn test_responses_request_normalizes_developer_role() {
+        let request = serde_json::json!({
+            "model": "mock,test-model",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "Follow policy"}]
+            }]
+        });
+
+        let openai = responses_request_to_openai_chat_request(&request).unwrap();
+        let messages = openai
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .expect("messages array");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "system");
     }
 }

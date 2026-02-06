@@ -15,6 +15,7 @@ use std::time::SystemTime;
 use tiktoken_rs::cl100k_base;
 use tracing::info;
 
+use crate::frontend::FrontendType;
 use crate::routing::EwmaTracker;
 
 lazy_static! {
@@ -29,6 +30,21 @@ lazy_static! {
         "ccr_request_duration_seconds",
         "Request duration in seconds per tier",
         &["tier"],
+        vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+    )
+    .unwrap();
+
+    static ref FRONTEND_REQUESTS_TOTAL: CounterVec = register_counter_vec!(
+        "ccr_frontend_requests_total",
+        "Total number of requests per frontend",
+        &["frontend"]
+    )
+    .unwrap();
+
+    static ref FRONTEND_REQUEST_LATENCY: HistogramVec = register_histogram_vec!(
+        "ccr_frontend_request_duration_seconds",
+        "Request duration in seconds per frontend",
+        &["frontend"],
         vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
     )
     .unwrap();
@@ -199,9 +215,24 @@ pub fn get_active_streams() -> f64 {
     ACTIVE_STREAMS.get()
 }
 
+fn frontend_label(frontend: FrontendType) -> &'static str {
+    match frontend {
+        FrontendType::Codex => "codex",
+        FrontendType::ClaudeCode => "claude_code",
+    }
+}
+
 pub fn record_request(tier: &str) {
     REQUESTS_TOTAL.with_label_values(&[tier]).inc();
     TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_request_with_frontend(tier: &str, frontend: FrontendType) {
+    REQUESTS_TOTAL.with_label_values(&[tier]).inc();
+    TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    FRONTEND_REQUESTS_TOTAL
+        .with_label_values(&[frontend_label(frontend)])
+        .inc();
 }
 
 /// Record request duration in the Prometheus histogram. EWMA tracking is handled
@@ -209,6 +240,16 @@ pub fn record_request(tier: &str) {
 pub fn record_request_duration(tier: &str, duration: f64) {
     REQUEST_DURATION
         .with_label_values(&[tier])
+        .observe(duration);
+}
+
+/// Record request duration with frontend information.
+pub fn record_request_duration_with_frontend(tier: &str, duration: f64, frontend: FrontendType) {
+    REQUEST_DURATION
+        .with_label_values(&[tier])
+        .observe(duration);
+    FRONTEND_REQUEST_LATENCY
+        .with_label_values(&[frontend_label(frontend)])
         .observe(duration);
 }
 
@@ -457,6 +498,13 @@ pub struct TierTokenDrift {
     pub last_drift_pct: f64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FrontendMetrics {
+    pub frontend: String,
+    pub requests: u64,
+    pub avg_latency_ms: f64,
+}
+
 /// Handler for GET /v1/token-drift - returns per-tier token verification summary.
 pub async fn token_drift_handler() -> impl IntoResponse {
     let guard = TOKEN_DRIFT_STATE.read();
@@ -670,6 +718,54 @@ pub async fn usage_handler() -> impl IntoResponse {
     };
 
     Json(summary)
+}
+
+pub async fn frontend_metrics_handler() -> impl IntoResponse {
+    let mut frontend_metrics: HashMap<String, FrontendMetrics> = HashMap::new();
+
+    // Collect request counts
+    let req_metrics = FRONTEND_REQUESTS_TOTAL.collect();
+    for mf in &req_metrics {
+        for m in mf.get_metric() {
+            for label in m.get_label() {
+                if label.get_name() == "frontend" {
+                    let frontend = label.get_value().to_string();
+                    let entry = frontend_metrics.entry(frontend.clone()).or_insert_with(|| {
+                        FrontendMetrics {
+                            frontend,
+                            requests: 0,
+                            avg_latency_ms: 0.0,
+                        }
+                    });
+                    entry.requests = m.get_counter().get_value() as u64;
+                }
+            }
+        }
+    }
+
+    // Collect latency info
+    let lat_metrics = FRONTEND_REQUEST_LATENCY.collect();
+    for mf in &lat_metrics {
+        for m in mf.get_metric() {
+            for label in m.get_label() {
+                if label.get_name() == "frontend" {
+                    let frontend = label.get_value().to_string();
+                    if let Some(entry) = frontend_metrics.get_mut(&frontend) {
+                        let h = m.get_histogram();
+                        let count = h.get_sample_count();
+                        if count > 0 {
+                            entry.avg_latency_ms = (h.get_sample_sum() * 1000.0) / count as f64;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut metrics_list: Vec<FrontendMetrics> = frontend_metrics.into_values().collect();
+    metrics_list.sort_by(|a, b| a.frontend.cmp(&b.frontend));
+
+    Json(metrics_list)
 }
 
 pub async fn metrics_handler() -> impl IntoResponse {

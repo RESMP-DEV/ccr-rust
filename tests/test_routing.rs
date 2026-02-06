@@ -872,9 +872,7 @@ async fn adaptive_backoff_per_tier_configuration() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&request_body).unwrap(),
-                ))
+                .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
                 .unwrap(),
         )
         .await

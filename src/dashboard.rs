@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::metrics::{TierLatency, TierTokenDrift, TierUsage, UsageSummary};
+use crate::metrics::{FrontendMetrics, TierLatency, TierTokenDrift, TierUsage, UsageSummary};
 
 /// Aggregated dashboard data fetched from the CCR-Rust API.
 #[derive(Debug, Clone)]
@@ -29,6 +29,8 @@ pub struct DashboardData {
     pub latencies: Vec<TierLatency>,
     /// Per-tier token drift data
     pub token_drifts: Vec<TierTokenDrift>,
+    /// Per-frontend metrics
+    pub frontend_metrics: Vec<FrontendMetrics>,
     /// When the data was last updated
     pub last_updated: Instant,
 }
@@ -85,12 +87,21 @@ pub fn spawn_dashboard_fetcher(host: String, port: u16) -> SharedDashboardState 
                 .ok()
                 .and_then(|r| r.json().ok());
 
+            // Fetch frontend metrics data
+            let frontend_url = format!("{}/v1/frontend-metrics", base_url);
+            let frontend_result: Option<Vec<FrontendMetrics>> = client
+                .get(&frontend_url)
+                .send()
+                .ok()
+                .and_then(|r| r.json().ok());
+
             // Update shared state if we got usage data (the core metric)
             if let Some(usage) = usage_result {
                 let dashboard_data = DashboardData {
                     usage,
                     latencies: latencies_result.unwrap_or_default(),
                     token_drifts: drift_result.unwrap_or_default(),
+                    frontend_metrics: frontend_result.unwrap_or_default(),
                     last_updated: Instant::now(),
                 };
 
@@ -116,6 +127,7 @@ struct UiState {
     token_drifts: Vec<TierTokenDrift>,
     tier_usages: Vec<TierUsage>,
     tier_latencies: Vec<TierLatency>,
+    frontend_metrics: Vec<FrontendMetrics>,
     last_update: Option<Instant>,
     error: Option<String>,
     /// Global stats from the server (not local atomics)
@@ -187,6 +199,7 @@ fn sync_ui_state(shared: &SharedDashboardState, ui_state: &mut UiState) {
                 ui_state.token_drifts = data.token_drifts.clone();
                 ui_state.tier_latencies = data.latencies.clone();
                 ui_state.tier_usages = data.usage.tiers.clone();
+                ui_state.frontend_metrics = data.frontend_metrics.clone();
                 ui_state.last_update = Some(data.last_updated);
                 ui_state.error = None;
                 // Extract global stats from the fetched UsageSummary
@@ -278,7 +291,8 @@ fn ui(f: &mut ratatui::Frame, host: &str, port: u16, state: &UiState, session_in
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
             Constraint::Min(0),
         ])
         .split(f.area());
@@ -290,11 +304,15 @@ fn ui(f: &mut ratatui::Frame, host: &str, port: u16, state: &UiState, session_in
     let drift_widget = create_token_drift_table(state);
     f.render_widget(drift_widget, main_chunks[1]);
 
+    // Frontend Metrics section
+    let frontend_widget = create_frontend_metrics_table(state);
+    f.render_widget(frontend_widget, main_chunks[2]);
+
     // Split the bottom section into left (session info) and right (tier stats) panels
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
-        .split(main_chunks[2]);
+        .split(main_chunks[3]);
 
     // Session Info panel
     let session_lines = session_info.format_lines();
@@ -636,6 +654,81 @@ fn create_tier_stats_table(state: &UiState) -> Table<'_> {
             Constraint::Percentage(25),
             Constraint::Percentage(25),
             Constraint::Percentage(15),
+        ],
+    )
+    .header(header)
+    .block(block)
+    .column_spacing(1)
+}
+
+/// Create a table widget showing per-frontend request counts and latency metrics.
+fn create_frontend_metrics_table(state: &UiState) -> Table<'_> {
+    let header_cells = vec![
+        Cell::from("Frontend").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Requests").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Avg Latency (ms)").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let header = Row::new(header_cells)
+        .style(Style::default().bg(Color::Blue))
+        .height(1);
+
+    let rows: Vec<Row> = if state.frontend_metrics.is_empty() {
+        vec![Row::new(vec![
+            Cell::from("No frontend data available"),
+            Cell::from(""),
+            Cell::from(""),
+        ])
+        .height(1)]
+    } else {
+        state
+            .frontend_metrics
+            .iter()
+            .map(|metrics| {
+                // Frontend name with styling
+                let frontend_cell = Cell::from(metrics.frontend.clone());
+
+                // Request count
+                let requests_cell = Cell::from(format_number(metrics.requests))
+                    .style(Style::default().fg(Color::Cyan));
+
+                // Average latency with color coding
+                let latency_style = if metrics.avg_latency_ms > 5000.0 {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                } else if metrics.avg_latency_ms > 1000.0 {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Green)
+                };
+                let latency_cell =
+                    Cell::from(format!("{:.1}", metrics.avg_latency_ms)).style(latency_style);
+
+                Row::new(vec![frontend_cell, requests_cell, latency_cell]).height(1)
+            })
+            .collect()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Frontend Breakdown");
+
+    Table::new(
+        rows,
+        [
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
         ],
     )
     .header(header)

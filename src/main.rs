@@ -20,6 +20,9 @@ mod config {
 mod dashboard {
     pub use ccr_rust::dashboard::*;
 }
+mod frontend {
+    // frontend module re-exports are used by downstream consumers
+}
 mod metrics {
     pub use ccr_rust::metrics::*;
 }
@@ -137,6 +140,8 @@ async fn run_server(
             "/v1/chat/completions",
             post(router::handle_chat_completions),
         )
+        .route("/v1/responses", post(router::handle_responses))
+        .route("/v1/models", get(router::list_models))
         .route(
             "/preset/{name}/v1/messages",
             post(router::handle_preset_messages),
@@ -145,6 +150,10 @@ async fn run_server(
         .route("/v1/latencies", get(latencies_handler))
         .route("/v1/usage", get(metrics::usage_handler))
         .route("/v1/token-drift", get(metrics::token_drift_handler))
+        .route(
+            "/v1/frontend-metrics",
+            get(metrics::frontend_metrics_handler),
+        )
         .route("/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
         .layer(CorsLayer::permissive())
