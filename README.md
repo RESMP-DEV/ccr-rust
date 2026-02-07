@@ -83,6 +83,16 @@ Create `~/.claude-code-router/config.json`:
 }
 ```
 
+Optional persistence (recommended for long-running dashboards/metrics):
+
+```json
+"Persistence": {
+    "mode": "redis",
+    "redis_url": "redis://127.0.0.1:6379/0",
+    "redis_prefix": "ccr-rust:persistence:v1"
+}
+```
+
 **What each field means:**
 
 | Field | Description |
@@ -94,6 +104,9 @@ Create `~/.claude-code-router/config.json`:
 | `Router.default` | Primary tier—requests go here first |
 | `Router.think` | Used for reasoning-heavy tasks |
 | `Router.longContext` | Used when token count exceeds `longContextThreshold` |
+| `Persistence.mode` | `none` (default) or `redis` for restart-safe observability state |
+| `Persistence.redis_url` | Redis connection URL (or `CCR_REDIS_URL`) |
+| `Persistence.redis_prefix` | Redis key prefix used by CCR persistence |
 
 ### 3. Start the Server
 

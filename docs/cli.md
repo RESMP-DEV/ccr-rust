@@ -14,7 +14,7 @@ ccr-rust [GLOBAL_OPTIONS] <COMMAND> [COMMAND_OPTIONS]
 
 | Option | Short | Environment | Default | Description |
 |--------|-------|-------------|---------|-------------|
-| `--config` | `-c` | `CCR_CONFIG` | `~/.ccr/config.toml` | Path to CCR config file |
+| `--config` | `-c` | `CCR_CONFIG` | `~/.claude-code-router/config.json` | Path to CCR config file |
 
 ## Commands
 
@@ -86,6 +86,23 @@ ccr-rust validate --config ~/custom.toml
 ccr-rust version
 ```
 
+## Redis Persistence
+
+To keep observability data across CCR restarts (dashboard usage, token drift, and restored histogram offsets), add:
+
+```json
+"Persistence": {
+  "mode": "redis",
+  "redis_url": "redis://127.0.0.1:6379/0",
+  "redis_prefix": "ccr-rust:persistence:v1"
+}
+```
+
+Notes:
+- `mode`: `none` (default) or `redis`
+- `redis_url`: required when `mode=redis` (or set `CCR_REDIS_URL`)
+- `redis_prefix`: Redis key namespace for CCR persistence records
+
 ## HTTP Endpoints
 
 Once running, the server exposes the following endpoints:
@@ -98,6 +115,8 @@ Once running, the server exposes the following endpoints:
 | `/v1/latencies` | GET | Latency metrics per backend |
 | `/v1/usage` | GET | Usage statistics |
 | `/v1/token-drift` | GET | Token drift metrics |
+| `/v1/token-audit` | GET | Recent pre-request token audit entries |
+| `/v1/frontend-metrics` | GET | Per-frontend request/latency metrics |
 | `/health` | GET | Health check |
 | `/metrics` | GET | Prometheus-style metrics |
 

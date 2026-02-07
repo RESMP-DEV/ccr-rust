@@ -65,6 +65,11 @@ pub struct ConfigFile {
     #[serde(default)]
     #[serde(rename = "Presets")]
     pub presets: HashMap<String, PresetConfig>,
+
+    /// Optional runtime persistence settings (for metrics/dashboard continuity).
+    #[serde(default)]
+    #[serde(rename = "Persistence")]
+    pub persistence: PersistenceConfig,
 }
 
 /// Runtime configuration shared across all handlers via Axum state.
@@ -107,6 +112,11 @@ impl Config {
     /// Get a preset by name.
     pub fn get_preset(&self, name: &str) -> Option<&PresetConfig> {
         self.presets.get(name)
+    }
+
+    /// Runtime persistence settings.
+    pub fn persistence(&self) -> &PersistenceConfig {
+        &self.inner.file.persistence
     }
 
     /// List all preset names.
@@ -373,6 +383,43 @@ pub struct WebSearchConfig {
     pub search_provider: Option<String>,
 }
 
+/// Persistence backend mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PersistenceMode {
+    #[default]
+    None,
+    Redis,
+}
+
+/// Runtime persistence configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistenceConfig {
+    /// Persistence backend mode.
+    #[serde(default)]
+    pub mode: PersistenceMode,
+
+    /// Redis URL used when mode = `redis`.
+    ///
+    /// Example: `redis://127.0.0.1:6379/0`
+    #[serde(default)]
+    pub redis_url: Option<String>,
+
+    /// Prefix for Redis keys used by CCR-Rust persistence.
+    #[serde(default = "default_redis_prefix")]
+    pub redis_prefix: String,
+}
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            mode: PersistenceMode::None,
+            redis_url: None,
+            redis_prefix: default_redis_prefix(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub default: String,
@@ -610,6 +657,10 @@ fn default_pool_idle_timeout_ms() -> u64 {
 
 fn default_sse_buffer_size() -> usize {
     32
+}
+
+fn default_redis_prefix() -> String {
+    "ccr-rust:persistence:v1".to_string()
 }
 
 /// Tests for EWMA-aware backoff scaling.
@@ -946,5 +997,53 @@ mod tests {
         let serialized = serde_json::to_string(&config).expect("serialize");
         assert!(serialized.contains("maxtoken"));
         assert!(serialized.contains("enhancetool"));
+    }
+
+    #[test]
+    fn persistence_defaults_to_none() {
+        let config: ConfigFile = serde_json::from_str(
+            r#"{
+                "Providers": [{
+                    "name": "mock",
+                    "api_base_url": "http://localhost:9999",
+                    "api_key": "x",
+                    "models": ["m"]
+                }],
+                "Router": {"default": "mock,m"}
+            }"#,
+        )
+        .expect("parse ConfigFile");
+
+        assert_eq!(config.persistence.mode, PersistenceMode::None);
+        assert!(config.persistence.redis_url.is_none());
+        assert_eq!(config.persistence.redis_prefix, "ccr-rust:persistence:v1");
+    }
+
+    #[test]
+    fn persistence_redis_parses() {
+        let config: ConfigFile = serde_json::from_str(
+            r#"{
+                "Providers": [{
+                    "name": "mock",
+                    "api_base_url": "http://localhost:9999",
+                    "api_key": "x",
+                    "models": ["m"]
+                }],
+                "Router": {"default": "mock,m"},
+                "Persistence": {
+                    "mode": "redis",
+                    "redis_url": "redis://127.0.0.1:6379/0",
+                    "redis_prefix": "ccr:test"
+                }
+            }"#,
+        )
+        .expect("parse ConfigFile");
+
+        assert_eq!(config.persistence.mode, PersistenceMode::Redis);
+        assert_eq!(
+            config.persistence.redis_url.as_deref(),
+            Some("redis://127.0.0.1:6379/0")
+        );
+        assert_eq!(config.persistence.redis_prefix, "ccr:test");
     }
 }

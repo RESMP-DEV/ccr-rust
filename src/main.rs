@@ -123,6 +123,7 @@ async fn run_server(
     tracing::info!("Shutdown timeout: {}s", shutdown_timeout);
 
     let ewma_tracker = std::sync::Arc::new(EwmaTracker::new());
+    metrics::init_persistence(config.persistence(), &ewma_tracker)?;
     let transformer_registry = std::sync::Arc::new(TransformerRegistry::new());
     let ratelimit_tracker = std::sync::Arc::new(RateLimitTracker::new());
     let state = AppState {

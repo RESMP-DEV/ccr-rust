@@ -142,6 +142,15 @@ impl EwmaTracker {
             .collect()
     }
 
+    /// Restore a tier EWMA snapshot, used by persistence backends at startup.
+    pub fn restore_tier_state(&self, tier: &str, ewma: f64, samples: u64) {
+        let mut state = self.state.write();
+        let entry = state.entry(tier.to_string()).or_insert_with(TierState::new);
+        entry.ewma = ewma.max(0.0);
+        entry.samples = samples;
+        entry.consecutive_failures = 0;
+    }
+
     /// Reorder tiers by EWMA latency (lowest first). Tiers without enough
     /// samples keep their config-defined position.
     ///
