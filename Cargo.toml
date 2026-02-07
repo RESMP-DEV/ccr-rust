@@ -31,7 +31,7 @@ tiktoken-rs = "0.6"
 parking_lot = "0.12"
 humantime = "2.1"
 regex = "1.11"
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.29"
 zstd = "0.13"
 
