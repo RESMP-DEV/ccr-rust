@@ -15,7 +15,7 @@ use crate::config::{Config, ProviderProtocol};
 use crate::frontend::codex::CodexFrontend;
 use crate::frontend::{detect_frontend, Frontend};
 use crate::metrics::{
-    record_failure, record_pre_request_tokens, record_rate_limit_hit,
+    record_failure, record_pre_request_tokens, record_rate_limit_backoff, record_rate_limit_hit,
     record_request_duration_with_frontend, record_request_with_frontend, record_usage,
     sync_ewma_gauge, verify_token_usage,
 };
@@ -1107,6 +1107,7 @@ pub async fn handle_messages(
                     record_rate_limit_hit(tier_name);
                     // Record 429 for backoff tracking
                     state.ratelimit_tracker.record_429(tier_name, retry_after);
+                    record_rate_limit_backoff(tier_name);
                     // Skip remaining retries for this tier - move to next
                     break;
                 }
@@ -2680,6 +2681,7 @@ async fn try_request_via_openai_protocol(
             // Record the rate limit hit for tracking
             record_rate_limit_hit(tier_name);
             ratelimit_tracker.record_429(tier_name, retry_after);
+            record_rate_limit_backoff(tier_name);
 
             // Pass through the 429 response as-is so it can be handled by response converters
             let mut builder =
@@ -2883,6 +2885,7 @@ async fn try_request_via_anthropic_protocol(
             // Record the rate limit hit for tracking
             record_rate_limit_hit(tier_name);
             ratelimit_tracker.record_429(tier_name, retry_after);
+            record_rate_limit_backoff(tier_name);
 
             // Pass through the 429 response as-is
             let mut builder =

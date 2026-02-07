@@ -257,7 +257,10 @@ fn run_loop<B: Backend>(
     host: String,
     port: u16,
     shared_state: SharedDashboardState,
-) -> Result<()> {
+) -> Result<()>
+where
+    <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
+{
     let mut last_tick = Instant::now();
     let mut ui_state = UiState::default();
     let session_info = SessionInfo::collect();

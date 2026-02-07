@@ -2,6 +2,45 @@
 
 CCR-Rust exposes metrics, dashboards, and debugging endpoints for monitoring your routing setup.
 
+## Persistence (Redis)
+
+By default, observability state is in-memory and resets when the CCR-Rust server restarts.
+
+To persist dashboard and metrics state across restarts, configure Redis in `config.json`:
+
+```json
+"Persistence": {
+  "mode": "redis",
+  "redis_url": "redis://127.0.0.1:6379/0",
+  "redis_prefix": "ccr-rust:persistence:v1"
+}
+```
+
+When enabled, CCR-Rust restores:
+- counters and gauges used by `/metrics`,
+- histogram offsets used for latency/token distributions,
+- `/v1/token-drift` aggregate state,
+- `/v1/token-audit` ring buffer,
+- EWMA tier latency state used by `/v1/latencies`.
+
+Quick verification after restart:
+
+```bash
+# Redis health
+redis-cli -h 127.0.0.1 -p 6379 ping
+
+# CCR health
+curl -sS http://127.0.0.1:3456/health
+
+# Restored JSON endpoints
+curl -sS http://127.0.0.1:3456/v1/usage | jq .
+curl -sS http://127.0.0.1:3456/v1/token-drift | jq .
+curl -sS http://127.0.0.1:3456/v1/frontend-metrics | jq .
+
+# Prometheus endpoint
+curl -sS http://127.0.0.1:3456/metrics | grep '^ccr_'
+```
+
 ## Prometheus Metrics
 
 Metrics are exposed at `:3456/metrics`:

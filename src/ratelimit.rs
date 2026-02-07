@@ -111,3 +111,12 @@ impl RateLimitTracker {
         );
     }
 }
+
+/// Restore persisted backoff counters into Prometheus at startup.
+pub fn restore_rate_limit_backoff_counter(tier: &str, value: f64) {
+    if value > 0.0 {
+        RATE_LIMIT_BACKOFFS_TOTAL
+            .with_label_values(&[tier])
+            .inc_by(value);
+    }
+}
