@@ -1292,11 +1292,10 @@ fn parse_json_payload(bytes: &[u8]) -> Result<serde_json::Value, String> {
     }
 
     // Some clients may double-encode JSON as a string payload.
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let serde_json::Value::String(inner) = parsed {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&inner) {
-                return Ok(value);
-            }
+    if let Ok(serde_json::Value::String(inner)) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&inner) {
+            return Ok(value);
         }
     }
 
@@ -2518,12 +2517,14 @@ async fn try_request(
             try_request_via_openai_protocol(
                 config,
                 provider,
-                transformed_request,
-                model_name,
-                tier_name,
-                local_estimate,
-                ratelimit_tracker,
-                chain,
+                TryRequestProtocolArgs {
+                    transformed_request,
+                    model_name,
+                    tier_name,
+                    local_estimate,
+                    ratelimit_tracker,
+                    chain,
+                },
             )
             .await
         }
@@ -2531,16 +2532,27 @@ async fn try_request(
             try_request_via_anthropic_protocol(
                 config,
                 provider,
-                transformed_request,
-                model_name,
-                tier_name,
-                local_estimate,
-                ratelimit_tracker,
-                chain,
+                TryRequestProtocolArgs {
+                    transformed_request,
+                    model_name,
+                    tier_name,
+                    local_estimate,
+                    ratelimit_tracker,
+                    chain,
+                },
             )
             .await
         }
     }
+}
+
+struct TryRequestProtocolArgs<'a> {
+    transformed_request: serde_json::Value,
+    model_name: &'a str,
+    tier_name: &'a str,
+    local_estimate: u64,
+    ratelimit_tracker: Arc<RateLimitTracker>,
+    chain: TransformerChain,
 }
 
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -2637,13 +2649,17 @@ fn build_anthropic_headers(
 async fn try_request_via_openai_protocol(
     config: &Config,
     provider: &crate::config::Provider,
-    transformed_request: serde_json::Value,
-    model_name: &str,
-    tier_name: &str,
-    local_estimate: u64,
-    ratelimit_tracker: Arc<RateLimitTracker>,
-    chain: TransformerChain,
+    args: TryRequestProtocolArgs<'_>,
 ) -> Result<Response, TryRequestError> {
+    let TryRequestProtocolArgs {
+        transformed_request,
+        model_name,
+        tier_name,
+        local_estimate,
+        ratelimit_tracker,
+        chain,
+    } = args;
+
     let url = provider_openai_chat_completions_url(provider);
     let headers = build_openai_headers(provider)?;
     trace!(tier = tier_name, model = model_name, url = %url, "dispatching OpenAI-compatible upstream request");
@@ -2825,13 +2841,17 @@ async fn try_request_via_openai_protocol(
 async fn try_request_via_anthropic_protocol(
     config: &Config,
     provider: &crate::config::Provider,
-    transformed_request: serde_json::Value,
-    model_name: &str,
-    tier_name: &str,
-    local_estimate: u64,
-    ratelimit_tracker: Arc<RateLimitTracker>,
-    chain: TransformerChain,
+    args: TryRequestProtocolArgs<'_>,
 ) -> Result<Response, TryRequestError> {
+    let TryRequestProtocolArgs {
+        transformed_request,
+        model_name,
+        tier_name,
+        local_estimate,
+        ratelimit_tracker,
+        chain,
+    } = args;
+
     let url = provider_anthropic_messages_url(provider);
     let headers = build_anthropic_headers(provider)?;
     trace!(tier = tier_name, model = model_name, url = %url, "dispatching Anthropic-compatible upstream request");

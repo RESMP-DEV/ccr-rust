@@ -105,7 +105,7 @@ async fn start_openai_stream_server(chunks: Vec<(Bytes, u64)>) -> String {
                     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
                     tokio::spawn(async move {
                         for (chunk, delay_ms) in chunks.iter() {
-                            if tx.send(Ok(Bytes::from(chunk.clone()))).await.is_err() {
+                            if tx.send(Ok(chunk.clone())).await.is_err() {
                                 return;
                             }
                             if *delay_ms > 0 {

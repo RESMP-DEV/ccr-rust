@@ -110,7 +110,7 @@ async fn start_anthropic_stream_server(chunks: Vec<(Bytes, u64)>) -> String {
                     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
                     tokio::spawn(async move {
                         for (chunk, delay_ms) in chunks.iter() {
-                            if tx.send(Ok(Bytes::from(chunk.clone()))).await.is_err() {
+                            if tx.send(Ok(chunk.clone())).await.is_err() {
                                 return;
                             }
                             if *delay_ms > 0 {
@@ -309,7 +309,8 @@ async fn test_anthropic_stream_emits_first_assistant_delta_before_completion() {
 
     let mut rest = String::new();
     while let Some(chunk) = stream.next().await {
-        rest.push_str(&String::from_utf8(chunk.unwrap().to_vec()).unwrap());
+        let chunk = chunk.unwrap();
+        rest.push_str(std::str::from_utf8(&chunk).unwrap());
     }
     let full_stream = format!("{first_text}{rest}");
 
