@@ -36,7 +36,7 @@ crossterm = "0.29"
 zstd = "0.13"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 rand = "0.8"
 wiremock = "0.6"
 http-body-util = "0.1"
