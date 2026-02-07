@@ -475,6 +475,66 @@ async fn all_retries_exhausted_returns_503() {
 }
 
 #[tokio::test]
+async fn upstream_429_returns_structured_rate_limit_payload() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "17")
+                .set_body_json(json!({
+                    "error": {
+                        "message": "Please slow down"
+                    }
+                })),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config_json = make_test_config(&mock_server.uri(), HashMap::new());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&test_request_body()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("17")
+    );
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(payload["error"]["type"], "rate_limit_error");
+    assert_eq!(payload["error"]["code"], "rate_limited");
+    assert_eq!(payload["error"]["retry_after"], 17);
+    assert_eq!(payload["error"]["message"], "Please slow down");
+}
+
+#[tokio::test]
 async fn backoff_introduces_measurable_delay() {
     let mock_server = MockServer::start().await;
 
@@ -872,9 +932,7 @@ async fn adaptive_backoff_per_tier_configuration() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&request_body).unwrap(),
-                ))
+                .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
                 .unwrap(),
         )
         .await

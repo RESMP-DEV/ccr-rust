@@ -11,7 +11,6 @@
 use crate::transformer::Transformer;
 use anyhow::Result;
 use serde_json::Value;
-use tracing::debug;
 
 /// Anthropic to OpenAI transformer.
 ///
@@ -89,7 +88,9 @@ impl Transformer for AnthropicToOpenaiTransformer {
                                     // Convert single or multiple text blocks to a simple string
                                     let combined_text: String = content_array
                                         .iter()
-                                        .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+                                        .filter_map(|block| {
+                                            block.get("text").and_then(|t| t.as_str())
+                                        })
                                         .collect::<Vec<&str>>()
                                         .join("\n\n");
                                     *content = Value::String(combined_text);
@@ -103,22 +104,26 @@ impl Transformer for AnthropicToOpenaiTransformer {
                                                 == Some(&Value::String("image".to_string()))
                                             {
                                                 if let Some(source) = block_obj.get("source") {
-                                                    let image_url = if let Some(data) = source.get("data")
-                                                    {
-                                                        // Base64 encoded data
-                                                        let media_type = source
-                                                            .get("media_type")
-                                                            .and_then(|m| m.as_str())
-                                                            .unwrap_or("image/jpeg");
-                                                        format!("data:{};base64,{}", media_type, data.as_str().unwrap_or(""))
-                                                    } else {
-                                                        // URL-based source
-                                                        source
-                                                            .get("url")
-                                                            .and_then(|u| u.as_str())
-                                                            .unwrap_or("")
-                                                            .to_string()
-                                                    };
+                                                    let image_url =
+                                                        if let Some(data) = source.get("data") {
+                                                            // Base64 encoded data
+                                                            let media_type = source
+                                                                .get("media_type")
+                                                                .and_then(|m| m.as_str())
+                                                                .unwrap_or("image/jpeg");
+                                                            format!(
+                                                                "data:{};base64,{}",
+                                                                media_type,
+                                                                data.as_str().unwrap_or("")
+                                                            )
+                                                        } else {
+                                                            // URL-based source
+                                                            source
+                                                                .get("url")
+                                                                .and_then(|u| u.as_str())
+                                                                .unwrap_or("")
+                                                                .to_string()
+                                                        };
 
                                                     *block = serde_json::json!({
                                                         "type": "image_url",
@@ -171,14 +176,12 @@ impl Transformer for AnthropicToOpenaiTransformer {
                 Value::Object(map)
                     if map.get("type") == Some(&Value::String("tool".to_string())) =>
                 {
-                    if let Some(name) = map.get("name").cloned() {
-                        Some(serde_json::json!({
+                    map.get("name").cloned().map(|name| {
+                        serde_json::json!({
                             "type": "function",
                             "function": {"name": name}
-                        }))
-                    } else {
-                        None
-                    }
+                        })
+                    })
                 }
                 // Anthropic: "any" → OpenAI: "required"
                 Value::String(s) if s == "any" => Some(Value::String("required".to_string())),
@@ -223,15 +226,13 @@ impl Transformer for AnthropicToOpenaiTransformer {
                 for block in content_array {
                     if let Some(block_obj) = block.as_object_mut() {
                         // Ensure tool_use blocks have IDs
-                        if block_obj.get("type")
-                            == Some(&Value::String("tool_use".to_string()))
+                        if block_obj.get("type") == Some(&Value::String("tool_use".to_string()))
+                            && !block_obj.contains_key("id")
                         {
-                            if !block_obj.contains_key("id") {
-                                block_obj.insert(
-                                    "id".to_string(),
-                                    Value::String(format!("toolu_{}", generate_tool_id())),
-                                );
-                            }
+                            block_obj.insert(
+                                "id".to_string(),
+                                Value::String(format!("toolu_{}", generate_tool_id())),
+                            );
                         }
                     }
                 }
@@ -507,7 +508,10 @@ mod tests {
         // input_schema should become parameters under function object
         assert_eq!(result["tools"][0]["type"], "function");
         assert_eq!(result["tools"][0]["function"]["name"], "calculator");
-        assert_eq!(result["tools"][0]["function"]["description"], "A calculator tool");
+        assert_eq!(
+            result["tools"][0]["function"]["description"],
+            "A calculator tool"
+        );
         assert_eq!(
             result["tools"][0]["function"]["parameters"]["type"],
             "object"
@@ -518,7 +522,7 @@ mod tests {
     fn test_transform_response_adds_tool_use_id() {
         let transformer = AnthropicToOpenaiTransformer;
 
-        let mut response = serde_json::json!({
+        let response = serde_json::json!({
             "content": [
                 {"type": "tool_use", "name": "calculator", "input": {"a": 1}}
             ]
@@ -536,7 +540,7 @@ mod tests {
     fn test_transform_response_preserves_existing_tool_use_id() {
         let transformer = AnthropicToOpenaiTransformer;
 
-        let mut response = serde_json::json!({
+        let response = serde_json::json!({
             "content": [
                 {"type": "tool_use", "id": "existing_id", "name": "calculator", "input": {"a": 1}}
             ]

@@ -4,6 +4,7 @@
 //! before returning to clients. This mirrors the Node.js transformer system.
 
 use crate::config::TransformerEntry;
+use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
@@ -677,6 +678,10 @@ impl TransformerRegistry {
             Arc::new(AnthropicToOpenaiTransformer),
         );
         registry.register("deepseek", Arc::new(DeepSeekTransformer));
+        registry.register(
+            "openai-to-anthropic",
+            Arc::new(OpenAiToAnthropicTransformer),
+        );
         registry.register("openrouter", Arc::new(OpenRouterTransformer));
         registry.register("tooluse", Arc::new(ToolUseTransformer));
         registry.register("identity", Arc::new(IdentityTransformer));

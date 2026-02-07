@@ -58,7 +58,8 @@ impl Transformer for OpenaiToAnthropicTransformer {
         let content = transform_openai_content(message)?;
 
         // Handle tool calls if present
-        let content = if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array()) {
+        let content = if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array())
+        {
             let mut content_blocks = content.unwrap_or_default();
             for tool_call in tool_calls {
                 if let Some(block) = convert_openai_tool_call(tool_call) {
@@ -139,10 +140,8 @@ fn transform_openai_content(message: &Value) -> Result<Option<Vec<Value>>> {
             "text": text
         })])),
         Some(Value::Array(blocks)) => {
-            let anthropic_blocks: Result<Vec<Value>, _> = blocks
-                .iter()
-                .map(|block| convert_openai_content_block(block))
-                .collect();
+            let anthropic_blocks: Result<Vec<Value>, _> =
+                blocks.iter().map(convert_openai_content_block).collect();
             Ok(Some(anthropic_blocks?))
         }
         Some(other) => Err(anyhow!("Unexpected content type: {}", other)),
@@ -175,7 +174,7 @@ fn convert_openai_content_block(block: &Value) -> Result<Value> {
             // Parse data URL if present
             let (media_type, data) = if let Some(rest) = url.strip_prefix("data:") {
                 let parts: Vec<&str> = rest.splitn(2, ';').collect();
-                let media_type = parts.get(0).unwrap_or(&"image/jpeg");
+                let media_type = parts.first().unwrap_or(&"image/jpeg");
                 let data = parts
                     .get(1)
                     .and_then(|s| s.strip_prefix("base64,"))
@@ -241,11 +240,7 @@ fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
     let id = tool_call
         .get("id")
         .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            // Generate a simple ID if none provided
-            // Using a static counter would be better but keeping it simple
-            "toolu_unknown"
-        });
+        .unwrap_or("toolu_unknown");
 
     Some(serde_json::json!({
         "type": "tool_use",
@@ -383,7 +378,10 @@ mod tests {
         assert_eq!(result["content"][0]["text"], "Here's an image:");
         assert_eq!(result["content"][1]["type"], "image");
         assert_eq!(result["content"][1]["source"]["type"], "url");
-        assert_eq!(result["content"][1]["source"]["url"], "https://example.com/image.jpg");
+        assert_eq!(
+            result["content"][1]["source"]["url"],
+            "https://example.com/image.jpg"
+        );
     }
 
     #[test]
@@ -408,7 +406,10 @@ mod tests {
         assert_eq!(result["content"][0]["type"], "image");
         assert_eq!(result["content"][0]["source"]["type"], "base64");
         assert_eq!(result["content"][0]["source"]["media_type"], "image/png");
-        assert!(result["content"][0]["source"]["data"].as_str().unwrap().starts_with("iVBORw"));
+        assert!(result["content"][0]["source"]["data"]
+            .as_str()
+            .unwrap()
+            .starts_with("iVBORw"));
     }
 
     #[test]

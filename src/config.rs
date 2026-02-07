@@ -320,6 +320,19 @@ pub struct Provider {
     pub api_key: String,
     pub models: Vec<String>,
 
+    /// Upstream API protocol for this provider.
+    ///
+    /// - `openai` (default): send OpenAI-compatible `/chat/completions` requests.
+    /// - `anthropic`: send Anthropic-compatible `/messages` requests.
+    #[serde(default)]
+    pub protocol: ProviderProtocol,
+
+    /// Anthropic API version header for `protocol=anthropic`.
+    ///
+    /// Defaults to the canonical Anthropic-compatible version when omitted.
+    #[serde(default)]
+    pub anthropic_version: Option<String>,
+
     #[serde(default)]
     pub transformer: Option<ProviderTransformer>,
 }
@@ -339,6 +352,15 @@ impl Provider {
             .as_ref()
             .and_then(|t| t.model_transformers(model))
     }
+}
+
+/// Provider upstream API protocol.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderProtocol {
+    #[default]
+    Openai,
+    Anthropic,
 }
 
 /// Configuration for web search routing.
@@ -770,6 +792,8 @@ mod tests {
                 "models": ["qwen2.5-coder:latest"]
             }"#,
         );
+        assert_eq!(p.protocol, ProviderProtocol::Openai);
+        assert!(p.anthropic_version.is_none());
         assert!(p.transformer.is_none());
         assert!(p.provider_transformers().is_empty());
         assert!(p.model_transformers("qwen2.5-coder:latest").is_none());
@@ -797,6 +821,22 @@ mod tests {
         assert_eq!(chat[0].name(), "tooluse");
 
         assert!(p.model_transformers("deepseek-reasoner").is_none());
+    }
+
+    #[test]
+    fn provider_with_anthropic_protocol() {
+        let p = parse_provider(
+            r#"{
+                "name": "minimax",
+                "api_base_url": "https://api.minimax.io/anthropic/v1",
+                "api_key": "mk-xxx",
+                "models": ["MiniMax-M2.1"],
+                "protocol": "anthropic",
+                "anthropic_version": "2023-06-01"
+            }"#,
+        );
+        assert_eq!(p.protocol, ProviderProtocol::Anthropic);
+        assert_eq!(p.anthropic_version.as_deref(), Some("2023-06-01"));
     }
 
     #[test]

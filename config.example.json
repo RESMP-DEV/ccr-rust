@@ -13,18 +13,40 @@
             ]
         },
         {
-            "name": "openrouter",
-            "api_base_url": "https://openrouter.ai/api/v1",
-            "api_key": "sk-xxx",
+            "name": "minimax",
+            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_key": "mk-xxx",
             "models": [
-                "minimax/minimax-m2.1"
-            ]
+                "MiniMax-M2.1"
+            ],
+            "protocol": "anthropic"
         }
     ],
     "Router": {
         "default": "deepseek,deepseek-reasoner",
         "background": "deepseek,deepseek-chat",
-        "longContext": "openrouter,minimax/minimax-m2.1",
+        "longContext": "minimax,MiniMax-M2.1",
         "longContextThreshold": 1048576
+    },
+    "Frontend": {
+        "_comment": "Configuration for frontend-specific behaviors",
+        "codex": {
+            "_comment": "Settings for the Codex/OpenAI compatible endpoint",
+            "modelMappings": {
+                "_comment": "Maps model names requested by the client to specific provider models. 'default' is used if no mapping matches.",
+                "default": "o3-mini",
+                "o3-mini": "o3-mini",
+                "gpt-4o": "gpt-4o",
+                "o1": "o1"
+            }
+        },
+        "claudeCode": {
+            "_comment": "Settings for Claude Code specific features (optional)",
+            "cachePreferences": {
+                "_comment": "Controls server-side caching for system prompts to reduce latency.",
+                "promptCaching": true,
+                "maxCacheAgeHours": 24
+            }
+        }
     }
 }
