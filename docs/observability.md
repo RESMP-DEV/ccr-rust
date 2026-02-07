@@ -41,6 +41,20 @@ curl -sS http://127.0.0.1:3456/v1/frontend-metrics | jq .
 curl -sS http://127.0.0.1:3456/metrics | grep '^ccr_'
 ```
 
+Reset persisted observability state (keeps other Redis data untouched):
+
+```bash
+ccr-rust clear-stats
+```
+
+Override Redis target explicitly when needed:
+
+```bash
+ccr-rust clear-stats \
+  --redis-url redis://127.0.0.1:6379/0 \
+  --redis-prefix ccr-rust:persistence:v1
+```
+
 ## Prometheus Metrics
 
 Metrics are exposed at `:3456/metrics`:

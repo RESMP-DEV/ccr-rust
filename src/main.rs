@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use axum::{
     extract::State,
     routing::{get, post},
@@ -98,6 +98,16 @@ enum Commands {
     },
     /// Show version and build info
     Version,
+    /// Clear persisted CCR stats in Redis for a prefix.
+    ClearStats {
+        /// Redis URL override (defaults to Persistence.redis_url or CCR_REDIS_URL)
+        #[arg(long, env = "CCR_REDIS_URL")]
+        redis_url: Option<String>,
+
+        /// Redis key prefix override (defaults to Persistence.redis_prefix)
+        #[arg(long)]
+        redis_prefix: Option<String>,
+    },
 }
 
 fn show_version() {
@@ -107,6 +117,43 @@ fn show_version() {
     #[cfg(not(debug_assertions))]
     println!("Build: release");
     println!("Features: streaming, ewma-routing, transformers, rate-limiting");
+}
+
+fn resolve_redis_target(
+    config_path: &str,
+    redis_url_override: Option<String>,
+    redis_prefix_override: Option<String>,
+) -> anyhow::Result<(String, String)> {
+    let config = Config::from_file(config_path)?;
+    let persistence = config.persistence();
+
+    let redis_url = redis_url_override
+        .or_else(|| persistence.redis_url.clone())
+        .or_else(|| std::env::var("CCR_REDIS_URL").ok())
+        .ok_or_else(|| {
+            anyhow!(
+                "No Redis URL configured. Set Persistence.redis_url, CCR_REDIS_URL, or pass --redis-url."
+            )
+        })?;
+
+    let redis_prefix = redis_prefix_override.unwrap_or_else(|| persistence.redis_prefix.clone());
+
+    Ok((redis_url, redis_prefix))
+}
+
+fn clear_stats(
+    config_path: &str,
+    redis_url_override: Option<String>,
+    redis_prefix_override: Option<String>,
+) -> anyhow::Result<()> {
+    let (redis_url, redis_prefix) =
+        resolve_redis_target(config_path, redis_url_override, redis_prefix_override)?;
+    let deleted = metrics::clear_redis_persistence(&redis_url, &redis_prefix)?;
+    println!(
+        "Cleared {} Redis key(s) for prefix '{}'",
+        deleted, redis_prefix
+    );
+    Ok(())
 }
 
 async fn run_server(
@@ -266,6 +313,12 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Version) => {
             show_version();
+        }
+        Some(Commands::ClearStats {
+            redis_url,
+            redis_prefix,
+        }) => {
+            clear_stats(&config_path, redis_url, redis_prefix)?;
         }
     }
     Ok(())

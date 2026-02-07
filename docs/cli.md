@@ -58,6 +58,18 @@ Show version and build information.
 ccr-rust version
 ```
 
+### `clear-stats`
+Delete persisted CCR observability stats from Redis for one prefix.
+
+```bash
+ccr-rust clear-stats [OPTIONS]
+```
+
+| Option | Environment | Default | Description |
+|--------|-------------|---------|-------------|
+| `--redis-url` | `CCR_REDIS_URL` | `Persistence.redis_url` | Redis URL to connect to |
+| `--redis-prefix` | - | `Persistence.redis_prefix` | Prefix namespace to delete |
+
 ## Examples
 
 ```bash
@@ -84,6 +96,12 @@ ccr-rust validate --config ~/custom.toml
 
 # Show version
 ccr-rust version
+
+# Clear persisted stats using config persistence settings
+ccr-rust clear-stats
+
+# Clear with explicit Redis target
+ccr-rust clear-stats --redis-url redis://127.0.0.1:6379/0 --redis-prefix ccr-rust:persistence:v1
 ```
 
 ## Redis Persistence

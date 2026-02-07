@@ -225,6 +225,14 @@ ccr-rust validate --config ~/.claude-code-router/config.json
 
 Checks your config file for syntax errors and missing fields.
 
+### Clear Persisted Stats
+
+```bash
+ccr-rust clear-stats
+```
+
+Deletes only CCR's Redis persistence keys for the configured prefix (useful for resetting noisy historical dashboard data).
+
 ### Provider Smoke Matrix
 
 Run a live matrix against all configured `provider,model` routes (discovered from `/v1/models`):

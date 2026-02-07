@@ -357,6 +357,56 @@ pub fn init_persistence(config: &PersistenceConfig, ewma_tracker: &EwmaTracker) 
     Ok(())
 }
 
+/// Delete all Redis keys belonging to the configured CCR persistence prefix.
+///
+/// This is intentionally prefix-scoped so it only removes CCR persistence
+/// records, not unrelated Redis data.
+pub fn clear_redis_persistence(redis_url: &str, prefix: &str) -> Result<usize> {
+    let client = redis::Client::open(redis_url)
+        .with_context(|| format!("Failed to create Redis client for {}", redis_url))?;
+    let mut conn = client
+        .get_connection()
+        .context("Failed to connect to Redis for persistence cleanup")?;
+    clear_redis_persistence_with_conn(&mut conn, prefix)
+}
+
+fn clear_redis_persistence_with_conn(conn: &mut redis::Connection, prefix: &str) -> Result<usize> {
+    let mut cursor: u64 = 0;
+    let mut deleted: usize = 0;
+    loop {
+        let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("COUNT")
+            .arg(256)
+            .query(conn)?;
+
+        let keys_to_delete: Vec<String> = keys
+            .into_iter()
+            .filter(|key| key_matches_persistence_prefix(key, prefix))
+            .collect();
+
+        if !keys_to_delete.is_empty() {
+            let removed: usize = redis::cmd("DEL").arg(&keys_to_delete).query(conn)?;
+            deleted += removed;
+        }
+
+        cursor = next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+    Ok(deleted)
+}
+
+fn key_matches_persistence_prefix(key: &str, prefix: &str) -> bool {
+    if key == prefix {
+        return true;
+    }
+    key.strip_prefix(prefix)
+        .map(|suffix| suffix.starts_with(':'))
+        .unwrap_or(false)
+}
+
 fn redis_runtime() -> Option<&'static RedisRuntime> {
     REDIS_RUNTIME.get()
 }
@@ -1759,4 +1809,33 @@ pub fn get_latency_entries(tracker: &EwmaTracker) -> Vec<TierLatency> {
             sample_count: count,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_matches_persistence_prefix;
+
+    #[test]
+    fn key_prefix_match_accepts_prefix_root_and_namespace() {
+        assert!(key_matches_persistence_prefix(
+            "ccr-rust:persistence:v1",
+            "ccr-rust:persistence:v1"
+        ));
+        assert!(key_matches_persistence_prefix(
+            "ccr-rust:persistence:v1:counter:ccr_requests_total",
+            "ccr-rust:persistence:v1"
+        ));
+    }
+
+    #[test]
+    fn key_prefix_match_rejects_partial_or_unrelated_prefixes() {
+        assert!(!key_matches_persistence_prefix(
+            "ccr-rust:persistence:v10:counter:ccr_requests_total",
+            "ccr-rust:persistence:v1"
+        ));
+        assert!(!key_matches_persistence_prefix(
+            "another-prefix:counter:ccr_requests_total",
+            "ccr-rust:persistence:v1"
+        ));
+    }
 }
