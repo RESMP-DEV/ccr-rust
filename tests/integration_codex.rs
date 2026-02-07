@@ -921,6 +921,67 @@ async fn test_codex_backend_error_propagation() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+#[tokio::test]
+async fn test_codex_rate_limited_error_normalization_and_headers() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "13")
+                .set_body_json(json!({
+                    "error": {
+                        "message": "too many requests"
+                    }
+                })),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config_json = make_test_config(&mock_server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("user-agent", "codex-cli/1.0.0")
+                .body(Body::from(
+                    serde_json::to_vec(&codex_request_body()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("13")
+    );
+    assert!(resp.headers().get("x-ccr-tier").is_some());
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    assert_eq!(response_json["error"]["type"], "rate_limit_error");
+    assert_eq!(response_json["error"]["code"], "rate_limited");
+    assert_eq!(response_json["error"]["retry_after"], 13);
+}
+
 // ============================================================================
 // Test: Request Format Variations
 // ============================================================================

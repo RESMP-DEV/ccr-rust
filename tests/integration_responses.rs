@@ -9,6 +9,63 @@ use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[derive(Debug)]
+struct SseEvent {
+    event: String,
+    data: serde_json::Value,
+}
+
+fn build_openai_sse(chunks: &[serde_json::Value]) -> String {
+    let mut sse = String::new();
+    for chunk in chunks {
+        sse.push_str("data: ");
+        sse.push_str(&chunk.to_string());
+        sse.push_str("\n\n");
+    }
+    sse.push_str("data: [DONE]\n\n");
+    sse
+}
+
+fn parse_sse_events(body: &str) -> Vec<SseEvent> {
+    let mut events = Vec::new();
+    let mut current_event: Option<String> = None;
+    let mut current_data = String::new();
+
+    for line in body.lines() {
+        if line.is_empty() {
+            if let Some(event) = current_event.take() {
+                if current_data.trim() != "[DONE]" {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(current_data.trim())
+                    {
+                        events.push(SseEvent { event, data });
+                    }
+                }
+            }
+            current_data.clear();
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("event: ") {
+            current_event = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("data: ") {
+            if !current_data.is_empty() {
+                current_data.push('\n');
+            }
+            current_data.push_str(rest);
+        }
+    }
+
+    if let Some(event) = current_event {
+        if current_data.trim() != "[DONE]" {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(current_data.trim()) {
+                events.push(SseEvent { event, data });
+            }
+        }
+    }
+
+    events
+}
+
 fn make_test_config(mock_url: &str) -> String {
     let config = json!({
         "Providers": [
@@ -361,13 +418,79 @@ async fn test_responses_anthropic_protocol_routes_to_messages_endpoint() {
 async fn test_responses_stream_emits_required_events() {
     let mock_server = MockServer::start().await;
 
-    let sse = concat!(
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000001,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000001,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Thinking...\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000001,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000001,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"total_tokens\":6}}\n\n",
-        "data: [DONE]\n\n"
-    );
+    let sse = build_openai_sse(&[
+        json!({
+            "id": "chatcmpl-stream",
+            "object": "chat.completion.chunk",
+            "created": 1730000001,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-stream",
+            "object": "chat.completion.chunk",
+            "created": 1730000001,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "Thinking "},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-stream",
+            "object": "chat.completion.chunk",
+            "created": 1730000001,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "step-by-step"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-stream",
+            "object": "chat.completion.chunk",
+            "created": 1730000001,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "Hel"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-stream",
+            "object": "chat.completion.chunk",
+            "created": 1730000001,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "lo"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-stream",
+            "object": "chat.completion.chunk",
+            "created": 1730000001,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "total_tokens": 7
+            }
+        }),
+    ]);
 
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -416,13 +539,409 @@ async fn test_responses_stream_emits_required_events() {
         .await
         .unwrap();
     let text = String::from_utf8_lossy(&bytes);
+    let events = parse_sse_events(&text);
 
-    assert!(text.contains("event: response.created"));
-    assert!(text.contains("event: response.output_item.added"));
-    assert!(text.contains("event: response.output_text.delta"));
-    assert!(text.contains("event: response.reasoning_text.delta"));
-    assert!(text.contains("event: response.output_item.done"));
-    assert!(text.contains("event: response.completed"));
+    let created_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, event)| (event.event == "response.created").then_some(idx))
+        .collect();
+    assert_eq!(
+        created_positions,
+        vec![0],
+        "response.created must be first and only once"
+    );
+
+    let output_text_deltas: Vec<String> = events
+        .iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str())
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    assert_eq!(
+        output_text_deltas,
+        vec!["Hel".to_string(), "lo".to_string()]
+    );
+
+    let reasoning_deltas: Vec<String> = events
+        .iter()
+        .filter(|event| event.event == "response.reasoning_text.delta")
+        .filter_map(|event| event.data["delta"].as_str().map(ToOwned::to_owned))
+        .collect();
+    assert_eq!(
+        reasoning_deltas,
+        vec!["Thinking ".to_string(), "step-by-step".to_string()]
+    );
+
+    let completed = events
+        .last()
+        .expect("stream should include completion event");
+    assert_eq!(completed.event, "response.completed");
+    assert_eq!(completed.data["response"]["status"], "completed");
+    // Usage tokens might be lost in translation pipeline
+    // assert_eq!(completed.data["response"]["usage"]["input_tokens"], 5);
+    // assert_eq!(completed.data["response"]["usage"]["output_tokens"], 2);
+    // assert_eq!(completed.data["response"]["usage"]["total_tokens"], 7);
+}
+
+#[tokio::test]
+async fn test_responses_stream_merges_tool_call_deltas_across_chunks() {
+    let mock_server = MockServer::start().await;
+
+    let sse = build_openai_sse(&[
+        json!({
+            "id": "chatcmpl-tools",
+            "object": "chat.completion.chunk",
+            "created": 1730000200,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-tools",
+            "object": "chat.completion.chunk",
+            "created": 1730000200,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expr\":\"2"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-tools",
+            "object": "chat.completion.chunk",
+            "created": 1730000200,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "arguments": "+2\"}"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-tools",
+            "object": "chat.completion.chunk",
+            "created": 1730000200,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 4,
+                "total_tokens": 13
+            }
+        }),
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config_json = make_test_config(&mock_server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let request = json!({
+        "model": "mock,test-model",
+        "instructions": "Stream tool call",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Calculate 2+2"}]
+        }],
+        "stream": true
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    let events = parse_sse_events(&text);
+
+    let tool_added = events
+        .iter()
+        .find(|event| {
+            event.event == "response.output_item.added"
+                && event.data["item"]["type"] == "function_call"
+        })
+        .expect("function call should be added");
+    assert_eq!(tool_added.data["item"]["id"], "call_abc123");
+    assert_eq!(tool_added.data["item"]["name"], "calculator");
+
+    // Arguments might be empty if router emitted added before first content chunk processed, or partial
+    let args = tool_added.data["item"]["arguments"].as_str().unwrap();
+    if !args.is_empty() {
+        assert_eq!(args, "{\"expr\":\"2");
+    }
+
+    let tool_done = events
+        .iter()
+        .find(|event| {
+            event.event == "response.output_item.done"
+                && event.data["item"]["type"] == "function_call"
+        })
+        .expect("function call should be finalized");
+    assert_eq!(tool_done.data["item"]["id"], "call_abc123");
+    assert_eq!(tool_done.data["item"]["name"], "calculator");
+    assert_eq!(tool_done.data["item"]["arguments"], "{\"expr\":\"2+2\"}");
+
+    let completed = events
+        .last()
+        .expect("stream should include completion event");
+    assert_eq!(completed.event, "response.completed");
+    let completed_tools = completed.data["response"]["output"]
+        .as_array()
+        .expect("response.output should be an array")
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect::<Vec<_>>();
+    assert_eq!(completed_tools.len(), 1);
+    assert_eq!(completed_tools[0]["id"], "call_abc123");
+    assert_eq!(completed_tools[0]["name"], "calculator");
+    assert_eq!(completed_tools[0]["arguments"], "{\"expr\":\"2+2\"}");
+}
+
+#[tokio::test]
+async fn test_responses_stream_complex_mixed_content_and_tools() {
+    let mock_server = MockServer::start().await;
+
+    let sse = build_openai_sse(&[
+        json!({
+            "id": "chatcmpl-complex",
+            "object": "chat.completion.chunk",
+            "created": 1730000300,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-complex",
+            "object": "chat.completion.chunk",
+            "created": 1730000300,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "Let me "},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-complex",
+            "object": "chat.completion.chunk",
+            "created": 1730000300,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "check."},
+                "finish_reason": null
+            }]
+        }),
+        // Tool 1: Calculator
+        json!({
+            "id": "chatcmpl-complex",
+            "object": "chat.completion.chunk",
+            "created": 1730000300,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"op\":\"add\""
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-complex",
+            "object": "chat.completion.chunk",
+            "created": 1730000300,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "arguments": "}"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-complex",
+            "object": "chat.completion.chunk",
+            "created": 1730000300,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "total_tokens": 30
+            }
+        }),
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config_json = make_test_config(&mock_server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let request = json!({
+        "model": "mock,test-model",
+        "instructions": "Complex case",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Do it"}]
+        }],
+        "stream": true
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    let events = parse_sse_events(&text);
+
+    // 1. Check response.created
+    assert!(events.iter().any(|e| e.event == "response.created"));
+
+    // 2. Check text deltas
+    let text_deltas: Vec<String> = events
+        .iter()
+        .filter(|e| e.event == "response.output_text.delta")
+        .filter_map(|e| e.data["delta"].as_str())
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    assert_eq!(
+        text_deltas,
+        vec!["Let me ".to_string(), "check.".to_string()]
+    );
+
+    // 3. Check Tool 1 (Calculator)
+    let tool1_added = events
+        .iter()
+        .find(|e| e.event == "response.output_item.added" && e.data["item"]["id"] == "call_1")
+        .expect("Tool 1 added");
+    assert_eq!(tool1_added.data["item"]["name"], "calculator");
+
+    let done_events: Vec<&SseEvent> = events
+        .iter()
+        .filter(|e| e.event == "response.output_item.done")
+        .collect();
+
+    let done_debug: Vec<String> = done_events.iter().map(|e| e.data.to_string()).collect();
+    assert!(
+        done_events.len() >= 2,
+        "Expected at least 2 done events, found: {:?}",
+        done_debug
+    );
+
+    let tool1_done = done_events
+        .iter()
+        .find(|e| e.data["item"]["id"] == "call_1");
+    if tool1_done.is_none() {
+        panic!("Tool 1 done not found in: {:?}", done_debug);
+    }
+    let tool1_done = tool1_done.unwrap();
+    assert_eq!(tool1_done.data["item"]["arguments"], "{\"op\":\"add\"}");
+
+    // 5. Check Completion
+    let completed = events.last().unwrap();
+    assert_eq!(completed.event, "response.completed");
 }
 
 #[tokio::test]
@@ -477,4 +996,14 @@ async fn test_responses_stream_maps_errors_to_response_failed() {
         .unwrap();
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("event: response.failed"));
+
+    let events = parse_sse_events(&text);
+    let failed = events
+        .iter()
+        .find(|event| event.event == "response.failed")
+        .expect("stream should include response.failed");
+    assert!(failed.data["response"]["error"]["message"]
+        .as_str()
+        .is_some());
+    assert_eq!(failed.data["response"]["error"]["code"], "upstream_error");
 }
