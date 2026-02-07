@@ -6,6 +6,7 @@
 use anyhow::Result;
 use axum::http::HeaderMap;
 use serde_json::Value;
+use std::collections::VecDeque;
 
 use crate::frontend::{ContentBlock, Frontend, InternalRequest, InternalResponse, Message, Tool};
 
@@ -27,6 +28,83 @@ fn normalize_codex_role(role: &str) -> &str {
         "developer" => "system",
         _ => role,
     }
+}
+
+fn convert_openai_tool_call_to_tool_use(tool_call: &Value) -> Option<Value> {
+    let function = tool_call.get("function")?;
+    let name = function.get("name")?.as_str()?;
+    let arguments = function
+        .get("arguments")
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}");
+    let input = serde_json::from_str::<Value>(arguments).unwrap_or_else(|_| serde_json::json!({}));
+    let id = tool_call
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("toolu_unknown");
+
+    Some(serde_json::json!({
+        "type": "tool_use",
+        "id": id,
+        "name": name,
+        "input": input
+    }))
+}
+
+fn convert_assistant_content_with_tool_calls(
+    content: Option<&Value>,
+    tool_calls: &[Value],
+) -> Value {
+    let mut blocks: Vec<Value> = Vec::new();
+
+    if let Some(content) = content {
+        match content {
+            Value::String(text) if !text.is_empty() => {
+                blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": text
+                }));
+            }
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(part_type) = item.get("type").and_then(|v| v.as_str()) {
+                        match part_type {
+                            "text" => {
+                                blocks.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": item.get("text").and_then(|v| v.as_str()).unwrap_or("")
+                                }));
+                            }
+                            _ => blocks.push(item.clone()),
+                        }
+                    } else if let Some(text) = item.as_str() {
+                        blocks.push(serde_json::json!({
+                            "type": "text",
+                            "text": text
+                        }));
+                    } else {
+                        blocks.push(item.clone());
+                    }
+                }
+            }
+            Value::Null => {}
+            other => {
+                blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": other.to_string()
+                }));
+            }
+        }
+    }
+
+    for tool_call in tool_calls {
+        if let Some(tool_use) = convert_openai_tool_call_to_tool_use(tool_call) {
+            blocks.push(tool_use);
+        }
+    }
+
+    Value::Array(blocks)
 }
 
 impl Frontend for CodexFrontend {
@@ -74,6 +152,7 @@ impl Frontend for CodexFrontend {
 
         // Parse messages
         let mut messages: Vec<Message> = Vec::new();
+        let mut pending_tool_call_ids: VecDeque<String> = VecDeque::new();
         if let Some(msg_array) = body.get("messages").and_then(|m| m.as_array()) {
             for msg in msg_array {
                 let role = msg
@@ -83,14 +162,48 @@ impl Frontend for CodexFrontend {
                     .to_string();
                 let role = normalize_codex_role(&role).to_string();
 
-                // Handle content - can be string or array (for multimodal)
-                let content = msg.get("content").cloned().unwrap_or(Value::Null);
+                let assistant_tool_calls = if role == "assistant" {
+                    msg.get("tool_calls").and_then(|v| v.as_array())
+                } else {
+                    None
+                };
+
+                // Handle content - can be string or array (for multimodal). For assistant
+                // tool-calling turns, normalize OpenAI tool_calls into Anthropic tool_use blocks.
+                let content = if let Some(tool_calls) = assistant_tool_calls {
+                    for tool_call in tool_calls {
+                        if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
+                            if !id.is_empty() {
+                                pending_tool_call_ids.push_back(id.to_string());
+                            }
+                        }
+                    }
+                    convert_assistant_content_with_tool_calls(msg.get("content"), tool_calls)
+                } else {
+                    msg.get("content").cloned().unwrap_or(Value::Null)
+                };
 
                 // Extract tool_call_id for tool messages
-                let tool_call_id = msg
+                let explicit_tool_call_id = msg
                     .get("tool_call_id")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                let tool_call_id = if role == "tool" {
+                    if let Some(call_id) = explicit_tool_call_id {
+                        if let Some(index) =
+                            pending_tool_call_ids.iter().position(|id| id == &call_id)
+                        {
+                            pending_tool_call_ids.remove(index);
+                        }
+                        Some(call_id)
+                    } else if pending_tool_call_ids.len() == 1 {
+                        pending_tool_call_ids.pop_front()
+                    } else {
+                        None
+                    }
+                } else {
+                    explicit_tool_call_id
+                };
 
                 messages.push(Message {
                     role,
@@ -519,6 +632,112 @@ mod tests {
 
         let request = frontend.parse_request(body).unwrap();
         assert!(request.tools.is_none());
+    }
+
+    #[test]
+    fn test_parse_request_converts_assistant_tool_calls_to_tool_use_blocks() {
+        let frontend = create_frontend();
+        let body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "I will call a tool",
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expression\":\"2+2\"}"
+                        }
+                    }]
+                }
+            ]
+        });
+
+        let request = frontend.parse_request(body).unwrap();
+        assert_eq!(request.messages.len(), 1);
+        let blocks = request.messages[0]
+            .content
+            .as_array()
+            .expect("assistant content should be block array");
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "I will call a tool");
+        assert_eq!(blocks[1]["type"], "tool_use");
+        assert_eq!(blocks[1]["id"], "call_abc");
+        assert_eq!(blocks[1]["name"], "calculator");
+        assert_eq!(blocks[1]["input"], json!({"expression": "2+2"}));
+    }
+
+    #[test]
+    fn test_parse_request_infers_tool_call_id_when_unambiguous() {
+        let frontend = create_frontend();
+        let body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expression\":\"2+2\"}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "content": "4"
+                }
+            ]
+        });
+
+        let request = frontend.parse_request(body).unwrap();
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[1].role, "tool");
+        assert_eq!(
+            request.messages[1].tool_call_id.as_deref(),
+            Some("call_abc")
+        );
+    }
+
+    #[test]
+    fn test_parse_request_does_not_infer_tool_call_id_when_ambiguous() {
+        let frontend = create_frontend();
+        let body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_a",
+                        "type": "function",
+                        "function": {
+                            "name": "first",
+                            "arguments": "{}"
+                        }
+                    }, {
+                        "id": "call_b",
+                        "type": "function",
+                        "function": {
+                            "name": "second",
+                            "arguments": "{}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "content": "result"
+                }
+            ]
+        });
+
+        let request = frontend.parse_request(body).unwrap();
+        assert_eq!(request.messages.len(), 2);
+        assert!(request.messages[1].tool_call_id.is_none());
     }
 
     #[test]

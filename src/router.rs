@@ -173,6 +173,8 @@ pub struct OpenAIMessage {
     reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAIToolCall>>,
 }
 
 /// OpenAI non-streaming response.
@@ -209,7 +211,7 @@ struct OpenAIResponseMessage {
     tool_calls: Option<Vec<OpenAIToolCall>>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct OpenAIToolCall {
     #[serde(default)]
     id: Option<String>,
@@ -219,7 +221,7 @@ struct OpenAIToolCall {
     function: Option<OpenAIToolFunction>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct OpenAIToolFunction {
     #[serde(default)]
     name: String,
@@ -502,6 +504,9 @@ fn translate_request_anthropic_to_openai(
     model: &str,
 ) -> OpenAIRequest {
     let mut messages: Vec<OpenAIMessage> = Vec::new();
+    let is_reasoning_model = model.to_lowercase().contains("reasoner")
+        || model.to_lowercase().contains("r1")
+        || model.to_lowercase().contains("thinking");
 
     // Handle system prompt: Anthropic has it as a top-level field,
     // OpenAI expects it as the first message with role "system"
@@ -529,6 +534,7 @@ fn translate_request_anthropic_to_openai(
                 content: Some(serde_json::Value::String(system_content)),
                 reasoning_content: None,
                 tool_call_id: None,
+                tool_calls: None,
             });
         }
     }
@@ -583,23 +589,85 @@ fn translate_request_anthropic_to_openai(
             }
         }
 
+        let mut content_source = msg.content.clone();
+        let mut tool_calls: Option<Vec<OpenAIToolCall>> = None;
+        let mut reasoning_content: Option<String> = None;
+
+        // Convert Anthropic assistant tool_use blocks into OpenAI tool_calls.
+        // Keep non-tool content blocks as assistant content.
+        if role == "assistant" {
+            if let Some(arr) = msg.content.as_array() {
+                let mut filtered_blocks: Vec<serde_json::Value> = Vec::new();
+                let mut converted_tool_calls: Vec<OpenAIToolCall> = Vec::new();
+                let mut reasoning_parts: Vec<String> = Vec::new();
+
+                for block in arr {
+                    match block.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                        "tool_use" => {
+                            let id = block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .filter(|v| !v.is_empty())
+                                .unwrap_or("toolu_unknown")
+                                .to_string();
+                            let name = block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .filter(|v| !v.is_empty())
+                                .unwrap_or("tool")
+                                .to_string();
+                            let arguments = block
+                                .get("input")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({}))
+                                .to_string();
+
+                            converted_tool_calls.push(OpenAIToolCall {
+                                id: Some(id),
+                                tool_type: Some("function".to_string()),
+                                function: Some(OpenAIToolFunction { name, arguments }),
+                            });
+                        }
+                        "thinking" => {
+                            if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                                if !thinking.is_empty() {
+                                    reasoning_parts.push(thinking.to_string());
+                                }
+                            }
+                        }
+                        _ => filtered_blocks.push(block.clone()),
+                    }
+                }
+
+                if !converted_tool_calls.is_empty() {
+                    tool_calls = Some(converted_tool_calls);
+                    content_source = serde_json::Value::Array(filtered_blocks);
+                }
+                if !reasoning_parts.is_empty() {
+                    reasoning_content = Some(reasoning_parts.join("\n\n"));
+                }
+            }
+
+            // DeepSeek reasoning models require `reasoning_content` to be present
+            // on assistant turns that participate in tool calling.
+            if is_reasoning_model && reasoning_content.is_none() {
+                reasoning_content = Some(String::new());
+            }
+        }
+
         // Handle regular message content
-        let content = normalize_message_content(&msg.content);
+        let content = normalize_message_content(&content_source);
 
         if has_nonempty_content(&content) || role != "user" {
             messages.push(OpenAIMessage {
                 role: role.to_string(),
                 content: Some(content),
-                reasoning_content: None,
+                reasoning_content,
                 tool_call_id: msg.tool_call_id.clone(),
+                tool_calls,
             });
         }
     }
-
-    // Determine if this is a reasoning model (e.g., DeepSeek-R1)
-    let is_reasoning_model = model.to_lowercase().contains("reasoner")
-        || model.to_lowercase().contains("r1")
-        || model.to_lowercase().contains("thinking");
 
     OpenAIRequest {
         model: model.to_string(),
@@ -3464,6 +3532,25 @@ mod tests {
         let openai_req = translate_request_anthropic_to_openai(&request, "gpt-4");
 
         // Should have: user, assistant, tool messages
+        let assistant_msg = openai_req
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("Should have assistant message");
+        let assistant_tool_calls = assistant_msg
+            .tool_calls
+            .as_ref()
+            .expect("assistant should include tool_calls");
+        assert_eq!(assistant_tool_calls.len(), 1);
+        assert_eq!(assistant_tool_calls[0].id.as_deref(), Some("toolu_123"));
+        assert_eq!(
+            assistant_tool_calls[0]
+                .function
+                .as_ref()
+                .map(|f| f.name.as_str()),
+            Some("calculator")
+        );
+
         let tool_msg = openai_req
             .messages
             .iter()
@@ -3474,6 +3561,35 @@ mod tests {
             Some(serde_json::Value::String("4".to_string()))
         );
         assert_eq!(tool_msg.tool_call_id, Some("toolu_123".to_string()));
+    }
+
+    #[test]
+    fn test_translate_reasoning_model_adds_reasoning_content_for_assistant_tool_calls() {
+        let request = AnthropicRequest {
+            model: "deepseek-reasoner".to_string(),
+            messages: vec![Message {
+                role: "assistant".to_string(),
+                content: serde_json::json!([{
+                    "type": "tool_use",
+                    "id": "call_abc",
+                    "name": "calculator",
+                    "input": {"expression": "2+2"}
+                }]),
+                tool_call_id: None,
+            }],
+            system: None,
+            max_tokens: Some(1000),
+            temperature: None,
+            stream: Some(false),
+            tools: None,
+        };
+
+        let openai_req = translate_request_anthropic_to_openai(&request, "deepseek-reasoner");
+        assert_eq!(openai_req.messages.len(), 1);
+        let msg = &openai_req.messages[0];
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.reasoning_content.as_deref(), Some(""));
+        assert!(msg.tool_calls.is_some());
     }
 
     #[test]
