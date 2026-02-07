@@ -129,6 +129,8 @@ pub struct AnthropicRequest {
 pub struct Message {
     pub role: String,
     pub content: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -589,7 +591,7 @@ fn translate_request_anthropic_to_openai(
                 role: role.to_string(),
                 content: Some(content),
                 reasoning_content: None,
-                tool_call_id: None,
+                tool_call_id: msg.tool_call_id.clone(),
             });
         }
     }
@@ -1167,6 +1169,7 @@ fn internal_request_to_anthropic_request(
             .map(|m| Message {
                 role: m.role,
                 content: m.content,
+                tool_call_id: m.tool_call_id,
             })
             .collect(),
         system: req.system,
@@ -3278,6 +3281,7 @@ mod tests {
             messages: vec![Message {
                 role: "human".to_string(),
                 content: serde_json::Value::String("Hello".to_string()),
+                tool_call_id: None,
             }],
             system: Some(serde_json::Value::String("You are Claude.".to_string())),
             max_tokens: Some(1000),
@@ -3308,6 +3312,7 @@ mod tests {
             messages: vec![Message {
                 role: "user".to_string(),
                 content: serde_json::Value::String("Solve this.".to_string()),
+                tool_call_id: None,
             }],
             system: None,
             max_tokens: Some(4000),
@@ -3427,6 +3432,7 @@ mod tests {
                 Message {
                     role: "user".to_string(),
                     content: serde_json::json!("What's 2+2?"),
+                    tool_call_id: None,
                 },
                 Message {
                     role: "assistant".to_string(),
@@ -3436,6 +3442,7 @@ mod tests {
                         "name": "calculator",
                         "input": {"expression": "2+2"}
                     }]),
+                    tool_call_id: None,
                 },
                 Message {
                     role: "user".to_string(),
@@ -3444,6 +3451,7 @@ mod tests {
                         "tool_use_id": "toolu_123",
                         "content": "4"
                     }]),
+                    tool_call_id: None,
                 },
             ],
             system: None,
@@ -3466,6 +3474,87 @@ mod tests {
             Some(serde_json::Value::String("4".to_string()))
         );
         assert_eq!(tool_msg.tool_call_id, Some("toolu_123".to_string()));
+    }
+
+    #[test]
+    fn test_translate_preserves_tool_call_id_for_tool_role_message() {
+        let request = AnthropicRequest {
+            model: "deepseek-reasoner".to_string(),
+            messages: vec![
+                Message {
+                    role: "assistant".to_string(),
+                    content: serde_json::json!({
+                        "tool_calls": [{
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {
+                                "name": "calculator",
+                                "arguments": "{\"expression\":\"2+2\"}"
+                            }
+                        }]
+                    }),
+                    tool_call_id: None,
+                },
+                Message {
+                    role: "tool".to_string(),
+                    content: serde_json::Value::String("4".to_string()),
+                    tool_call_id: Some("call_abc".to_string()),
+                },
+            ],
+            system: None,
+            max_tokens: Some(1000),
+            temperature: None,
+            stream: Some(false),
+            tools: None,
+        };
+
+        let openai_req = translate_request_anthropic_to_openai(&request, "deepseek-reasoner");
+        let tool_msg = openai_req
+            .messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("expected tool message");
+
+        assert_eq!(tool_msg.tool_call_id.as_deref(), Some("call_abc"));
+        assert_eq!(
+            tool_msg.content,
+            Some(serde_json::Value::String("4".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_internal_request_to_anthropic_preserves_tool_call_id() {
+        let internal = crate::frontend::InternalRequest {
+            model: "deepseek,deepseek-reasoner".to_string(),
+            messages: vec![
+                crate::frontend::Message {
+                    role: "user".to_string(),
+                    content: serde_json::Value::String("use a tool".to_string()),
+                    tool_call_id: None,
+                },
+                crate::frontend::Message {
+                    role: "tool".to_string(),
+                    content: serde_json::Value::String("4".to_string()),
+                    tool_call_id: Some("call_abc".to_string()),
+                },
+            ],
+            system: None,
+            max_tokens: Some(512),
+            temperature: None,
+            stream: Some(false),
+            tools: None,
+            tool_choice: None,
+            stop_sequences: None,
+            extra_params: None,
+        };
+
+        let anthropic_req = internal_request_to_anthropic_request(internal);
+        let tool_msg = anthropic_req
+            .messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("expected tool role message");
+        assert_eq!(tool_msg.tool_call_id.as_deref(), Some("call_abc"));
     }
 
     #[test]
