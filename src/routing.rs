@@ -198,6 +198,56 @@ impl EwmaTracker {
             .map(|(_, tier, name, _)| (tier, name))
             .collect()
     }
+
+    /// Sort tiers with config-aware tier name resolution.
+    ///
+    /// Uses `tier_name` from provider config when available.
+    pub fn sort_tiers_with_config(
+        &self,
+        tiers: &[String],
+        config: &crate::config::Config,
+    ) -> Vec<(String, String)> {
+        let state = self.state.read();
+
+        let mut entries: Vec<(usize, String, String, Option<f64>)> = tiers
+            .iter()
+            .enumerate()
+            .map(|(idx, tier)| {
+                let tier_name = config.backend_abbreviation_with_config(tier);
+                let ewma = state.get(&tier_name).and_then(|s| {
+                    if s.samples >= self.min_samples {
+                        Some(s.ewma)
+                    } else {
+                        None
+                    }
+                });
+                (idx, tier.clone(), tier_name, ewma)
+            })
+            .collect();
+
+        entries.sort_by(|a, b| match (a.3, b.3) {
+            (Some(la), Some(lb)) => la.partial_cmp(&lb).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.0.cmp(&b.0),
+        });
+
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let order: Vec<String> = entries
+                .iter()
+                .map(|(_, _, name, ewma)| match ewma {
+                    Some(e) => format!("{}({:.3}s)", name, e),
+                    None => format!("{}(?)", name),
+                })
+                .collect();
+            debug!(order = ?order, "tier routing order (config-aware)");
+        }
+
+        entries
+            .into_iter()
+            .map(|(_, tier, name, _)| (tier, name))
+            .collect()
+    }
 }
 
 /// Scoped timer for measuring per-attempt latency.
@@ -339,9 +389,10 @@ mod tests {
     #[test]
     fn test_sort_tiers_by_latency() {
         let tracker = EwmaTracker::with_params(0.3, 1, 2.0); // min_samples=1 for test
-                                                             // tier-0 is slow (5s), tier-1 is fast (0.5s)
-        tracker.record_success("tier-0", 5.0);
-        tracker.record_success("tier-1", 0.5);
+                                                             // provider-a is slow (5s), provider-b is fast (0.5s)
+                                                             // Now tier names default to provider name (no hardcoded mapping)
+        tracker.record_success("provider-a", 5.0);
+        tracker.record_success("provider-b", 0.5);
 
         let tiers = vec![
             "provider-a,model-a".to_string(),
@@ -349,23 +400,25 @@ mod tests {
         ];
         let sorted = tracker.sort_tiers(&tiers);
 
-        assert_eq!(sorted[0].1, "tier-1", "faster tier should come first");
-        assert_eq!(sorted[1].1, "tier-0", "slower tier should come second");
+        assert_eq!(sorted[0].1, "provider-b", "faster tier should come first");
+        assert_eq!(sorted[1].1, "provider-a", "slower tier should come second");
     }
 
     #[test]
     fn test_unmeasured_tiers_keep_config_order() {
         let tracker = EwmaTracker::new(); // min_samples=3
-                                          // Only 1 sample for tier-0 (below threshold), none for tier-1
-        tracker.record_success("tier-0", 1.0);
+                                          // Only 1 sample for "a" (below threshold), none for others
+                                          // Simple tier names without comma return as-is
+        tracker.record_success("a", 1.0);
 
         let tiers = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let sorted = tracker.sort_tiers(&tiers);
 
         // No tier has enough samples, so config order is preserved
-        assert_eq!(sorted[0].1, "tier-0");
-        assert_eq!(sorted[1].1, "tier-1");
-        assert_eq!(sorted[2].1, "tier-2");
+        // Simple tier names (no comma) return as-is
+        assert_eq!(sorted[0].1, "a");
+        assert_eq!(sorted[1].1, "b");
+        assert_eq!(sorted[2].1, "c");
     }
 
     #[test]

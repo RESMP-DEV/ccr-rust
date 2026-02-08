@@ -345,6 +345,11 @@ pub struct Provider {
 
     #[serde(default)]
     pub transformer: Option<ProviderTransformer>,
+
+    /// Optional display name for metrics/dashboard (e.g., "ccr-glm").
+    /// If not specified, defaults to the provider name.
+    #[serde(default)]
+    pub tier_name: Option<String>,
 }
 
 impl Provider {
@@ -508,28 +513,40 @@ impl Config {
     }
 
     /// Convert provider,model format to backend abbreviation.
-    /// Examples: "zai,glm-4.7" → "ccr-glm", "minimax,MiniMax-M2.1" → "ccr-mm"
+    ///
+    /// Returns the provider name portion for "provider,model" format,
+    /// or the tier string as-is for simple tiers.
+    ///
+    /// For custom display names, configure `tier_name` in the provider config
+    /// and use `backend_abbreviation_with_config()` instead.
     pub fn backend_abbreviation(tier: &str) -> String {
         if !tier.contains(',') {
             // Direct model name (codex, kimi, etc.)
             return tier.to_string();
         }
+        // Return just the provider portion
+        tier.split(',').next().unwrap_or(tier).to_string()
+    }
 
-        let provider = tier.split(',').next().unwrap_or(tier);
-        match provider {
-            "zai" => "ccr-glm".to_string(),
-            "minimax" => "ccr-mm".to_string(),
-            "deepseek" => {
-                // Distinguish between deepseek-chat and deepseek-reasoner
-                if tier.contains("reasoner") {
-                    "ccr-ds-reasoner".to_string()
-                } else {
-                    "ccr-ds".to_string()
-                }
-            }
-            "openrouter" => "ccr-or".to_string(),
-            _ => provider.to_string(), // Fallback to provider name
+    /// Convert provider,model format to backend abbreviation with config lookup.
+    ///
+    /// If the provider has `tier_name` configured, returns that.
+    /// Otherwise falls back to the provider name.
+    pub fn backend_abbreviation_with_config(&self, tier: &str) -> String {
+        if !tier.contains(',') {
+            return tier.to_string();
         }
+
+        let provider_name = tier.split(',').next().unwrap_or(tier);
+
+        // Look up provider config to get tier_name if configured
+        if let Some(provider) = self.providers().iter().find(|p| p.name == provider_name) {
+            if let Some(name) = provider.tier_name.as_ref() {
+                return name.clone();
+            }
+        }
+
+        provider_name.to_string()
     }
 
     /// Get backend tier order for fallback chain.

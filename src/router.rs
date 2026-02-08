@@ -1057,7 +1057,7 @@ pub async fn handle_messages(
     let tiers = config.backend_tiers();
 
     let mut request = request;
-    let mut ordered = state.ewma_tracker.sort_tiers(&tiers);
+    let mut ordered = state.ewma_tracker.sort_tiers_with_config(&tiers, config);
 
     // Check if the requested model explicitly targets a specific provider (e.g., "deepseek,deepseek-chat")
     // If so, route directly to that provider instead of cascading through tiers
@@ -1074,7 +1074,9 @@ pub async fn handle_messages(
             info!("Direct routing: {} moved to front", requested_model);
         } else {
             // Requested model not in tiers - try it directly as a single-tier request
-            let tier_name = Config::backend_abbreviation(&requested_model);
+            let tier_name = state
+                .config
+                .backend_abbreviation_with_config(&requested_model);
             ordered = vec![(requested_model.clone(), tier_name)];
             info!("Direct routing: {} (not in tier list)", requested_model);
         }
@@ -3040,25 +3042,18 @@ async fn try_request_via_anthropic_protocol(
     }
 
     if request.stream.unwrap_or(false) {
+        // Use streaming token tracking for Anthropic protocol
         let rate_limit_info = extract_rate_limit_headers(&resp);
-        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+        let ctx = StreamVerifyCtx {
+            tier_name: tier_name.to_string(),
+            local_estimate,
+            ratelimit_tracker: Some(ratelimit_tracker.clone()),
+            rate_limit_info: Some(rate_limit_info),
+        };
 
-        let status = reqwest_status_to_axum(resp.status());
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("text/event-stream")
-            .to_string();
-        let stream = resp
-            .bytes_stream()
-            .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string())));
-        let body = Body::from_stream(stream);
-        let mut response = Response::builder()
-            .status(status)
-            .header(axum::http::header::CONTENT_TYPE, content_type)
-            .body(body)
-            .map_err(|e| TryRequestError::Other(anyhow::anyhow!("{}", e)))?;
+        let mut response =
+            stream_anthropic_response_with_tracking(resp, config.sse_buffer_size(), ctx, chain)
+                .await;
         insert_ccr_tier_header(&mut response, tier_name);
         Ok(response)
     } else {
@@ -3072,14 +3067,44 @@ async fn try_request_via_anthropic_protocol(
             .map_err(|e| TryRequestError::Other(e.into()))?;
 
         if let Ok(anthropic_resp) = serde_json::from_slice::<AnthropicResponse>(&body) {
-            record_usage(
-                tier_name,
-                anthropic_resp.usage.input_tokens,
-                anthropic_resp.usage.output_tokens,
-                0,
-                0,
-            );
-            verify_token_usage(tier_name, local_estimate, anthropic_resp.usage.input_tokens);
+            // Estimate tokens when provider returns zeros (common for some Anthropic-compatible APIs)
+            let mut input_tokens = anthropic_resp.usage.input_tokens;
+            let mut output_tokens = anthropic_resp.usage.output_tokens;
+
+            // Use pre-request estimate for input if provider returned 0
+            if input_tokens == 0 && local_estimate > 0 {
+                input_tokens = local_estimate;
+                warn!(
+                    tier = tier_name,
+                    "Provider returned 0 input_tokens, using pre-request estimate: {}",
+                    input_tokens
+                );
+            }
+
+            // Estimate output tokens from response content if provider returned 0
+            if output_tokens == 0 {
+                let content_len: usize = anthropic_resp
+                    .content
+                    .iter()
+                    .map(|block| match block {
+                        AnthropicContentBlock::Text { text } => text.len(),
+                        AnthropicContentBlock::Thinking { thinking, .. } => thinking.len(),
+                        AnthropicContentBlock::ToolUse { input, .. } => input.to_string().len(),
+                    })
+                    .sum();
+                if content_len > 0 {
+                    output_tokens = (content_len / 4).max(1) as u64;
+                    warn!(
+                        tier = tier_name,
+                        "Provider returned 0 output_tokens, estimated: {} (from {} chars)",
+                        output_tokens,
+                        content_len
+                    );
+                }
+            }
+
+            record_usage(tier_name, input_tokens, output_tokens, 0, 0);
+            verify_token_usage(tier_name, local_estimate, input_tokens);
 
             let final_resp = if chain.is_empty() {
                 anthropic_resp
@@ -3293,6 +3318,167 @@ pub async fn stream_response_translated(
                 } else {
                     tracker.record_success(&ctx.tier_name, None, None);
                 }
+            }
+        }
+
+        increment_active_streams(-1);
+    });
+
+    let body = Body::from_stream(ReceiverStream::new(rx));
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+        .header(axum::http::header::CACHE_CONTROL, "no-cache")
+        .header(axum::http::header::CONNECTION, "keep-alive")
+        .body(body)
+        .unwrap()
+}
+
+/// Stream Anthropic protocol response with token tracking.
+///
+/// Parses Anthropic SSE events (`message_delta` with usage) to track tokens.
+/// Used for Anthropic-protocol providers that may not return token counts.
+pub async fn stream_anthropic_response_with_tracking(
+    resp: reqwest::Response,
+    buffer_size: usize,
+    verify_ctx: StreamVerifyCtx,
+    chain: TransformerChain,
+) -> Response {
+    increment_active_streams(1);
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(buffer_size);
+    let tier_name = verify_ctx.tier_name.clone();
+    let local_estimate = verify_ctx.local_estimate;
+
+    tokio::spawn(async move {
+        let mut stream = resp.bytes_stream();
+        let mut decoder = SseFrameDecoder::new();
+        let mut input_tokens: u64 = 0;
+        let mut output_tokens: u64 = 0;
+        let mut accumulated_content_len: usize = 0;
+
+        loop {
+            tokio::select! {
+                chunk = stream.next() => {
+                    let Some(chunk) = chunk else {
+                        break;
+                    };
+                    match chunk {
+                        Ok(bytes) => {
+                            for frame in decoder.push(&bytes) {
+                                let json_str = frame.data.trim();
+                                if json_str == "[DONE]" || json_str.is_empty() {
+                                    continue;
+                                }
+
+                                // Parse Anthropic SSE events to extract usage
+                                if let Ok(event) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                    // Extract usage from message_delta events
+                                    if let Some(usage) = event.get("usage") {
+                                        if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                                            if input > 0 {
+                                                input_tokens = input;
+                                            }
+                                        }
+                                        if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                                            if output > 0 {
+                                                output_tokens = output;
+                                            }
+                                        }
+                                    }
+
+                                    // Also track content length for estimation fallback
+                                    if let Some(delta) = event.get("delta") {
+                                        if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                                            accumulated_content_len += text.len();
+                                        }
+                                    }
+                                    if let Some(content_block) = event.get("content_block") {
+                                        if let Some(text) = content_block.get("text").and_then(|v| v.as_str()) {
+                                            accumulated_content_len += text.len();
+                                        }
+                                    }
+                                }
+
+                                // Apply response transformers if chain is not empty
+                                let output_frame = if !chain.is_empty() {
+                                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                        if let Ok(transformed) = chain.apply_response(value) {
+                                            serde_json::to_string(&transformed).unwrap_or_else(|_| json_str.to_string())
+                                        } else {
+                                            json_str.to_string()
+                                        }
+                                    } else {
+                                        json_str.to_string()
+                                    }
+                                } else {
+                                    json_str.to_string()
+                                };
+
+                                // Reconstruct SSE frame
+                                let sse_data = if let Some(event_type) = &frame.event {
+                                    format!("event: {}\ndata: {}\n\n", event_type, output_frame)
+                                } else {
+                                    format!("data: {}\n\n", output_frame)
+                                };
+
+                                if tx.capacity() == 0 {
+                                    record_stream_backpressure();
+                                }
+                                if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                            break;
+                        }
+                    }
+                }
+                _ = tx.closed() => {
+                    tracing::debug!("Client disconnected, aborting Anthropic upstream");
+                    break;
+                }
+            }
+        }
+
+        // Estimate tokens if provider returned zeros (some Anthropic-compatible APIs don't report usage)
+        let final_input_tokens = if input_tokens == 0 && local_estimate > 0 {
+            warn!(
+                tier = %tier_name,
+                "Anthropic stream returned 0 input_tokens, using pre-request estimate: {}",
+                local_estimate
+            );
+            local_estimate
+        } else {
+            input_tokens
+        };
+
+        let final_output_tokens = if output_tokens == 0 && accumulated_content_len > 0 {
+            let estimate = (accumulated_content_len / 4).max(1) as u64;
+            warn!(
+                tier = %tier_name,
+                "Anthropic stream returned 0 output_tokens, estimated: {} (from {} chars)",
+                estimate,
+                accumulated_content_len
+            );
+            estimate
+        } else {
+            output_tokens
+        };
+
+        // Record usage
+        record_usage(&tier_name, final_input_tokens, final_output_tokens, 0, 0);
+        verify_token_usage(&tier_name, local_estimate, final_input_tokens);
+
+        // Update rate limit state
+        if let Some(ref tracker) = verify_ctx.ratelimit_tracker {
+            if let Some((remaining, reset_at)) = &verify_ctx.rate_limit_info {
+                tracker.record_success(&tier_name, *remaining, *reset_at);
+            } else {
+                tracker.record_success(&tier_name, None, None);
             }
         }
 
