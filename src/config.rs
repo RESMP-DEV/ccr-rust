@@ -528,7 +528,7 @@ impl Config {
                 }
             }
             "openrouter" => "ccr-or".to_string(),
-            _ => format!("{}", provider), // Fallback to provider name
+            _ => provider.to_string(), // Fallback to provider name
         }
     }
 
