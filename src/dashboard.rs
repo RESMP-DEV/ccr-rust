@@ -152,8 +152,8 @@ impl SessionInfo {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
 
-        let git_branch = env!("GIT_BRANCH", "unknown").to_string();
-        let version = env!("CARGO_PKG_VERSION", "unknown").to_string();
+        let git_branch = option_env!("GIT_BRANCH").unwrap_or("unknown").to_string();
+        let version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown").to_string();
 
         Self {
             cwd,
@@ -376,9 +376,9 @@ fn render_header(f: &mut ratatui::Frame, area: Rect, host: &str, port: u16, stat
         0.0
     };
 
-    let success_rate_color = if success_rate >= 99.0 {
+    let success_rate_color = if success_rate >= 90.0 {
         Color::Green
-    } else if success_rate >= 95.0 {
+    } else if success_rate >= 80.0 {
         Color::Yellow
     } else {
         Color::Red
@@ -593,9 +593,9 @@ fn create_tier_stats_table(state: &UiState) -> Table<'_> {
                     .get(&usage.tier)
                     .map(|s| s * 1000.0)
                     .unwrap_or(0.0);
-                let latency_style = if ewma_ms > 5000.0 {
+                let latency_style = if ewma_ms > 7000.0 {
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                } else if ewma_ms > 1000.0 {
+                } else if ewma_ms > 5000.0 {
                     Style::default().fg(Color::Yellow)
                 } else {
                     Style::default().fg(Color::Green)
