@@ -1074,10 +1074,7 @@ pub async fn handle_messages(
             info!("Direct routing: {} moved to front", requested_model);
         } else {
             // Requested model not in tiers - try it directly as a single-tier request
-            let tier_name = format!(
-                "tier-direct-{}",
-                requested_model.split(',').next().unwrap_or("unknown")
-            );
+            let tier_name = Config::backend_abbreviation(&requested_model);
             ordered = vec![(requested_model.clone(), tier_name)];
             info!("Direct routing: {} (not in tier list)", requested_model);
         }

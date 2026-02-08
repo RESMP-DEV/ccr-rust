@@ -15,17 +15,17 @@ pub enum FrontendType {
 /// Detect the request frontend using lightweight format heuristics.
 ///
 /// Rules:
+/// - Claude Code: any `anthropic-*` header OR body has Anthropic format (top-level `model` + `messages` without `role`)
 /// - Codex: `User-Agent` contains `codex` OR body has OpenAI format (`messages` with `role`)
-/// - Claude Code: any `anthropic-*` header OR body has Anthropic format (top-level `model` + `messages`)
-/// - If both are true (ambiguous), default to Codex.
+/// - Default: Codex (primary execution engine).
 pub fn detect_frontend(headers: &HeaderMap, body: &Value) -> FrontendType {
+    let claude_signal = has_anthropic_headers(headers) || has_anthropic_format(body);
     let codex_signal = has_codex_user_agent(headers) || has_openai_format(body);
-    let _claude_signal = has_anthropic_headers(headers) || has_anthropic_format(body);
 
-    if codex_signal {
-        FrontendType::Codex
-    } else {
+    if claude_signal && !codex_signal {
         FrontendType::ClaudeCode
+    } else {
+        FrontendType::Codex
     }
 }
 
@@ -130,12 +130,12 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_claude_code_when_no_signal() {
+    fn defaults_to_codex_when_no_signal() {
         let headers = HeaderMap::new();
 
         assert_eq!(
             detect_frontend(&headers, &json!({"other": true})),
-            FrontendType::ClaudeCode
+            FrontendType::Codex
         );
     }
 }

@@ -438,6 +438,11 @@ pub struct RouterConfig {
     #[serde(rename = "longContextThreshold")]
     pub long_context_threshold: u32,
 
+    /// Explicit tier ordering for cascading fallback.
+    /// If present, overrides automatic tier construction from default/background/think.
+    #[serde(default)]
+    pub tiers: Option<Vec<String>>,
+
     #[serde(default)]
     #[serde(rename = "webSearch")]
     pub web_search: WebSearchConfig,
@@ -502,9 +507,41 @@ impl Config {
         })
     }
 
+    /// Convert provider,model format to backend abbreviation.
+    /// Examples: "zai,glm-4.7" → "ccr-glm", "minimax,MiniMax-M2.1" → "ccr-mm"
+    pub fn backend_abbreviation(tier: &str) -> String {
+        if !tier.contains(',') {
+            // Direct model name (codex, kimi, etc.)
+            return tier.to_string();
+        }
+
+        let provider = tier.split(',').next().unwrap_or(tier);
+        match provider {
+            "zai" => "ccr-glm".to_string(),
+            "minimax" => "ccr-mm".to_string(),
+            "deepseek" => {
+                // Distinguish between deepseek-chat and deepseek-reasoner
+                if tier.contains("reasoner") {
+                    "ccr-ds-reasoner".to_string()
+                } else {
+                    "ccr-ds".to_string()
+                }
+            }
+            "openrouter" => "ccr-or".to_string(),
+            _ => format!("{}", provider), // Fallback to provider name
+        }
+    }
+
     /// Get backend tier order for fallback chain.
     pub fn backend_tiers(&self) -> Vec<String> {
         let r = self.router();
+
+        // Prefer explicit tiers array if configured
+        if let Some(ref tiers) = r.tiers {
+            return tiers.clone();
+        }
+
+        // Fallback: build from individual fields
         let mut tiers = vec![r.default.clone()];
 
         for tier in [&r.background, &r.think, &r.long_context]

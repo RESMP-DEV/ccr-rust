@@ -162,7 +162,7 @@ impl EwmaTracker {
             .iter()
             .enumerate()
             .map(|(idx, tier)| {
-                let tier_name = format!("tier-{}", idx);
+                let tier_name = crate::config::Config::backend_abbreviation(tier);
                 let ewma = state.get(&tier_name).and_then(|s| {
                     if s.samples >= self.min_samples {
                         Some(s.ewma)
