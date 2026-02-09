@@ -8,7 +8,8 @@ This guide covers setting up Claude Code CLI to work with CCR-Rust as a proxy ro
 2. [Configuring CCR-Rust for Claude Code](#2-configuring-ccr-rust-for-claude-code)
 3. [Cache Control Settings](#3-cache-control-settings)
 4. [Thinking Block Preferences](#4-thinking-block-preferences)
-5. [Troubleshooting](#5-troubleshooting)
+5. [Reasoning Provider Support](#reasoning-provider-support)
+6. [Troubleshooting](#6-troubleshooting)
 
 ---
 
@@ -360,9 +361,92 @@ curl -X POST http://127.0.0.1:3456/v1/messages \
 
 ---
 
-## 5. Troubleshooting
+## Reasoning Provider Support
 
-### 5.1 "Connection Refused" Error
+CCR-Rust now normalizes reasoning output from different providers into a single OpenAI-compatible field: `reasoning_content`.
+
+### Unified Output Format
+
+All reasoning-capable providers now return `reasoning_content` as a structured field in OpenAI responses. This keeps reasoning separate from normal assistant text content and enables reliable multi-turn tool use across providers.
+
+### Provider Matrix
+
+| Provider | Input Format | Output Format |
+|----------|--------------|---------------|
+| DeepSeek | `reasoning_content` (native) | `reasoning_content` (preserved) |
+| Minimax M2.1 | `reasoning_details` | `reasoning_content` (mapped) |
+| GLM-4.7 (Z.AI) | `<think>` tags | `reasoning_content` (extracted) |
+| Kimi K2 | `◁think▷` tokens | `reasoning_content` (extracted) |
+
+### Multi-Turn Tool Use
+
+For multi-turn tool-calling conversations, pass `reasoning_content` back in assistant messages for providers that require reasoning continuity. DeepSeek reasoning models require this field on assistant turns involved in tool use.
+
+If no reasoning text is available, send an empty string:
+
+```json
+{
+  "role": "assistant",
+  "content": "",
+  "reasoning_content": "",
+  "tool_calls": [
+    {
+      "id": "call_123",
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "arguments": "{\"path\":\"README.md\"}"
+      }
+    }
+  ]
+}
+```
+
+### Configuration (`config.alphaheng.json`)
+
+Provider setup used by AlphaHENG (`contrib/ccr-rust/config.alphaheng.json`):
+
+```json
+{
+  "Providers": [
+    {
+      "name": "zai",
+      "api_base_url": "https://api.z.ai/api/inference/v1",
+      "api_key": "${ZAI_API_KEY}",
+      "models": ["glm-4.7"]
+    },
+    {
+      "name": "deepseek",
+      "api_base_url": "https://api.deepseek.com/v1",
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "models": ["deepseek-reasoner"]
+    },
+    {
+      "name": "minimax",
+      "api_base_url": "https://api.minimax.io/v1",
+      "api_key": "${MINIMAX_API_KEY}",
+      "models": ["MiniMax-M2.1"]
+    },
+    {
+      "name": "openrouter",
+      "api_base_url": "https://openrouter.ai/api/v1",
+      "api_key": "${OPENROUTER_API_KEY}",
+      "models": ["openrouter/pony-alpha"]
+    }
+  ],
+  "Router": {
+    "default": "zai,glm-4.7",
+    "think": "deepseek,deepseek-reasoner",
+    "longContext": "minimax,MiniMax-M2.1"
+  }
+}
+```
+
+---
+
+## 6. Troubleshooting
+
+### 6.1 "Connection Refused" Error
 
 **Symptom:**
 ```
@@ -385,7 +469,7 @@ Error: connect ECONNREFUSED 127.0.0.1:3456
    ccr-rust start
    ```
 
-### 5.2 "Invalid API Key" Error
+### 6.2 "Invalid API Key" Error
 
 **Symptom:**
 ```
@@ -408,7 +492,7 @@ Error: 401 Unauthorized - Invalid API key
    "api_key": "${ANTHROPIC_API_KEY}"
    ```
 
-### 5.3 "Model Not Found" Error
+### 6.3 "Model Not Found" Error
 
 **Symptom:**
 ```
@@ -437,7 +521,7 @@ Error: 404 - Model 'xxx' not found
    claude --model claude-3-5-sonnet-20241022
    ```
 
-### 5.4 High Latency or Timeouts
+### 6.4 High Latency or Timeouts
 
 **Symptom:** Slow responses or timeout errors.
 
@@ -457,7 +541,7 @@ Error: 404 - Model 'xxx' not found
    curl http://127.0.0.1:3456/metrics | grep ccr_failures
    ```
 
-### 5.5 Cache Not Working
+### 6.5 Cache Not Working
 
 **Symptom:** No cache hit rate improvement, high token costs.
 
@@ -477,7 +561,7 @@ Error: 404 - Model 'xxx' not found
    curl http://127.0.0.1:3456/metrics | grep pool
    ```
 
-### 5.6 Thinking Blocks Not Displaying
+### 6.6 Thinking Blocks Not Displaying
 
 **Symptom:** Reasoning models not showing thinking content.
 
@@ -499,7 +583,7 @@ Error: 404 - Model 'xxx' not found
    claude --model deepseek-reasoner
    ```
 
-### 5.7 Tool Use Failures
+### 6.7 Tool Use Failures
 
 **Symptom:** Claude Code cannot use tools (file operations, bash commands).
 
@@ -521,7 +605,7 @@ Error: 404 - Model 'xxx' not found
    curl http://127.0.0.1:3456/metrics | grep tool
    ```
 
-### 5.8 Debug Logging
+### 6.8 Debug Logging
 
 Enable debug output for troubleshooting:
 
@@ -540,7 +624,7 @@ DEBUG=* claude
 claude --verbose
 ```
 
-### 5.9 Verify End-to-End Flow
+### 6.9 Verify End-to-End Flow
 
 Test the complete flow manually:
 

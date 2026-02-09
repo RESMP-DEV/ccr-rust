@@ -1,8 +1,8 @@
 # CCR-Rust
 
-> **Universal AI coding proxy.** Use Claude Code, Codex CLI, or any Anthropic-compatible tool with DeepSeek, GLM, MiniMax, and more—without rate limits breaking your flow.
+> **Universal AI coding proxy.** Use Codex CLI, Claude Code, or any OpenAI/Anthropic-compatible tool with DeepSeek, GLM, MiniMax, and more—without rate limits breaking your flow.
 
-You want to use your favorite AI coding assistant (Claude Code or Codex), but rate limits, downtime, or regional restrictions get in the way. Context-switching between tools kills productivity.
+You want to use your favorite AI coding assistant, but rate limits, downtime, or regional restrictions get in the way. Context-switching between tools kills productivity.
 
 **CCR-Rust** is a local proxy that sits between your frontend and multiple LLM providers. When one backend fails, requests automatically cascade to the next tier. Same interface, uninterrupted workflow.
 
@@ -10,10 +10,10 @@ You want to use your favorite AI coding assistant (Claude Code or Codex), but ra
 
 CCR-Rust works with **both** leading AI coding assistants:
 
-| Frontend | Setup | Use Case |
-|----------|-------|----------|
-| **Claude Code** | `export ANTHROPIC_BASE_URL=http://127.0.0.1:3456` | Anthropic's agentic coding assistant |
-| **Codex CLI** | `export OPENAI_BASE_URL=http://127.0.0.1:3456` | OpenAI's command-line coding tool |
+| Frontend | Setup | Status |
+|----------|-------|--------|
+| **Codex CLI** | `export OPENAI_BASE_URL=http://127.0.0.1:3456/v1` | ✅ Full support — reasoning normalization, `/v1/responses` |
+| **Claude Code** | `export ANTHROPIC_BASE_URL=http://127.0.0.1:3456` | ✅ Full support — `/v1/messages`, streaming |
 
 No configuration changes needed—just point your frontend at CCR-Rust and it handles the rest.
 
@@ -67,10 +67,9 @@ Create `~/.claude-code-router/config.json`:
         },
         {
             "name": "minimax",
-            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_base_url": "https://api.minimax.io/v1",
             "api_key": "YOUR_MINIMAX_API_KEY",
             "models": ["MiniMax-M2.1"],
-            "protocol": "anthropic",
             "transformer": { "use": ["anthropic"] }
         }
     ],
@@ -185,15 +184,15 @@ For detailed setup instructions, see [docs/claude_code_setup.md](docs/claude_cod
 
 ### Codex CLI Setup
 
-You can use the Codex CLI with CCR-Rust to route requests to any supported backend.
+Codex CLI works with CCR-Rust via the OpenAI-compatible endpoints, with full support for reasoning normalization from DeepSeek, GLM, MiniMax, and more.
 
 ```bash
-export OPENAI_BASE_URL=http://127.0.0.1:3456
+export OPENAI_BASE_URL=http://127.0.0.1:3456/v1
 export OPENAI_API_KEY=any-non-empty-string
 codex
 ```
 
-For detailed setup instructions, see [docs/codex_setup.md](docs/codex_setup.md).
+For detailed setup instructions including reasoning provider support, see [docs/codex_setup.md](docs/codex_setup.md).
 
 ## Monitoring
 
@@ -288,11 +287,9 @@ This validates:
         },
         {
             "name": "minimax",
-            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_base_url": "https://api.minimax.io/v1",
             "api_key": "sk-xxx",
-            "models": ["MiniMax-M2.1"],
-            "protocol": "anthropic",
-            "transformer": { "use": ["anthropic"] }
+            "models": ["MiniMax-M2.1"]
         }
     ],
     "Router": {
@@ -328,13 +325,27 @@ Fine-tune how aggressively each tier retries:
 
 ## Supported Providers
 
-| Provider | API Base URL | Notes |
-|----------|--------------|-------|
-| Z.AI (GLM) | `https://api.z.ai/api/coding/paas/v4` | GLM-4.7, requires `anthropic` transformer |
+| Provider | API Base URL | Models |
+|----------|--------------|--------|
+| Z.AI (GLM) | `https://api.z.ai/api/coding/paas/v4` | GLM-4.7 — Fast code generation |
+| Kimi (Moonshot) | `https://api.moonshot.cn/v1` | Kimi K2.5 — Extended context reasoning |
+| MiniMax | `https://api.minimax.io/v1` | MiniMax-M2.1 — High-performance reasoning |
 | DeepSeek | `https://api.deepseek.com` | deepseek-chat, deepseek-reasoner |
-| MiniMax | `https://api.minimax.io/anthropic/v1` | Set `protocol: "anthropic"` for best tool-call compatibility |
-| OpenRouter | `https://openrouter.ai/api/v1` | Access to many models |
-| Groq | `https://api.groq.com/openai/v1` | Fast inference, Llama models |
+| OpenRouter | `https://openrouter.ai/api/v1` | Access to 200+ models |
+
+> **Note:** The `transformer` field is optional. Use `"transformer": {"use": ["deepseek"]}` for DeepSeek Reasoner's `reasoning_content` normalization, or `"transformer": {"use": ["openrouter"]}` for OpenRouter attribution headers. Most providers work without any transformer configuration.
+
+### Coding Plan Discounts
+
+Several providers offer subscription "coding plans" with better rates than pay-as-you-go:
+
+| Provider | Plan | Discount |
+|----------|------|----------|
+| Z.AI | [Coding Plan](https://z.ai/subscribe?ic=Y8HASOW1RU) | **10% off** — Best value for GLM-4.7 |
+| Kimi | Kimi Code | No discount available |
+| MiniMax | [Coding Plan](https://platform.minimax.io/subscribe/coding-plan?code=AnKU0nzXQG&source=link) | **10% off** — MiniMax M2.1 |
+| DeepSeek | Pay-as-you-go | No plan — Usage-based pricing |
+| OpenRouter | Pay-as-you-go | No plan — Usage-based pricing |
 
 ## Development
 

@@ -170,7 +170,7 @@ impl Frontend for CodexFrontend {
 
                 // Handle content - can be string or array (for multimodal). For assistant
                 // tool-calling turns, normalize OpenAI tool_calls into Anthropic tool_use blocks.
-                let content = if let Some(tool_calls) = assistant_tool_calls {
+                let mut content = if let Some(tool_calls) = assistant_tool_calls {
                     for tool_call in tool_calls {
                         if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
                             if !id.is_empty() {
@@ -182,6 +182,41 @@ impl Frontend for CodexFrontend {
                 } else {
                     msg.get("content").cloned().unwrap_or(Value::Null)
                 };
+
+                // Handle reasoning_content if present (for multi-turn conversations)
+                if let Some(reasoning) = msg.get("reasoning_content").and_then(|v| v.as_str()) {
+                    if !reasoning.is_empty() {
+                        let thinking_block = serde_json::json!({
+                            "type": "thinking",
+                            "thinking": reasoning
+                        });
+
+                        match content {
+                            Value::Array(mut blocks) => {
+                                blocks.insert(0, thinking_block);
+                                content = Value::Array(blocks);
+                            }
+                            Value::String(text) => {
+                                let mut blocks = Vec::new();
+                                blocks.push(thinking_block);
+                                if !text.is_empty() {
+                                    blocks.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": text
+                                    }));
+                                }
+                                content = Value::Array(blocks);
+                            }
+                            Value::Null => {
+                                content = Value::Array(vec![thinking_block]);
+                            }
+                            _ => {
+                                // For other types, convert to array and prepend
+                                content = Value::Array(vec![thinking_block, content]);
+                            }
+                        }
+                    }
+                }
 
                 // Extract tool_call_id for tool messages
                 let explicit_tool_call_id = msg
@@ -296,8 +331,10 @@ impl Frontend for CodexFrontend {
     ///
     /// Converts InternalResponse to OpenAI JSON response format.
     fn serialize_response(&self, response: InternalResponse) -> Result<Vec<u8>> {
-        // Extract text content from content blocks
+
+        // Extract text and reasoning content from content blocks
         let mut content = String::new();
+        let mut reasoning_content = String::new();
         let mut tool_calls: Vec<Value> = Vec::new();
 
         for block in &response.content {
@@ -323,13 +360,11 @@ impl Frontend for CodexFrontend {
                     // Images in response are not standard in OpenAI chat completions
                 }
                 ContentBlock::Thinking { thinking, .. } => {
-                    // Include thinking content wrapped in tags
-                    if !content.is_empty() {
-                        content.push('\n');
+                    // Accumulate thinking content separately for the reasoning_content field
+                    if !reasoning_content.is_empty() {
+                        reasoning_content.push('\n');
                     }
-                    content.push_str("<thinking>");
-                    content.push_str(thinking);
-                    content.push_str("</thinking>");
+                    reasoning_content.push_str(thinking);
                 }
             }
         }
@@ -351,6 +386,10 @@ impl Frontend for CodexFrontend {
             "role": response.role,
             "content": content
         });
+
+        if !reasoning_content.is_empty() {
+            message["reasoning_content"] = Value::String(reasoning_content);
+        }
 
         // Add tool_calls if present
         if !tool_calls.is_empty() {
@@ -670,6 +709,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_request_with_reasoning_content() {
+        let frontend = create_frontend();
+        let body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Final answer.",
+                    "reasoning_content": "Let me think..."
+                }
+            ]
+        });
+
+        let request = frontend.parse_request(body).unwrap();
+        assert_eq!(request.messages.len(), 1);
+        let blocks = request.messages[0]
+            .content
+            .as_array()
+            .expect("content should be block array");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "Let me think...");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "Final answer.");
+    }
+
+    #[test]
     fn test_parse_request_infers_tool_call_id_when_unambiguous() {
         let frontend = create_frontend();
         let body = json!({
@@ -767,6 +833,11 @@ mod tests {
         assert_eq!(json["object"], "chat.completion");
         assert_eq!(json["model"], "gpt-4");
         assert_eq!(json["choices"][0]["message"]["content"], "Hello, world!");
+        assert!(
+            json["choices"][0]["message"]
+                .get("reasoning_content")
+                .is_none()
+        );
         assert_eq!(json["choices"][0]["finish_reason"], "stop");
         assert_eq!(json["usage"]["prompt_tokens"], 10);
         assert_eq!(json["usage"]["completion_tokens"], 5);
@@ -807,6 +878,46 @@ mod tests {
         assert_eq!(
             json["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
             "calculator"
+        );
+    }
+
+    #[test]
+    fn test_serialize_response_with_reasoning_content() {
+        // Test that reasoning_content is preserved in the response
+        let frontend = create_frontend();
+        let response = InternalResponse {
+            id: "chatcmpl-999".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            model: "gpt-4".to_string(),
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "Let me think...".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Thinking {
+                    thinking: "Need one more step.".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "Final answer.".to_string(),
+                },
+            ],
+            stop_reason: Some("end_turn".to_string()),
+            usage: None,
+            extra_data: None,
+        };
+
+        let bytes = frontend.serialize_response(response).unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+        let content = json["choices"][0]["message"]["content"].as_str().unwrap();
+        assert_eq!(content, "Final answer.");
+        assert!(!content.contains("<thinking>"));
+
+        assert_eq!(
+            json["choices"][0]["message"]["reasoning_content"],
+            "Let me think...\nNeed one more step."
         );
     }
 

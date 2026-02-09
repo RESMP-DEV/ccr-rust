@@ -20,12 +20,11 @@
         },
         {
             "name": "minimax",
-            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_base_url": "https://api.minimax.io/v1",
             "api_key": "mk-xxx",
             "models": [
                 "MiniMax-M2.1"
-            ],
-            "protocol": "anthropic"
+            ]
         }
     ],
     "Router": {

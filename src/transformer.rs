@@ -4,6 +4,8 @@
 //! before returning to clients. This mirrors the Node.js transformer system.
 
 use crate::config::TransformerEntry;
+use crate::transform::glm::GlmTransformer;
+use crate::transform::minimax::MinimaxTransformer;
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use anyhow::Result;
 use regex::Regex;
@@ -682,12 +684,14 @@ impl TransformerRegistry {
             "openai-to-anthropic",
             Arc::new(OpenAiToAnthropicTransformer),
         );
+        registry.register("minimax", Arc::new(MinimaxTransformer));
         registry.register("openrouter", Arc::new(OpenRouterTransformer));
         registry.register("tooluse", Arc::new(ToolUseTransformer));
         registry.register("identity", Arc::new(IdentityTransformer));
         registry.register("reasoning", Arc::new(ReasoningTransformer));
         registry.register("enhancetool", Arc::new(EnhanceToolTransformer));
         registry.register("thinktag", Arc::new(ThinkTagTransformer));
+        registry.register("glm", Arc::new(GlmTransformer::default()));
 
         registry
     }
@@ -762,7 +766,7 @@ impl Default for TransformerRegistry {
 
 /// Simple timestamp-based UUID generation for tool IDs.
 /// Uses a simple counter-based approach to avoid external dependencies.
-mod uuid_nopanic {
+pub(crate) mod uuid_nopanic {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -874,6 +878,7 @@ mod tests {
         let registry = TransformerRegistry::new();
         assert!(registry.get("anthropic").is_some());
         assert!(registry.get("deepseek").is_some());
+        assert!(registry.get("minimax").is_some());
         assert!(registry.get("unknown").is_none());
     }
 

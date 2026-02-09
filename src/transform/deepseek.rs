@@ -89,27 +89,8 @@ impl Transformer for DeepSeekTransformer {
                 }
             }
 
-            // Also handle nested reasoning_content in choices (OpenAI-style responses)
-            if let Some(choices) = obj.get_mut("choices") {
-                if let Some(choices_array) = choices.as_array_mut() {
-                    for choice in choices_array {
-                        if let Some(message) = choice.get_mut("message") {
-                            if let Some(reasoning) = message.as_object_mut().and_then(|m| m.remove("reasoning_content")) {
-                                if let Some(content) = message.get_mut("content") {
-                                    // Prepend to existing content if present
-                                    if let Some(content_str) = content.as_str() {
-                                        *content = serde_json::json!({
-                                            "type": "thinking",
-                                            "thinking": reasoning,
-                                            "signature": ""
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Note: We intentionally do NOT transform nested reasoning_content in choices (OpenAI-style responses)
+            // to preserve the reasoning_content field for clients that support it (like ccr-rust's unified normalization).
 
             // Ensure tool_use blocks have IDs (for tool-using models)
             if let Some(content) = obj.get_mut("content") {
@@ -122,7 +103,10 @@ impl Transformer for DeepSeekTransformer {
                                 use super::super::transformer::uuid_nopanic;
                                 block_obj.insert(
                                     "id".to_string(),
-                                    Value::String(format!("toolu_{}", uuid_nopanic::timestamp_ms())),
+                                    Value::String(format!(
+                                        "toolu_{}",
+                                        uuid_nopanic::timestamp_ms()
+                                    )),
                                 );
                             }
                         }
@@ -175,7 +159,7 @@ mod tests {
     #[test]
     fn maps_reasoning_content_to_thinking_block() {
         let transformer = DeepSeekTransformer;
-        let mut response = serde_json::json!({
+        let response = serde_json::json!({
             "id": "msg_123",
             "type": "message",
             "role": "assistant",
@@ -200,7 +184,7 @@ mod tests {
     #[test]
     fn creates_content_array_from_reasoning_content() {
         let transformer = DeepSeekTransformer;
-        let mut response = serde_json::json!({
+        let response = serde_json::json!({
             "id": "msg_123",
             "type": "message",
             "role": "assistant",
@@ -219,7 +203,7 @@ mod tests {
     #[test]
     fn adds_id_to_tool_use_blocks() {
         let transformer = DeepSeekTransformer;
-        let mut response = serde_json::json!({
+        let response = serde_json::json!({
             "content": [
                 {"type": "tool_use", "name": "calculator", "input": {"expr": "1+1"}}
             ]
@@ -251,9 +235,9 @@ mod tests {
     }
 
     #[test]
-    fn handles_openai_style_reasoning() {
+    fn preserves_openai_style_reasoning() {
         let transformer = DeepSeekTransformer;
-        let mut response = serde_json::json!({
+        let response = serde_json::json!({
             "id": "chat_123",
             "object": "chat.completion",
             "choices": [{
@@ -268,8 +252,9 @@ mod tests {
 
         let result = transformer.transform_response(response).unwrap();
 
-        // reasoning_content should be removed from message
+        // reasoning_content should be preserved
         let message = result["choices"][0]["message"].as_object().unwrap();
-        assert!(message.get("reasoning_content").is_none());
+        assert_eq!(message["reasoning_content"], "Reasoning here");
+        assert_eq!(message["content"], "Answer here");
     }
 }

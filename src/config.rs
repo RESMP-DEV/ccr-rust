@@ -932,10 +932,10 @@ mod tests {
     fn provider_with_anthropic_protocol() {
         let p = parse_provider(
             r#"{
-                "name": "minimax",
-                "api_base_url": "https://api.minimax.io/anthropic/v1",
+                "name": "generic-anthropic",
+                "api_base_url": "https://api.example.com/anthropic/v1",
                 "api_key": "mk-xxx",
-                "models": ["MiniMax-M2.1"],
+                "models": ["model-v1"],
                 "protocol": "anthropic",
                 "anthropic_version": "2023-06-01"
             }"#,

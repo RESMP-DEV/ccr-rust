@@ -3,6 +3,10 @@
 //! This module provides a registry for creating transformer instances
 //! from factory functions, allowing dynamic instantiation based on configuration.
 
+use super::{
+    AnthropicToOpenaiTransformer, DeepSeekTransformer, GlmTransformer, KimiTransformer,
+    MaxTokenTransformer, MinimaxTransformer, OpenAiToAnthropicTransformer, ThinkTagTransformer,
+};
 use crate::config::TransformerEntry;
 use crate::transformer::{Transformer, TransformerChain};
 use std::collections::HashMap;
@@ -20,11 +24,45 @@ pub struct TransformerRegistry {
 }
 
 impl TransformerRegistry {
-    /// Create a new empty transformer registry.
+    /// Create a new transformer registry with default provider transformers.
     pub fn new() -> Self {
-        Self {
+        let mut registry = Self {
             factories: HashMap::new(),
+        };
+
+        // Register provider-specific transformers
+        // These transformers adapt provider-specific response formats
+        // into a standardized format for the AlphaHENG system.
+        // Tier 2: Z.AI GLM-4.7
+        registry.register("zai", |_opts| Box::new(GlmTransformer::default()));
+        // Tier 4: Minimax M2.1
+        registry.register("minimax", |_opts| Box::new(MinimaxTransformer));
+        // Tier 3: Moonshot Kimi
+        // Keep both provider aliases mapped to the same transformer.
+        for provider in ["moonshot", "kimi"] {
+            registry.register(provider, |_opts| Box::new(KimiTransformer));
         }
+        // Tier 7: DeepSeek Reasoner
+        registry.register("deepseek", |_opts| Box::new(DeepSeekTransformer));
+
+        // Format conversion transformers
+        registry.register("anthropic", |_opts| Box::new(AnthropicToOpenaiTransformer));
+        registry.register("openai-to-anthropic", |_opts| {
+            Box::new(OpenAiToAnthropicTransformer)
+        });
+
+        // Utility transformers
+        registry.register("maxtoken", |opts| {
+            if let Some(o) = opts {
+                if let Ok(t) = MaxTokenTransformer::from_options(o) {
+                    return Box::new(t);
+                }
+            }
+            Box::new(MaxTokenTransformer::new(65536, true))
+        });
+        registry.register("thinktag", |_opts| Box::new(ThinkTagTransformer));
+
+        registry
     }
 
     /// Register a transformer factory function with the given name.
@@ -89,20 +127,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_new_is_empty() {
+    fn registry_new_registers_provider_transformers() {
         let registry = TransformerRegistry::new();
-        assert!(registry.is_empty());
-        assert_eq!(registry.len(), 0);
+        assert!(!registry.is_empty());
+        assert_eq!(registry.len(), 9);
+        assert!(registry.has("zai"));
+        assert!(registry.has("minimax"));
+        assert!(registry.has("moonshot"));
+        assert!(registry.has("kimi"));
+        assert!(registry.has("deepseek"));
+        assert!(registry.has("anthropic"));
+        assert!(registry.has("openai-to-anthropic"));
+        assert!(registry.has("maxtoken"));
+        assert!(registry.has("thinktag"));
     }
 
     #[test]
     fn registry_registers_factory() {
         let mut registry = TransformerRegistry::new();
+        let baseline_len = registry.len();
         registry.register("test_factory", |_opts| {
             Box::new(crate::transformer::IdentityTransformer)
         });
 
-        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.len(), baseline_len + 1);
         assert!(registry.has("test_factory"));
     }
 

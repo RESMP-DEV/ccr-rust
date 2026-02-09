@@ -93,6 +93,17 @@ fn parse_sse_data_frames(payload: &str) -> Vec<String> {
         .collect()
 }
 
+/// Skip integration tests that require opening localhost sockets when the
+/// execution environment forbids binding ports.
+fn skip_if_localhost_bind_unavailable() -> bool {
+    if std::net::TcpListener::bind("127.0.0.1:0").is_ok() {
+        return false;
+    }
+
+    eprintln!("Skipping test: cannot bind localhost sockets in this environment");
+    true
+}
+
 async fn start_openai_stream_server(chunks: Vec<(Bytes, u64)>) -> String {
     let chunks = std::sync::Arc::new(chunks);
     let app = Router::new().route(
@@ -152,6 +163,10 @@ async fn make_codex_stream_request(app: &Router) -> Response {
 
 #[tokio::test]
 async fn test_codex_stream_reassembles_fragmented_openai_sse_frames() {
+    // Skip if we cannot bind localhost sockets in this environment
+    if skip_if_localhost_bind_unavailable() {
+        return;
+    }
     let role_frame = format!(
         "data: {}\n\n",
         json!({

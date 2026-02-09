@@ -1551,7 +1551,7 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                     }
                                 }
 
-                                let transformed = match transformer.transform_response(event_json) {
+                                let transformed: serde_json::Value = match transformer.transform_response(event_json) {
                                     Ok(value) => value,
                                     Err(_) => {
                                         let msg = format!("data: {}\n\n", data);
@@ -2678,6 +2678,30 @@ fn build_openai_headers(
                 TryRequestError::Other(anyhow::anyhow!("{}", e))
             })?,
     );
+
+    // OpenRouter attribution headers for usage tracking
+    // See: https://openrouter.ai/docs/api-reference/overview
+    if provider.name.to_lowercase() == "openrouter"
+        || provider.api_base_url.contains("openrouter.ai")
+    {
+        headers.insert(
+            "HTTP-Referer",
+            "https://github.com/RESMP-DEV/ccr-rust".parse().map_err(
+                |e: reqwest::header::InvalidHeaderValue| {
+                    TryRequestError::Other(anyhow::anyhow!("{}", e))
+                },
+            )?,
+        );
+        headers.insert(
+            "X-Title",
+            "ccr-rust"
+                .parse()
+                .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                    TryRequestError::Other(anyhow::anyhow!("{}", e))
+                })?,
+        );
+    }
+
     Ok(headers)
 }
 

@@ -1,6 +1,8 @@
 # Codex CLI Setup Guide for CCR-Rust
 
-This guide covers setting up OpenAI Codex CLI to work with CCR-Rust as a proxy router, enabling routing to multiple LLM backends through a unified OpenAI-compatible API.
+This guide covers setting up OpenAI Codex CLI to work with CCR-Rust as a proxy router, enabling intelligent routing to multiple LLM backends including Z.AI GLM, DeepSeek Reasoner, MiniMax M2.1, and more.
+
+> **Note:** Codex CLI is the **primary recommended frontend** for CCR-Rust. While Claude Code is also supported, Codex provides better compatibility with CCR-Rust's multi-provider routing and reasoning normalization features.
 
 ## Table of Contents
 
@@ -8,7 +10,9 @@ This guide covers setting up OpenAI Codex CLI to work with CCR-Rust as a proxy r
 2. [Configuring CCR-Rust for Codex](#2-configuring-ccr-rust-for-codex)
 3. [Setting Environment Variables](#3-setting-environment-variables)
 4. [Running Codex with CCR-Rust Proxy](#4-running-codex-with-ccr-rust-proxy)
-5. [Troubleshooting Common Issues](#5-troubleshooting-common-issues)
+5. [Reasoning Provider Support](#5-reasoning-provider-support)
+6. [OpenRouter Attribution](#6-openrouter-attribution)
+7. [Troubleshooting Common Issues](#7-troubleshooting-common-issues)
 
 ---
 
@@ -60,65 +64,98 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
 {
   "Providers": [
     {
-      "name": "openai",
-      "api_base_url": "https://api.openai.com/v1",
-      "api_key": "${OPENAI_PROVIDER_API_KEY}",
-      "models": ["gpt-4o", "o3-mini", "o1"]
+      "name": "zai",
+      "api_base_url": "https://api.z.ai/api/inference/v1",
+      "api_key": "${ZAI_API_KEY}",
+      "models": ["glm-4.7"]
     },
     {
       "name": "deepseek",
-      "api_base_url": "https://api.deepseek.com",
+      "api_base_url": "https://api.deepseek.com/v1",
       "api_key": "${DEEPSEEK_API_KEY}",
-      "models": ["deepseek-chat", "deepseek-reasoner"]
+      "models": ["deepseek-reasoner", "deepseek-chat"]
+    },
+    {
+      "name": "minimax",
+      "api_base_url": "https://api.minimax.io/v1",
+      "api_key": "${MINIMAX_API_KEY}",
+      "models": ["MiniMax-M2.1"]
     },
     {
       "name": "openrouter",
       "api_base_url": "https://openrouter.ai/api/v1",
       "api_key": "${OPENROUTER_API_KEY}",
-      "models": ["minimax/minimax-m2.1", "anthropic/claude-3.5-sonnet"]
+      "models": ["openrouter/pony-alpha"]
     }
   ],
   "Router": {
-    "default": "openai,gpt-4o",
+    "default": "zai,glm-4.7",
     "think": "deepseek,deepseek-reasoner",
-    "longContext": "openrouter,minimax/minimax-m2.1",
-    "longContextThreshold": 1048576
-  },
-  "Frontend": {
-    "codex": {
-      "modelMappings": {
-        "default": "gpt-4o",
-        "o3-mini": "openai,o3-mini",
-        "gpt-4o": "openai,gpt-4o",
-        "o1": "openai,o1",
-        "deepseek-chat": "deepseek,deepseek-chat"
+    "longContext": "minimax,MiniMax-M2.1",
+    "longContextThreshold": 1048576,
+    "tierRetries": {
+      "tier-0": {
+        "max_retries": 5,
+        "base_backoff_ms": 50,
+        "backoff_multiplier": 1.5,
+        "max_backoff_ms": 2000
+      },
+      "tier-1": {
+        "max_retries": 3,
+        "base_backoff_ms": 100,
+        "backoff_multiplier": 2.0,
+        "max_backoff_ms": 5000
       }
+    }
+  },
+  "Presets": {
+    "coding": {
+      "route": "zai,glm-4.7",
+      "temperature": 0.7
+    },
+    "reasoning": {
+      "route": "deepseek,deepseek-reasoner"
+    },
+    "documentation": {
+      "route": "minimax,MiniMax-M2.1"
     }
   },
   "PORT": 3456,
   "HOST": "127.0.0.1",
-  "API_TIMEOUT_MS": 600000
+  "API_TIMEOUT_MS": 120000,
+  "SSE_BUFFER_SIZE": 1024,
+  "POOL_MAX_IDLE_PER_HOST": 100,
+  "POOL_IDLE_TIMEOUT_MS": 30000
 }
 ```
 
 Use separate variables to avoid confusion:
 - `OPENAI_API_KEY`: Codex CLI client token for calls to CCR-Rust (any non-empty string).
-- `OPENAI_PROVIDER_API_KEY`: actual upstream OpenAI key used by CCR-Rust in `Providers[].api_key`.
+- `ZAI_API_KEY`, `DEEPSEEK_API_KEY`, etc.: Actual upstream keys used by CCR-Rust in `Providers[].api_key`.
 
-### 2.2 Model Mappings Explained
+### 2.2 Provider Routing Explained
 
-The `Frontend.codex.modelMappings` section maps Codex model names to CCR-Rust provider routes:
+The `Router` section configures automatic tier-based routing:
 
-| Mapping Key | CCR-Rust Route | Description |
-|-------------|----------------|-------------|
-| `default` | `gpt-4o` | Fallback when no model specified |
-| `o3-mini` | `openai,o3-mini` | Route to OpenAI o3-mini |
-| `gpt-4o` | `openai,gpt-4o` | Route to OpenAI GPT-4o |
-| `deepseek-chat` | `deepseek,deepseek-chat` | Route to DeepSeek via CCR-Rust |
+| Route | CCR-Rust Route | Description |
+|-------|----------------|-------------|
+| `default` | `zai,glm-4.7` | Primary tier—requests go here first |
+| `think` | `deepseek,deepseek-reasoner` | Used for reasoning-heavy tasks |
+| `longContext` | `minimax,MiniMax-M2.1` | Used when token count exceeds threshold |
 
 **Format:** `"provider,model"` where `provider` matches a provider name and `model` is in that provider's models list.
 
-### 2.3 Start CCR-Rust
+### 2.3 Presets Explained
+
+Presets provide named routing configurations for different task types:
+
+| Preset | Route | Use Case |
+|--------|-------|----------|
+| `coding` | Z.AI GLM-4.7 | Fast code generation (P0/P1 tasks) |
+| `reasoning` | DeepSeek Reasoner | Complex analysis requiring CoT |
+| `documentation` | MiniMax M2.1 | Long-form content generation |
+
+### 2.4 Start CCR-Rust
 
 ```bash
 # Using the helper script
@@ -242,9 +279,88 @@ curl http://127.0.0.1:3456/metrics | grep ccr_requests_total
 
 ---
 
-## 5. Troubleshooting Common Issues
+## 5. Reasoning Provider Support
 
-### 5.1 "Connection Refused" Error
+CCR-Rust normalizes reasoning output from different providers into a unified OpenAI-compatible field: `reasoning_content`. This keeps reasoning separate from normal assistant text and enables reliable multi-turn tool use.
+
+### 5.1 Unified Output Format
+
+All reasoning-capable providers return `reasoning_content` as a structured field:
+
+| Provider | Input Format | Output Format |
+|----------|--------------|---------------|
+| DeepSeek | `reasoning_content` (native) | `reasoning_content` (preserved) |
+| Minimax M2.1 | `reasoning_details` | `reasoning_content` (mapped) |
+| GLM-4.7 (Z.AI) | `<think>` tags | `reasoning_content` (extracted) |
+| Kimi K2 | `◁think▷` tokens | `reasoning_content` (extracted) |
+
+### 5.2 Multi-Turn Tool Use
+
+For multi-turn tool-calling conversations, pass `reasoning_content` back in assistant messages. DeepSeek Reasoner **requires** this field on assistant turns involved in tool use.
+
+Example assistant message with tool call:
+
+```json
+{
+  "role": "assistant",
+  "content": "",
+  "reasoning_content": "Let me analyze this step by step...",
+  "tool_calls": [
+    {
+      "id": "call_123",
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "arguments": "{\"path\":\"README.md\"}"
+      }
+    }
+  ]
+}
+```
+
+If no reasoning is available, send an empty string:
+
+```json
+{
+  "role": "assistant",
+  "content": "Here's the file content.",
+  "reasoning_content": ""
+}
+```
+
+### 5.3 Verifying Reasoning Output
+
+Test reasoning normalization:
+
+```bash
+curl -X POST http://127.0.0.1:3456/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test" \
+  -d '{
+    "model": "deepseek-reasoner",
+    "messages": [{"role": "user", "content": "What is 15 * 23?"}],
+    "max_tokens": 1000
+  }'
+```
+
+Expected response will include `reasoning_content` in the message.
+
+---
+
+## 6. OpenRouter Attribution
+
+When routing through OpenRouter, CCR-Rust automatically includes attribution headers:
+
+- `HTTP-Referer`: `https://github.com/RESMP-DEV/ccr-rust`
+- `X-Title`: `ccr-rust`
+
+This enables proper usage tracking and token attribution on the OpenRouter platform. No configuration required—headers are added automatically when the provider is detected as OpenRouter.
+
+---
+
+## 7. Troubleshooting Common Issues
+
+### 7.1 "Connection Refused" Error
 
 **Symptom:**
 ```
@@ -267,7 +383,7 @@ Error: connect ECONNREFUSED 127.0.0.1:3456
    ccr-rust start
    ```
 
-### 5.2 "Invalid API Key" Error
+### 7.2 "Invalid API Key" Error
 
 **Symptom:**
 ```
@@ -290,7 +406,7 @@ Error: 401 Unauthorized - Invalid API key
    "api_key": "${OPENAI_PROVIDER_API_KEY}"
    ```
 
-### 5.3 "Model Not Found" Error
+### 7.3 "Model Not Found" Error
 
 **Symptom:**
 ```
@@ -319,7 +435,7 @@ Error: 404 - Model 'xxx' not found
    codex --model gpt-4o
    ```
 
-### 5.4 High Latency or Timeouts
+### 7.4 High Latency or Timeouts
 
 **Symptom:** Slow responses or timeout errors.
 
@@ -339,7 +455,7 @@ Error: 404 - Model 'xxx' not found
    curl http://127.0.0.1:3456/metrics | grep ccr_failures
    ```
 
-### 5.5 Tool Calls Not Working
+### 7.5 Tool Calls Not Working
 
 **Symptom:** Codex doesn't execute commands or file operations.
 
@@ -355,7 +471,7 @@ Error: 404 - Model 'xxx' not found
    curl http://127.0.0.1:3456/metrics | grep transformer
    ```
 
-### 5.6 Debug Logging
+### 7.6 Debug Logging
 
 Enable debug output for troubleshooting:
 
@@ -369,7 +485,7 @@ RUST_LOG=ccr_rust=debug ccr-rust start
 DEBUG=* codex exec "Test command"
 ```
 
-### 5.7 Verify End-to-End Flow
+### 7.7 Verify End-to-End Flow
 
 Test the complete flow manually:
 

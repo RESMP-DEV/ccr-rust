@@ -153,7 +153,9 @@ impl SessionInfo {
             .unwrap_or_else(|_| "unknown".to_string());
 
         let git_branch = option_env!("GIT_BRANCH").unwrap_or("unknown").to_string();
-        let version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown").to_string();
+        let version = option_env!("CARGO_PKG_VERSION")
+            .unwrap_or("unknown")
+            .to_string();
 
         Self {
             cwd,
