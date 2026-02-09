@@ -435,6 +435,13 @@ pub struct RouterConfig {
     #[serde(default)]
     pub think: Option<String>,
 
+    /// Force all requests to use non-streaming mode.
+    /// Useful for agent workloads where SSE frame limits cause parsing errors.
+    /// Default: false (preserve client's stream preference).
+    #[serde(default)]
+    #[serde(rename = "forceNonStreaming")]
+    pub force_non_streaming: bool,
+
     #[serde(default)]
     #[serde(rename = "longContext")]
     pub long_context: Option<String>,

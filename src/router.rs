@@ -1057,6 +1057,13 @@ pub async fn handle_messages(
     let tiers = config.backend_tiers();
 
     let mut request = request;
+
+    // Force non-streaming if configured (helps avoid SSE frame parsing limits)
+    if config.router().force_non_streaming && request.stream.unwrap_or(false) {
+        info!("Forcing non-streaming mode (forceNonStreaming=true)");
+        request.stream = Some(false);
+    }
+
     let mut ordered = state.ewma_tracker.sort_tiers_with_config(&tiers, config);
 
     // Check if the requested model explicitly targets a specific provider (e.g., "deepseek,deepseek-chat")
@@ -2366,7 +2373,12 @@ pub async fn handle_chat_completions(
                 .into_response();
         }
     };
-    let stream_requested = internal_request.stream.unwrap_or(false);
+    // Override stream if forceNonStreaming is enabled
+    let stream_requested = if state.config.router().force_non_streaming {
+        false
+    } else {
+        internal_request.stream.unwrap_or(false)
+    };
     let anthropic_request = internal_request_to_anthropic_request(internal_request);
     let response = handle_messages(State(state), headers, Json(anthropic_request)).await;
 
@@ -2428,10 +2440,15 @@ pub async fn handle_responses(
         }
     };
 
-    let stream_requested = request_body
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    // Override stream if forceNonStreaming is enabled
+    let stream_requested = if state.config.router().force_non_streaming {
+        false
+    } else {
+        request_body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    };
 
     let openai_chat_request = match responses_request_to_openai_chat_request(&request_body) {
         Ok(request) => request,
