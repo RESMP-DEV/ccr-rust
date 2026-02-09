@@ -1,6 +1,6 @@
 [package]
 name = "ccr-rust"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["RESMP-DEV"]
 description = "Claude Code Router in Rust - high-throughput SSE proxy for agent swarms"
@@ -12,7 +12,12 @@ tokio = { version = "1.43", features = ["full"] }
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
-reqwest = { version = "0.12", features = ["stream", "json", "http2", "blocking"] }
+reqwest = { version = "0.12", features = [
+    "stream",
+    "json",
+    "http2",
+    "blocking",
+] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
