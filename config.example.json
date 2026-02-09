@@ -24,7 +24,8 @@
             "api_key": "mk-xxx",
             "models": [
                 "MiniMax-M2.1"
-            ]
+            ],
+            "transformer": {"use": ["minimax"]}
         }
     ],
     "Router": {

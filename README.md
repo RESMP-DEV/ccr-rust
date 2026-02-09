@@ -70,7 +70,7 @@ Create `~/.claude-code-router/config.json`:
             "api_base_url": "https://api.minimax.io/v1",
             "api_key": "YOUR_MINIMAX_API_KEY",
             "models": ["MiniMax-M2.1"],
-            "transformer": { "use": ["anthropic"] }
+            "transformer": { "use": ["minimax"] }
         }
     ],
     "Router": {
@@ -333,7 +333,7 @@ Fine-tune how aggressively each tier retries:
 | DeepSeek | `https://api.deepseek.com` | deepseek-chat, deepseek-reasoner |
 | OpenRouter | `https://openrouter.ai/api/v1` | Access to 200+ models |
 
-> **Note:** The `transformer` field is optional. Use `"transformer": {"use": ["deepseek"]}` for DeepSeek Reasoner's `reasoning_content` normalization, or `"transformer": {"use": ["openrouter"]}` for OpenRouter attribution headers. Most providers work without any transformer configuration.
+> **Note:** The `transformer` field is optional. Use `"transformer": {"use": ["deepseek"]}` for DeepSeek Reasoner's `reasoning_content` normalization, `"transformer": {"use": ["minimax"]}` for MiniMax structured reasoning, or `"transformer": {"use": ["openrouter"]}` for OpenRouter attribution headers. Most providers work without any transformer configuration.
 
 ### Coding Plan Discounts
 
