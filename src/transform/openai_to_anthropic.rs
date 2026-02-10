@@ -171,12 +171,11 @@ impl Transformer for OpenAiToAnthropicTransformer {
         }
 
         // OpenAI may send either max_tokens or max_completion_tokens.
-        // Anthropic requires max_tokens.
+        // Convert max_completion_tokens to max_tokens if present.
+        // If neither is present, let the API handle it - no artificial caps.
         if !request_obj.contains_key("max_tokens") {
             if let Some(max_completion_tokens) = request_obj.remove("max_completion_tokens") {
                 request_obj.insert("max_tokens".to_string(), max_completion_tokens);
-            } else {
-                request_obj.insert("max_tokens".to_string(), Value::Number(4096.into()));
             }
         } else {
             // Prevent duplicate limits after conversion.
@@ -856,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_request_adds_default_max_tokens() {
+    fn test_transform_request_no_default_max_tokens() {
         let transformer = OpenAiToAnthropicTransformer;
 
         let openai_request = serde_json::json!({
@@ -866,8 +865,8 @@ mod tests {
 
         let result = transformer.transform_request(openai_request).unwrap();
 
-        // Default max_tokens should be added
-        assert_eq!(result["max_tokens"], 4096);
+        // No artificial max_tokens cap - let the API decide
+        assert!(result.get("max_tokens").is_none());
     }
 
     #[test]

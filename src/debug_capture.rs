@@ -201,13 +201,21 @@ impl DebugCapture {
     /// Check if capture is enabled for a given provider.
     pub fn should_capture(&self, provider: &str) -> bool {
         if !self.config.enabled {
+            debug!("should_capture: disabled globally");
             return false;
         }
 
         // If no providers specified, capture all
         if self.provider_filter.is_empty() {
+            debug!("should_capture: capturing all (empty filter)");
             return true;
         }
+
+        let result = self.provider_filter.contains(&provider.to_lowercase());
+        debug!(
+            "should_capture: provider={}, filter={:?}, result={}",
+            provider, self.provider_filter, result
+        );
 
         self.provider_filter.contains(&provider.to_lowercase())
     }

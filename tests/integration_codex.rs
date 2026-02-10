@@ -65,6 +65,7 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
         active_streams,
         ratelimit_tracker,
         shutdown_timeout: 30,
+        debug_capture: None,
     };
 
     // Register both Anthropic and OpenAI endpoints
