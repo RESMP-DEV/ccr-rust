@@ -454,6 +454,13 @@ pub struct RouterConfig {
     #[serde(rename = "forceNonStreaming")]
     pub force_non_streaming: bool,
 
+    /// Ignore direct model routing requests (e.g., "openrouter,model").
+    /// When true, always use tier order instead of honoring client's explicit model.
+    /// Default: false (client can directly target specific backends).
+    #[serde(default)]
+    #[serde(rename = "ignoreDirect")]
+    pub ignore_direct: bool,
+
     #[serde(default)]
     #[serde(rename = "longContext")]
     pub long_context: Option<String>,

@@ -213,6 +213,22 @@ For automated agent workloads, disable streaming to avoid SSE frame parsing erro
 **Recommended for:** CI/CD, batch processing, agent orchestration.  
 **Not recommended for:** Interactive coding where you want token-by-token output.
 
+### Enforce Tier Order
+
+Clients like Codex CLI cache the last successful model. If a request falls back to `openrouter,pony-alpha`, subsequent requests will target that tier directly, bypassing cheaper tiers.
+
+To force all requests to start from tier 0:
+
+```json
+{
+    "Router": {
+        "ignoreDirect": true
+    }
+}
+```
+
+See [Troubleshooting: Requests Bypassing Tier Order](docs/troubleshooting.md#requests-bypassing-tier-order) for details.
+
 ### Persistence (Optional)
 
 For long-running dashboards/metrics that survive restarts:

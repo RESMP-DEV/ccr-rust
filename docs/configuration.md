@@ -126,6 +126,8 @@ The `Router` section configures how incoming requests are routed to providers.
 | `longContextThreshold` | number | No | 1048576 | Token threshold for `longContext` route. |
 | `webSearch` | string | No | - | Route for web search requests. |
 | `tierRetries` | object | No | - | Per-tier retry configuration. |
+| `forceNonStreaming` | boolean | No | false | Disable streaming for agent workloads. |
+| `ignoreDirect` | boolean | No | false | Ignore client model targeting, enforce tier order. |
 
 ### Route Format
 
@@ -143,6 +145,28 @@ Example:
   }
 }
 ```
+
+### Ignore Direct Routing
+
+By default, if a client sends a request with an explicit `model` in `provider,model` format (e.g., `openrouter,openrouter/pony-alpha`), CCR-Rust will prioritize that tier and move it to the front of the cascade.
+
+This behavior exists because some clients cache the last successful model. However, this can cause problems:
+
+- **Tier bypass**: Cheaper/faster tiers get skipped entirely
+- **Load imbalance**: All requests funnel to one provider
+- **Unexpected costs**: Expensive fallback tiers become the default
+
+To disable this behavior and strictly enforce your configured tier order:
+
+```json
+{
+  "Router": {
+    "ignoreDirect": true
+  }
+}
+```
+
+With `ignoreDirect: true`, all requests start from tier 0 regardless of what model the client requests.
 
 ### Per-Tier Retry Config
 

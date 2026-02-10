@@ -1071,8 +1071,9 @@ pub async fn handle_messages(
 
     // Check if the requested model explicitly targets a specific provider (e.g., "deepseek,deepseek-chat")
     // If so, route directly to that provider instead of cascading through tiers
+    // (unless ignoreDirect is enabled)
     let requested_model = request.model.clone();
-    if requested_model.contains(',') {
+    if !config.router().ignore_direct && requested_model.contains(',') {
         // Explicit provider,model - find matching tier and prioritize it
         if let Some(pos) = ordered
             .iter()
@@ -1090,6 +1091,11 @@ pub async fn handle_messages(
             ordered = vec![(requested_model.clone(), tier_name)];
             info!("Direct routing: {} (not in tier list)", requested_model);
         }
+    } else if config.router().ignore_direct && requested_model.contains(',') {
+        info!(
+            "Ignoring direct routing request for {} (ignoreDirect=true)",
+            requested_model
+        );
     }
 
     // Check for web search

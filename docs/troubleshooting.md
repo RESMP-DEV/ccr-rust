@@ -91,6 +91,41 @@ Client handling rule:
 - EWMA will auto-reorder, but may take 3+ requests
 - Consider adjusting tier order in config
 
+## Requests Bypassing Tier Order
+
+**Symptom**: Lower-priority tiers (e.g., OpenRouter) receive all traffic while higher-priority tiers (e.g., GLM, Minimax) are never hit.
+
+**Cause**: Clients like Codex CLI and Claude Code cache the `model` field from successful responses. If a request once fell back to `openrouter,openrouter/pony-alpha`, subsequent requests will include that exact model string, causing CCR-Rust to prioritize that tier.
+
+**Detection**:
+```bash
+tail -500 /tmp/ccr-rust.log | grep -E "Direct routing|moved to front"
+```
+
+If you see lines like:
+```
+Direct routing: openrouter,openrouter/pony-alpha moved to front
+```
+
+This confirms the client is requesting a specific tier.
+
+**Solution**: Enable `ignoreDirect` in your config:
+
+```json
+{
+  "Router": {
+    "ignoreDirect": true
+  }
+}
+```
+
+This forces all requests to start from tier 0, regardless of what model the client specifies.
+
+**Restart required** after changing config:
+```bash
+ccr-rust stop && ccr-rust start
+```
+
 ## Debugging
 
 ```bash
