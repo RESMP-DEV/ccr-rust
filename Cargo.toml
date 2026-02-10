@@ -40,6 +40,8 @@ ratatui = "0.30"
 crossterm = "0.29"
 zstd = "0.13"
 redis = "0.32"
+chrono = "0.4"
+dirs = "6"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }

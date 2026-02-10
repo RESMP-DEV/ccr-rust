@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tracing::{error, info, trace, warn};
 
 use crate::config::{Config, ProviderProtocol};
+use crate::debug_capture::{CaptureBuilder, DebugCapture};
 use crate::frontend::codex::CodexFrontend;
 use crate::frontend::{detect_frontend, Frontend};
 use crate::metrics::{
@@ -98,6 +99,8 @@ pub struct AppState {
     pub ratelimit_tracker: Arc<RateLimitTracker>,
     #[allow(dead_code)]
     pub shutdown_timeout: u64,
+    /// Debug capture manager for recording raw API interactions.
+    pub debug_capture: Option<Arc<DebugCapture>>,
 }
 
 // ============================================================================
@@ -1155,6 +1158,7 @@ pub async fn handle_messages(
                 tier_name,
                 local_estimate,
                 state.ratelimit_tracker.clone(),
+                state.debug_capture.clone(),
             )
             .await
             {
@@ -2577,6 +2581,7 @@ async fn try_request(
     tier_name: &str,
     local_estimate: u64,
     ratelimit_tracker: Arc<RateLimitTracker>,
+    debug_capture: Option<Arc<DebugCapture>>,
 ) -> Result<Response, TryRequestError> {
     let provider = config.resolve_provider(tier).ok_or_else(|| {
         TryRequestError::Other(anyhow::anyhow!("Provider not found for tier: {}", tier))
@@ -2611,6 +2616,7 @@ async fn try_request(
                     local_estimate,
                     ratelimit_tracker,
                     chain,
+                    debug_capture,
                 },
             )
             .await
@@ -2626,6 +2632,7 @@ async fn try_request(
                     local_estimate,
                     ratelimit_tracker,
                     chain,
+                    debug_capture,
                 },
             )
             .await
@@ -2640,6 +2647,7 @@ struct TryRequestProtocolArgs<'a> {
     local_estimate: u64,
     ratelimit_tracker: Arc<RateLimitTracker>,
     chain: TransformerChain,
+    debug_capture: Option<Arc<DebugCapture>>,
 }
 
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -2769,6 +2777,7 @@ async fn try_request_via_openai_protocol(
         local_estimate,
         ratelimit_tracker,
         chain,
+        debug_capture,
     } = args;
 
     let url = provider_openai_chat_completions_url(provider);
@@ -2776,11 +2785,30 @@ async fn try_request_via_openai_protocol(
     trace!(tier = tier_name, model = model_name, url = %url, "dispatching OpenAI-compatible upstream request");
 
     // Deserialize back to AnthropicRequest for translation.
-    let request: AnthropicRequest = serde_json::from_value(transformed_request)
+    let request: AnthropicRequest = serde_json::from_value(transformed_request.clone())
         .map_err(|e| TryRequestError::Other(e.into()))?;
 
     // Translate Anthropic request to OpenAI format.
     let openai_request = translate_request_anthropic_to_openai(&request, model_name);
+
+    // Set up capture if enabled for this provider
+    let capture_builder = if let Some(ref capture) = debug_capture {
+        if capture.should_capture(&provider.name) {
+            let request_body = serde_json::to_value(&openai_request).unwrap_or_default();
+            Some(
+                CaptureBuilder::new(capture.next_request_id(), &provider.name, tier_name)
+                    .model(model_name)
+                    .url(&url)
+                    .request_body(request_body)
+                    .streaming(request.stream.unwrap_or(false))
+                    .start(),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let resp = config
         .http_client()
@@ -2788,8 +2816,22 @@ async fn try_request_via_openai_protocol(
         .headers(headers)
         .json(&openai_request)
         .send()
-        .await
-        .map_err(|e| TryRequestError::Other(e.into()))?;
+        .await;
+
+    // Handle connection errors with capture
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            // Record capture on connection failure
+            if let (Some(builder), Some(capture)) = (capture_builder, debug_capture) {
+                let interaction = builder.complete_with_error(e.to_string());
+                if let Err(capture_err) = capture.record(interaction).await {
+                    warn!("Failed to record debug capture: {}", capture_err);
+                }
+            }
+            return Err(TryRequestError::Other(e.into()));
+        }
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -2900,10 +2942,20 @@ async fn try_request_via_openai_protocol(
         ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
 
         // For non-streaming, translate the full response.
+        let resp_status = resp.status().as_u16();
         let body = resp
             .bytes()
             .await
             .map_err(|e| TryRequestError::Other(e.into()))?;
+        let body_str = String::from_utf8_lossy(&body);
+
+        // Record capture for non-streaming response
+        if let (Some(builder), Some(capture)) = (capture_builder, debug_capture.clone()) {
+            let interaction = builder.complete(resp_status, &body_str, None, None);
+            if let Err(capture_err) = capture.record(interaction).await {
+                warn!("Failed to record debug capture: {}", capture_err);
+            }
+        }
 
         // Try to parse as OpenAI response and translate.
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
@@ -2961,13 +3013,14 @@ async fn try_request_via_anthropic_protocol(
         local_estimate,
         ratelimit_tracker,
         chain,
+        debug_capture,
     } = args;
 
     let url = provider_anthropic_messages_url(provider);
     let headers = build_anthropic_headers(provider)?;
     trace!(tier = tier_name, model = model_name, url = %url, "dispatching Anthropic-compatible upstream request");
 
-    let request: AnthropicRequest = serde_json::from_value(transformed_request)
+    let request: AnthropicRequest = serde_json::from_value(transformed_request.clone())
         .map_err(|e| TryRequestError::Other(e.into()))?;
 
     // Canonicalize request shape for Anthropic-compatible providers.
@@ -2989,8 +3042,26 @@ async fn try_request_via_anthropic_protocol(
         );
     }
 
-    let request: AnthropicRequest = serde_json::from_value(normalized_request_value)
+    let request: AnthropicRequest = serde_json::from_value(normalized_request_value.clone())
         .map_err(|e| TryRequestError::Other(e.into()))?;
+
+    // Set up capture if enabled for this provider
+    let capture_builder = if let Some(ref capture) = debug_capture {
+        if capture.should_capture(&provider.name) {
+            Some(
+                CaptureBuilder::new(capture.next_request_id(), &provider.name, tier_name)
+                    .model(model_name)
+                    .url(&url)
+                    .request_body(normalized_request_value)
+                    .streaming(request.stream.unwrap_or(false))
+                    .start(),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let resp = config
         .http_client()
@@ -2998,8 +3069,22 @@ async fn try_request_via_anthropic_protocol(
         .headers(headers)
         .json(&request)
         .send()
-        .await
-        .map_err(|e| TryRequestError::Other(e.into()))?;
+        .await;
+
+    // Handle connection errors with capture
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            // Record capture on connection failure
+            if let (Some(builder), Some(capture)) = (capture_builder, debug_capture) {
+                let interaction = builder.complete_with_error(e.to_string());
+                if let Err(capture_err) = capture.record(interaction).await {
+                    warn!("Failed to record debug capture: {}", capture_err);
+                }
+            }
+            return Err(TryRequestError::Other(e.into()));
+        }
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -3101,11 +3186,21 @@ async fn try_request_via_anthropic_protocol(
         let rate_limit_info = extract_rate_limit_headers(&resp);
         ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
 
+        let resp_status = resp.status().as_u16();
         let status = reqwest_status_to_axum(resp.status());
         let body = resp
             .bytes()
             .await
             .map_err(|e| TryRequestError::Other(e.into()))?;
+        let body_str = String::from_utf8_lossy(&body);
+
+        // Record capture for non-streaming Anthropic response
+        if let (Some(builder), Some(capture)) = (capture_builder, debug_capture.clone()) {
+            let interaction = builder.complete(resp_status, &body_str, None, None);
+            if let Err(capture_err) = capture.record(interaction).await {
+                warn!("Failed to record debug capture: {}", capture_err);
+            }
+        }
 
         if let Ok(anthropic_resp) = serde_json::from_slice::<AnthropicResponse>(&body) {
             // Estimate tokens when provider returns zeros (common for some Anthropic-compatible APIs)

@@ -40,6 +40,7 @@ mod transformer {
 }
 
 use crate::config::Config;
+use ccr_rust::debug_capture::DebugCapture;
 use ratelimit::RateLimitTracker;
 use router::AppState;
 use routing::EwmaTracker;
@@ -108,6 +109,28 @@ enum Commands {
         #[arg(long)]
         redis_prefix: Option<String>,
     },
+    /// List and analyze debug captures.
+    Captures {
+        /// Filter by provider name (e.g., "minimax")
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// Maximum number of captures to list
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+
+        /// Show statistics instead of individual captures
+        #[arg(long)]
+        stats: bool,
+
+        /// Output capture directory (override config)
+        #[arg(long)]
+        output_dir: Option<String>,
+
+        /// Show full response body (by default truncated)
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 fn show_version() {
@@ -156,6 +179,132 @@ fn clear_stats(
     Ok(())
 }
 
+fn list_captures(
+    config_path: &str,
+    provider: Option<String>,
+    limit: usize,
+    stats: bool,
+    output_dir_override: Option<String>,
+    full: bool,
+) -> anyhow::Result<()> {
+    let config = Config::from_file(config_path)?;
+    let mut debug_config = config.debug_capture().clone();
+
+    // Override output directory if specified
+    if let Some(dir) = output_dir_override {
+        debug_config.output_dir = dir;
+    }
+
+    // Create a capture manager to read existing captures
+    debug_config.enabled = true; // Enable to read directory
+    let capture = DebugCapture::new(debug_config)?;
+
+    if stats {
+        // Show statistics
+        let stats = capture.get_stats()?;
+        println!("Debug Capture Statistics");
+        println!("========================");
+        println!("Total captures: {}", stats.total_captures);
+        println!("Successful: {}", stats.success_count);
+        println!("Errors: {}", stats.error_count);
+        println!("Avg latency: {}ms", stats.avg_latency_ms);
+        println!("\nBy provider:");
+        for (prov, count) in &stats.by_provider {
+            println!("  {}: {}", prov, count);
+        }
+    } else {
+        // List individual captures
+        let captures = capture.list_captures(provider.as_deref(), limit)?;
+
+        if captures.is_empty() {
+            println!(
+                "No captures found{}",
+                provider
+                    .as_ref()
+                    .map(|p| format!(" for provider '{}'", p))
+                    .unwrap_or_default()
+            );
+            return Ok(());
+        }
+
+        println!(
+            "Recent Captures{} ({} found)",
+            provider
+                .as_ref()
+                .map(|p| format!(" for '{}'", p))
+                .unwrap_or_default(),
+            captures.len()
+        );
+        println!("{}", "=".repeat(60));
+
+        for cap in captures {
+            println!(
+                "\n[{}] {} @ {}",
+                cap.request_id, cap.provider, cap.timestamp
+            );
+            println!("  Tier: {}, Model: {}", cap.tier_name, cap.model);
+            println!(
+                "  Status: {} ({}) - {}ms",
+                cap.response_status,
+                if cap.success { "OK" } else { "FAILED" },
+                cap.latency_ms
+            );
+            println!("  URL: {}", cap.url);
+
+            if let Some(ref error) = cap.error {
+                println!("  Error: {}", error);
+            }
+
+            if full {
+                println!("  Request:");
+                if let Ok(pretty) = serde_json::to_string_pretty(&cap.request_body) {
+                    for line in pretty.lines() {
+                        println!("    {}", line);
+                    }
+                }
+                println!(
+                    "  Response ({} bytes{}):",
+                    cap.response_body.len(),
+                    if cap.response_truncated {
+                        ", truncated"
+                    } else {
+                        ""
+                    }
+                );
+                // Try to pretty-print if it's JSON
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&cap.response_body) {
+                    if let Ok(pretty) = serde_json::to_string_pretty(&json) {
+                        for line in pretty.lines() {
+                            println!("    {}", line);
+                        }
+                    }
+                } else {
+                    // Print as-is
+                    for line in cap.response_body.lines().take(20) {
+                        println!("    {}", line);
+                    }
+                }
+            } else {
+                // Show truncated response preview
+                let preview: String = cap.response_body.chars().take(200).collect();
+                if !preview.is_empty() {
+                    println!(
+                        "  Response preview: {}{}",
+                        preview.replace('\n', " "),
+                        if cap.response_body.len() > 200 {
+                            "..."
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn run_server(
     config_path: &str,
     host: String,
@@ -173,6 +322,20 @@ async fn run_server(
     metrics::init_persistence(config.persistence(), &ewma_tracker)?;
     let transformer_registry = std::sync::Arc::new(TransformerRegistry::new());
     let ratelimit_tracker = std::sync::Arc::new(RateLimitTracker::new());
+
+    // Initialize debug capture if enabled
+    let debug_capture = if config.debug_capture().enabled {
+        match DebugCapture::new(config.debug_capture().clone()) {
+            Ok(capture) => Some(Arc::new(capture)),
+            Err(e) => {
+                tracing::warn!("Failed to initialize debug capture: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let state = AppState {
         config,
         ewma_tracker,
@@ -180,6 +343,7 @@ async fn run_server(
         active_streams: Arc::new(AtomicUsize::new(0)),
         ratelimit_tracker,
         shutdown_timeout,
+        debug_capture,
     };
 
     let app = Router::new()
@@ -204,6 +368,10 @@ async fn run_server(
         )
         .route("/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
+        // Debug capture API
+        .route("/debug/capture/status", get(debug_capture_status))
+        .route("/debug/capture/list", get(debug_capture_list))
+        .route("/debug/capture/stats", get(debug_capture_stats))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -320,6 +488,15 @@ async fn main() -> Result<()> {
         }) => {
             clear_stats(&config_path, redis_url, redis_prefix)?;
         }
+        Some(Commands::Captures {
+            provider,
+            limit,
+            stats,
+            output_dir,
+            full,
+        }) => {
+            list_captures(&config_path, provider, limit, stats, output_dir, full)?;
+        }
     }
     Ok(())
 }
@@ -352,4 +529,63 @@ async fn latencies_handler(State(state): State<AppState>) -> impl axum::response
 
 async fn health() -> &'static str {
     "ok"
+}
+
+// Debug capture API handlers
+async fn debug_capture_status(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    match &state.debug_capture {
+        Some(capture) => {
+            let stats = capture.get_stats().unwrap_or_default();
+            axum::Json(serde_json::json!({
+                "enabled": true,
+                "output_dir": state.config.debug_capture().output_dir,
+                "providers": state.config.debug_capture().providers,
+                "stats": stats
+            }))
+        }
+        None => axum::Json(serde_json::json!({
+            "enabled": false,
+            "message": "Debug capture not configured. Add DebugCapture to config.json"
+        })),
+    }
+}
+
+async fn debug_capture_list(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl axum::response::IntoResponse {
+    let provider = params.get("provider").map(|s| s.as_str());
+    let limit: usize = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+
+    match &state.debug_capture {
+        Some(capture) => match capture.list_captures(provider, limit) {
+            Ok(captures) => axum::Json(serde_json::json!({
+                "captures": captures,
+                "count": captures.len()
+            })),
+            Err(e) => axum::Json(serde_json::json!({
+                "error": format!("Failed to list captures: {}", e)
+            })),
+        },
+        None => axum::Json(serde_json::json!({
+            "error": "Debug capture not enabled"
+        })),
+    }
+}
+
+async fn debug_capture_stats(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    match &state.debug_capture {
+        Some(capture) => match capture.get_stats() {
+            Ok(stats) => axum::Json(serde_json::json!(stats)),
+            Err(e) => axum::Json(serde_json::json!({
+                "error": format!("Failed to get stats: {}", e)
+            })),
+        },
+        None => axum::Json(serde_json::json!({
+            "error": "Debug capture not enabled"
+        })),
+    }
 }

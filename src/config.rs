@@ -6,6 +6,8 @@ use std::fmt;
 use std::fs;
 use std::sync::Arc;
 
+use crate::debug_capture::DebugCaptureConfig;
+
 /// Named routing preset with optional parameter overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PresetConfig {
@@ -70,6 +72,11 @@ pub struct ConfigFile {
     #[serde(default)]
     #[serde(rename = "Persistence")]
     pub persistence: PersistenceConfig,
+
+    /// Debug capture settings (for recording raw API interactions).
+    #[serde(default)]
+    #[serde(rename = "DebugCapture")]
+    pub debug_capture: DebugCaptureConfig,
 }
 
 /// Runtime configuration shared across all handlers via Axum state.
@@ -117,6 +124,11 @@ impl Config {
     /// Runtime persistence settings.
     pub fn persistence(&self) -> &PersistenceConfig {
         &self.inner.file.persistence
+    }
+
+    /// Debug capture settings.
+    pub fn debug_capture(&self) -> &DebugCaptureConfig {
+        &self.inner.file.debug_capture
     }
 
     /// List all preset names.
