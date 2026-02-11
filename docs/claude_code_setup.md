@@ -85,7 +85,7 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
       "name": "zai",
       "api_base_url": "https://api.z.ai/api/inference/v1/chat/completions",
       "api_key": "${ZAI_API_KEY}",
-      "models": ["glm-4.7"],
+      "models": ["glm-5"],
       "transformer": { "use": ["openai_to_anthropic"] }
     },
     {
@@ -128,14 +128,14 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
         "claude-3-5-sonnet-20241022": "anthropic,claude-3-5-sonnet-20241022",
         "claude-3-opus-20240229": "anthropic,claude-3-opus-20240229",
         "claude-3-5-haiku-20241022": "anthropic,claude-3-5-haiku-20241022",
-        "glm-4.7": "zai,glm-4.7",
+        "glm-5": "zai,glm-5",
         "deepseek-reasoner": "deepseek,deepseek-reasoner"
       }
     }
   },
   "Presets": {
     "coding": {
-      "route": "zai,glm-4.7",
+      "route": "zai,glm-5",
       "max_tokens": 8192,
       "temperature": 0.2
     },
@@ -166,7 +166,7 @@ The `Frontend.claude_code.modelMappings` section maps Claude Code model names to
 | `claude-3-5-sonnet-20241022` | `anthropic,claude-3-5-sonnet-20241022` | Default Claude 3.5 Sonnet |
 | `claude-3-opus-20240229` | `anthropic,claude-3-opus-20240229` | Claude 3 Opus (powerful) |
 | `claude-3-5-haiku-20241022` | `anthropic,claude-3-5-haiku-20241022` | Fast, cost-effective |
-| `glm-4.7` | `zai,glm-4.7` | Z.AI GLM-4.7 via CCR-Rust |
+| `glm-5` | `zai,glm-5` | Z.AI GLM-5 via CCR-Rust |
 | `deepseek-reasoner` | `deepseek,deepseek-reasoner` | DeepSeek reasoning model |
 
 **Format:** `"provider,model"` where `provider` matches a provider name and `model` is in that provider's models list.
@@ -306,7 +306,7 @@ Claude Code displays thinking blocks differently based on the model:
 |-------|-----------------|---------------|
 | Claude 3 Opus | Native thinking | Automatic |
 | DeepSeek Reasoner | Tagged blocks | `<think>...</think>` |
-| GLM-4.7 | Via transformer | Hidden by default |
+| GLM-5 | Via transformer | Hidden by default |
 
 ### 4.3 Controlling Thinking Output
 
@@ -375,7 +375,7 @@ All reasoning-capable providers now return `reasoning_content` as a structured f
 |----------|--------------|---------------|
 | DeepSeek | `reasoning_content` (native) | `reasoning_content` (preserved) |
 | Minimax M2.1 | `reasoning_details` | `reasoning_content` (mapped) |
-| GLM-4.7 (Z.AI) | `<think>` tags | `reasoning_content` (extracted) |
+| GLM-5 (Z.AI) | `<think>` tags | `reasoning_content` (extracted) |
 | Kimi K2 | `◁think▷` tokens | `reasoning_content` (extracted) |
 
 ### Multi-Turn Tool Use
@@ -413,7 +413,7 @@ Provider setup used by AlphaHENG (`contrib/ccr-rust/config.alphaheng.json`):
       "name": "zai",
       "api_base_url": "https://api.z.ai/api/inference/v1",
       "api_key": "${ZAI_API_KEY}",
-      "models": ["glm-4.7"]
+      "models": ["glm-5"]
     },
     {
       "name": "deepseek",
@@ -435,7 +435,7 @@ Provider setup used by AlphaHENG (`contrib/ccr-rust/config.alphaheng.json`):
     }
   ],
   "Router": {
-    "default": "zai,glm-4.7",
+    "default": "zai,glm-5",
     "think": "deepseek,deepseek-reasoner",
     "longContext": "minimax,MiniMax-M2.1"
   }
@@ -659,7 +659,7 @@ CCR-Rust supports preset routes that Claude Code can use:
 # Configure preset in CCR-Rust config
 "Presets": {
   "coding": {
-    "route": "zai,glm-4.7",
+    "route": "zai,glm-5",
     "max_tokens": 8192,
     "temperature": 0.2
   }

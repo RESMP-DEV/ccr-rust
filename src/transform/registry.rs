@@ -33,7 +33,7 @@ impl TransformerRegistry {
         // Register provider-specific transformers
         // These transformers adapt provider-specific response formats
         // into a standardized format for the AlphaHENG system.
-        // Tier 2: Z.AI GLM-4.7
+        // Tier 2: Z.AI GLM-5
         registry.register("zai", |_opts| Box::new(GlmTransformer::default()));
         // Tier 4: Minimax M2.1
         registry.register("minimax", |_opts| Box::new(MinimaxTransformer));

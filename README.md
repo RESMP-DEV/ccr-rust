@@ -11,7 +11,7 @@
 
 | Provider | Models | Best For |
 |----------|--------|----------|
-| **Z.AI (GLM)** | GLM-4.7 | Fast code generation, daily driver |
+| **Z.AI (GLM)** | GLM-5 | Fast code generation, daily driver |
 | **DeepSeek** | deepseek-chat, deepseek-reasoner | Deep reasoning, complex refactors |
 | **MiniMax** | MiniMax-M2.1 | High-performance reasoning, long context |
 | **Kimi (Moonshot)** | Kimi K2.5 | Extended context (1M+ tokens) |
@@ -38,7 +38,7 @@ Several providers offer subscription plans with better rates than pay-as-you-go:
 ## How It Works
 
 1. Your assistant (Codex/Claude) sends a request to `localhost:3456`
-2. CCR-Rust tries Tier 0 (e.g., GLM-4.7)
+2. CCR-Rust tries Tier 0 (e.g., GLM-5)
 3. If that fails (rate limit, timeout, error), it retries on Tier 1 (e.g., DeepSeek)
 4. Still failing? Tier 2 (e.g., MiniMax), and so on
 5. Response goes back to your assistant—same format it expected
@@ -69,7 +69,7 @@ Create `~/.claude-code-router/config.json`:
             "name": "zai",
             "api_base_url": "https://api.z.ai/api/coding/paas/v4",
             "api_key": "YOUR_ZAI_API_KEY",
-            "models": ["glm-4.7"],
+            "models": ["glm-5"],
             "transformer": { "use": ["anthropic"] }
         },
         {
@@ -81,7 +81,7 @@ Create `~/.claude-code-router/config.json`:
         }
     ],
     "Router": {
-        "default": "zai,glm-4.7",
+        "default": "zai,glm-5",
         "think": "deepseek,deepseek-reasoner"
     }
 }
@@ -153,7 +153,7 @@ The `transformer` field is optional. Common uses:
             "name": "zai",
             "api_base_url": "https://api.z.ai/api/coding/paas/v4",
             "api_key": "sk-xxx",
-            "models": ["glm-4.7"],
+            "models": ["glm-5"],
             "transformer": { "use": ["anthropic"] }
         },
         {
@@ -171,7 +171,7 @@ The `transformer` field is optional. Common uses:
         }
     ],
     "Router": {
-        "default": "zai,glm-4.7",
+        "default": "zai,glm-5",
         "think": "deepseek,deepseek-reasoner",
         "longContext": "minimax,MiniMax-M2.1",
         "longContextThreshold": 60000

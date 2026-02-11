@@ -16,12 +16,13 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="CCR multi-provider smoke matrix")
+    parser = argparse.ArgumentParser(
+        description="CCR multi-provider smoke matrix")
     parser.add_argument(
         "--base-url",
         default="http://127.0.0.1:3456",
@@ -58,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--models",
         default="",
-        help="Comma-separated provider routes to test (e.g. zai,glm-4.7;deepseek,deepseek-chat). "
+        help="Comma-separated provider routes to test (e.g. zai,glm-5;deepseek,deepseek-chat). "
         "If omitted, routes are discovered from /v1/models.",
     )
     parser.add_argument(
@@ -75,8 +76,8 @@ def run_curl(
     api_key: str,
     timeout_s: int,
     streaming: bool,
-) -> Tuple[int, str, str]:
-    cmd: List[str] = [
+) -> tuple[int, str, str]:
+    cmd: list[str] = [
         "curl",
         "-sS",
         "-m",
@@ -133,7 +134,7 @@ def http_get_json(url: str, api_key: str, timeout_s: int) -> dict:
         raise RuntimeError(f"GET {url} returned invalid JSON: {exc}") from exc
 
 
-def discover_models(base_url: str, api_key: str, timeout_s: int) -> List[str]:
+def discover_models(base_url: str, api_key: str, timeout_s: int) -> list[str]:
     models_url = f"{base_url.rstrip('/')}/v1/models"
     payload = http_get_json(models_url, api_key, timeout_s)
     data = payload.get("data")
@@ -157,7 +158,7 @@ def discover_models(base_url: str, api_key: str, timeout_s: int) -> List[str]:
     return deduped
 
 
-def parse_sse_frames(raw: str) -> List[str]:
+def parse_sse_frames(raw: str) -> list[str]:
     normalized = raw.replace("\r\n", "\n")
     return [frame for frame in normalized.split("\n\n") if frame.strip()]
 
@@ -197,7 +198,8 @@ def run_chat_nonstream(
         "temperature": temperature,
     }
     start = time.time()
-    status, body, stderr = run_curl(url, payload, api_key, timeout_s, streaming=False)
+    status, body, stderr = run_curl(
+        url, payload, api_key, timeout_s, streaming=False)
     latency = time.time() - start
 
     if status != 200:
@@ -246,7 +248,8 @@ def run_chat_stream(
         "temperature": temperature,
     }
     start = time.time()
-    status, body, stderr = run_curl(url, payload, api_key, timeout_s, streaming=True)
+    status, body, stderr = run_curl(
+        url, payload, api_key, timeout_s, streaming=True)
     latency = time.time() - start
 
     if status != 200:
@@ -309,7 +312,8 @@ def run_responses_nonstream(
         "stream": False,
     }
     start = time.time()
-    status, body, stderr = run_curl(url, payload, api_key, timeout_s, streaming=False)
+    status, body, stderr = run_curl(
+        url, payload, api_key, timeout_s, streaming=False)
     latency = time.time() - start
 
     if status != 200:
@@ -366,7 +370,8 @@ def run_responses_stream(
         "stream": True,
     }
     start = time.time()
-    status, body, stderr = run_curl(url, payload, api_key, timeout_s, streaming=True)
+    status, body, stderr = run_curl(
+        url, payload, api_key, timeout_s, streaming=True)
     latency = time.time() - start
 
     if status != 200:
@@ -435,7 +440,7 @@ def run_responses_stream(
     )
 
 
-def parse_models_arg(raw: str) -> List[str]:
+def parse_models_arg(raw: str) -> list[str]:
     if not raw.strip():
         return []
     models = []
@@ -475,7 +480,7 @@ def main() -> int:
 
     print(f"Discovered {len(models)} route(s): {', '.join(models)}")
 
-    results: List[ProbeResult] = []
+    results: list[ProbeResult] = []
     for model in models:
         results.append(
             run_chat_nonstream(

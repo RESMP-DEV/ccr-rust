@@ -67,7 +67,7 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
       "name": "zai",
       "api_base_url": "https://api.z.ai/api/inference/v1",
       "api_key": "${ZAI_API_KEY}",
-      "models": ["glm-4.7"]
+      "models": ["glm-5"]
     },
     {
       "name": "deepseek",
@@ -89,7 +89,7 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
     }
   ],
   "Router": {
-    "default": "zai,glm-4.7",
+    "default": "zai,glm-5",
     "think": "deepseek,deepseek-reasoner",
     "longContext": "minimax,MiniMax-M2.1",
     "longContextThreshold": 1048576,
@@ -110,7 +110,7 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
   },
   "Presets": {
     "coding": {
-      "route": "zai,glm-4.7",
+      "route": "zai,glm-5",
       "temperature": 0.7
     },
     "reasoning": {
@@ -139,7 +139,7 @@ The `Router` section configures automatic tier-based routing:
 
 | Route | CCR-Rust Route | Description |
 |-------|----------------|-------------|
-| `default` | `zai,glm-4.7` | Primary tier—requests go here first |
+| `default` | `zai,glm-5` | Primary tier—requests go here first |
 | `think` | `deepseek,deepseek-reasoner` | Used for reasoning-heavy tasks |
 | `longContext` | `minimax,MiniMax-M2.1` | Used when token count exceeds threshold |
 
@@ -151,7 +151,7 @@ Presets provide named routing configurations for different task types:
 
 | Preset | Route | Use Case |
 |--------|-------|----------|
-| `coding` | Z.AI GLM-4.7 | Fast code generation (P0/P1 tasks) |
+| `coding` | Z.AI GLM-5 | Fast code generation (P0/P1 tasks) |
 | `reasoning` | DeepSeek Reasoner | Complex analysis requiring CoT |
 | `documentation` | MiniMax M2.1 | Long-form content generation |
 
@@ -291,7 +291,7 @@ All reasoning-capable providers return `reasoning_content` as a structured field
 |----------|--------------|---------------|
 | DeepSeek | `reasoning_content` (native) | `reasoning_content` (preserved) |
 | Minimax M2.1 | `reasoning_details` | `reasoning_content` (mapped) |
-| GLM-4.7 (Z.AI) | `<think>` tags | `reasoning_content` (extracted) |
+| GLM-5 (Z.AI) | `<think>` tags | `reasoning_content` (extracted) |
 | Kimi K2 | `◁think▷` tokens | `reasoning_content` (extracted) |
 
 ### 5.2 Multi-Turn Tool Use
