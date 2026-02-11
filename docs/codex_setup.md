@@ -85,7 +85,7 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
       "name": "openrouter",
       "api_base_url": "https://openrouter.ai/api/v1",
       "api_key": "${OPENROUTER_API_KEY}",
-      "models": ["openrouter/pony-alpha"]
+      "models": ["openrouter/aurora-alpha"]
     }
   ],
   "Router": {

@@ -215,7 +215,7 @@ For automated agent workloads, disable streaming to avoid SSE frame parsing erro
 
 ### Enforce Tier Order
 
-Clients like Codex CLI cache the last successful model. If a request falls back to `openrouter,pony-alpha`, subsequent requests will target that tier directly, bypassing cheaper tiers.
+Clients like Codex CLI cache the last successful model. If a request falls back to `openrouter,aurora-alpha`, subsequent requests will target that tier directly, bypassing cheaper tiers.
 
 To force all requests to start from tier 0:
 

@@ -95,7 +95,7 @@ Client handling rule:
 
 **Symptom**: Lower-priority tiers (e.g., OpenRouter) receive all traffic while higher-priority tiers (e.g., GLM, Minimax) are never hit.
 
-**Cause**: Clients like Codex CLI and Claude Code cache the `model` field from successful responses. If a request once fell back to `openrouter,openrouter/pony-alpha`, subsequent requests will include that exact model string, causing CCR-Rust to prioritize that tier.
+**Cause**: Clients like Codex CLI and Claude Code cache the `model` field from successful responses. If a request once fell back to `openrouter,openrouter/aurora-alpha`, subsequent requests will include that exact model string, causing CCR-Rust to prioritize that tier.
 
 **Detection**:
 ```bash
@@ -104,7 +104,7 @@ tail -500 /tmp/ccr-rust.log | grep -E "Direct routing|moved to front"
 
 If you see lines like:
 ```
-Direct routing: openrouter,openrouter/pony-alpha moved to front
+Direct routing: openrouter,openrouter/aurora-alpha moved to front
 ```
 
 This confirms the client is requesting a specific tier.

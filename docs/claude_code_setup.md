@@ -431,7 +431,7 @@ Provider setup used by AlphaHENG (`contrib/ccr-rust/config.alphaheng.json`):
       "name": "openrouter",
       "api_base_url": "https://openrouter.ai/api/v1",
       "api_key": "${OPENROUTER_API_KEY}",
-      "models": ["openrouter/pony-alpha"]
+      "models": ["openrouter/aurora-alpha"]
     }
   ],
   "Router": {
