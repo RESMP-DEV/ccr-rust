@@ -107,6 +107,40 @@ impl Transformer for MinimaxTransformer {
                 }
             }
         }
+        // Normalize usage: Minimax reports cached tokens separately
+        // Total input = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+        if let Some(usage) = response.get_mut("usage") {
+            if let Some(obj) = usage.as_object_mut() {
+                let input = obj
+                    .get("input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let cache_creation = obj
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let cache_read = obj
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let total_input = input + cache_creation + cache_read;
+                if total_input != input {
+                    trace!(
+                        "Minimax usage normalized: {} + {} + {} = {} total input tokens",
+                        input,
+                        cache_creation,
+                        cache_read,
+                        total_input
+                    );
+                    obj.insert(
+                        "input_tokens".to_string(),
+                        Value::Number(total_input.into()),
+                    );
+                }
+            }
+        }
+
         trace!("Minimax response transformed");
         Ok(response)
     }
@@ -256,5 +290,45 @@ mod tests {
 
         // Should not insert additional text block
         assert_eq!(content.len(), original_content_len);
+    }
+
+    #[test]
+    fn test_transform_usage_normalizes_cache_tokens() {
+        let transformer = MinimaxTransformer;
+        // Minimax reports cache tokens separately
+        let response = json!({
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 242,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 40161
+            }
+        });
+
+        let transformed = transformer.transform_response(response).unwrap();
+        let usage = &transformed["usage"];
+
+        // Total input should be 1 + 0 + 40161 = 40162
+        assert_eq!(usage["input_tokens"], 40162);
+        assert_eq!(usage["output_tokens"], 242);
+    }
+
+    #[test]
+    fn test_transform_usage_no_cache_unchanged() {
+        let transformer = MinimaxTransformer;
+        // Without cache tokens, input_tokens should stay the same
+        let response = json!({
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500
+            }
+        });
+
+        let transformed = transformer.transform_response(response).unwrap();
+        assert_eq!(transformed["usage"]["input_tokens"], 1000);
     }
 }
