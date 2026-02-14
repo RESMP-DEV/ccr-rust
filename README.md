@@ -15,6 +15,7 @@
 | **DeepSeek** | deepseek-chat, deepseek-reasoner | Deep reasoning, complex refactors |
 | **MiniMax** | MiniMax-M2.5 | High-performance reasoning |
 | **Kimi (Moonshot)** | Kimi K2.5 | Extended context (1M+ tokens) |
+| **Google Gemini** | gemini-3-flash-preview | Context compression, summarization |
 | **OpenRouter** | 200+ models | Fallback to anything |
 
 ### Coding Plan Discounts
@@ -274,6 +275,7 @@ cargo build --release # Build release binary
 ## Advanced Topics
 
 - [Presets](docs/presets.md) — Named routing presets for different workloads
+- [Gemini Integration](docs/gemini-integration.md) — Context compression with Gemini Flash
 - [Observability](docs/observability.md) — Prometheus metrics, token drift monitoring
 - [Deployment](docs/deployment.md) — Docker, Kubernetes, systemd
 

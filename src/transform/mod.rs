@@ -8,6 +8,9 @@
 //! - GLM
 //! - Kimi
 //! - Minimax
+//!
+//! Providers using standard Anthropic/OpenAI format (no transformer needed):
+//! - Google (Gemini via OpenAI-compatible API)
 
 // Core model transformers
 pub mod deepseek;
