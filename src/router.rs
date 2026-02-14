@@ -1156,16 +1156,16 @@ pub async fn handle_messages(
             // Start per-attempt latency timer for EWMA tracking
             let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
 
-            match try_request(
+            match try_request(TryRequestArgs {
                 config,
-                &state.transformer_registry,
-                &request,
+                registry: &state.transformer_registry,
+                request: &request,
                 tier,
                 tier_name,
                 local_estimate,
-                state.ratelimit_tracker.clone(),
-                state.debug_capture.clone(),
-            )
+                ratelimit_tracker: state.ratelimit_tracker.clone(),
+                debug_capture: state.debug_capture.clone(),
+            })
             .await
             {
                 Ok(response) => {
@@ -2579,16 +2579,28 @@ pub async fn handle_preset_messages(
     handle_messages(State(state), HeaderMap::new(), Json(request)).await
 }
 
-async fn try_request(
-    config: &Config,
-    registry: &TransformerRegistry,
-    request: &AnthropicRequest,
-    tier: &str,
-    tier_name: &str,
+struct TryRequestArgs<'a> {
+    config: &'a Config,
+    registry: &'a TransformerRegistry,
+    request: &'a AnthropicRequest,
+    tier: &'a str,
+    tier_name: &'a str,
     local_estimate: u64,
     ratelimit_tracker: Arc<RateLimitTracker>,
     debug_capture: Option<Arc<DebugCapture>>,
-) -> Result<Response, TryRequestError> {
+}
+
+async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, TryRequestError> {
+    let TryRequestArgs {
+        config,
+        registry,
+        request,
+        tier,
+        tier_name,
+        local_estimate,
+        ratelimit_tracker,
+        debug_capture,
+    } = args;
     let provider = config.resolve_provider(tier).ok_or_else(|| {
         TryRequestError::Other(anyhow::anyhow!("Provider not found for tier: {}", tier))
     })?;
