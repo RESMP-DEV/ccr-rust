@@ -12,7 +12,7 @@
         {
             "name": "deepseek",
             "api_base_url": "https://api.deepseek.com",
-            "api_key": "sk-xxx",
+            "api_key": "${DEEPSEEK_API_KEY}",
             "models": [
                 "deepseek-reasoner",
                 "deepseek-chat"
@@ -21,7 +21,7 @@
         {
             "name": "minimax",
             "api_base_url": "https://api.minimax.io/v1",
-            "api_key": "mk-xxx",
+            "api_key": "${MINIMAX_API_KEY}",
             "models": [
                 "MiniMax-M2.5"
             ],
@@ -30,13 +30,55 @@
                     "minimax"
                 ]
             }
+        },
+        {
+            "name": "openrouter",
+            "api_base_url": "https://openrouter.ai/api/v1",
+            "api_key": "${OPENROUTER_API_KEY}",
+            "models": [
+                "openrouter/aurora-alpha"
+            ],
+            "transformer": {
+                "use": [
+                    "anthropic",
+                    "openrouter"
+                ]
+            }
+        },
+        {
+            "name": "gemini",
+            "api_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "api_key": "${GEMINI_API_KEY}",
+            "models": [
+                "gemini-3-flash-preview"
+            ],
+            "transformer": {
+                "use": [
+                    "anthropic"
+                ]
+            }
         }
     ],
     "Router": {
         "default": "deepseek,deepseek-reasoner",
         "background": "deepseek,deepseek-chat",
-        "longContext": "minimax,MiniMax-M2.5",
-        "longContextThreshold": 1048576
+        "tiers": [
+            "deepseek,deepseek-reasoner",
+            "minimax,MiniMax-M2.5",
+            "openrouter,openrouter/aurora-alpha"
+        ]
+    },
+    "Presets": {
+        "coding": {
+            "route": "deepseek,deepseek-chat",
+            "temperature": 0.7
+        },
+        "reasoning": {
+            "route": "deepseek,deepseek-reasoner"
+        },
+        "documentation": {
+            "route": "gemini,gemini-3-flash-preview"
+        }
     },
     "Frontend": {
         "_comment": "Configuration for frontend-specific behaviors",

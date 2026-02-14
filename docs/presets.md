@@ -87,3 +87,37 @@ curl http://localhost:3456/v1/messages \
 ```
 
 The `[search]` tag is removed, and the request routes to `perplexity,sonar-pro`.
+
+## Built-in Presets
+
+CCR-Rust includes recommended presets for common workloads:
+
+| Preset | Route | Use Case |
+|--------|-------|----------|
+| `coding` | Fast code model (e.g., GLM-5) | P0/P1 code generation tasks |
+| `reasoning` | Reasoning model (e.g., DeepSeek Reasoner) | Complex analysis, refactors |
+| `documentation` | Context compression (e.g., Gemini Flash) | Summarization, handoffs, coalescence |
+
+### Documentation Preset
+
+The `documentation` preset is designed for context compression:
+
+```json
+{
+    "Presets": {
+        "documentation": {
+            "route": "gemini,gemini-3-flash-preview",
+            "temperature": 0.3
+        }
+    }
+}
+```
+
+Usage:
+```bash
+curl http://localhost:3456/preset/documentation/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Summarize this session..."}]}'
+```
+
+See [Gemini Integration](gemini-integration.md) for cost savings and configuration details.

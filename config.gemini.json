@@ -1,0 +1,121 @@
+{
+    "LOG": true,
+    "LOG_LEVEL": "info",
+    "NON_INTERACTIVE_MODE": true,
+    "API_TIMEOUT_MS": 600000,
+    "Providers": [
+        {
+            "name": "zai",
+            "api_base_url": "https://api.z.ai/api/coding/paas/v4",
+            "api_key": "${ZAI_API_KEY}",
+            "models": [
+                "glm-5",
+                "glm-4.6",
+                "glm-4.5"
+            ],
+            "transformer": {
+                "use": [
+                    "anthropic"
+                ]
+            },
+            "tier_name": "ccr-glm"
+        },
+        {
+            "name": "deepseek",
+            "api_base_url": "https://api.deepseek.com",
+            "api_key": "${DEEPSEEK_API_KEY}",
+            "models": [
+                "deepseek-reasoner"
+            ],
+            "transformer": {
+                "use": [
+                    "anthropic",
+                    "deepseek"
+                ]
+            },
+            "tier_name": "ccr-ds"
+        },
+        {
+            "name": "minimax",
+            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_key": "${MINIMAX_API_KEY}",
+            "models": [
+                "MiniMax-M2.5"
+            ],
+            "transformer": {
+                "use": [
+                    "minimax"
+                ]
+            },
+            "protocol": "anthropic",
+            "tier_name": "ccr-mm"
+        },
+        {
+            "name": "openrouter",
+            "api_base_url": "https://openrouter.ai/api/v1",
+            "api_key": "${OPENROUTER_API_KEY}",
+            "models": [
+                "openrouter/aurora-alpha",
+                "stepfun/step-3.5-flash:free"
+            ],
+            "transformer": {
+                "use": [
+                    "anthropic",
+                    "openrouter"
+                ]
+            },
+            "tier_name": "ccr-or"
+        },
+        {
+            "name": "gemini",
+            "api_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "api_key": "${GEMINI_API_KEY}",
+            "models": [
+                "gemini-3-flash-preview",
+                "gemini-2.5-flash"
+            ],
+            "tier_name": "ccr-gemini"
+        }
+    ],
+    "Router": {
+        "default": "zai,glm-5",
+        "background": "deepseek,deepseek-reasoner",
+        "think": "deepseek,deepseek-reasoner",
+        "tiers": [
+            "zai,glm-5",
+            "minimax,MiniMax-M2.5",
+            "openrouter,openrouter/aurora-alpha",
+            "deepseek,deepseek-reasoner",
+            "openrouter,stepfun/step-3.5-flash:free"
+        ],
+        "forceNonStreaming": true,
+        "ignoreDirect": false
+    },
+    "Presets": {
+        "coding": {
+            "route": "zai,glm-5",
+            "temperature": 0.7
+        },
+        "reasoning": {
+            "route": "deepseek,deepseek-reasoner"
+        },
+        "documentation": {
+            "route": "gemini,gemini-3-flash-preview"
+        }
+    },
+    "Persistence": {
+        "mode": "redis",
+        "redis_url": "redis://127.0.0.1:6379/0",
+        "redis_prefix": "ccr-rust:persistence:v1"
+    },
+    "DebugCapture": {
+        "enabled": true,
+        "providers": [
+            "minimax"
+        ],
+        "output_dir": "~/.ccr-rust/captures",
+        "max_files": 1000,
+        "capture_success": true,
+        "max_body_size": 1048576
+    }
+}

@@ -10,6 +10,45 @@ CCR-Rust reads its configuration from a JSON file. The location is determined by
 | Environment | `CCR_CONFIG=path/to/config.json` |
 | Default | `~/.claude-code-router/config.json` |
 
+## Environment Variables
+
+CCR-Rust supports environment variable expansion in config files using `${VAR_NAME}` syntax:
+
+```json
+{
+    "Providers": [
+        {
+            "name": "gemini",
+            "api_key": "${GEMINI_API_KEY}",
+            ...
+        }
+    ]
+}
+```
+
+### .env File Support
+
+CCR-Rust automatically loads `.env` files from:
+1. Current working directory
+2. `~/.claude-code-router/.env`
+
+```bash
+# .env
+GEMINI_API_KEY=your-key-here
+DEEPSEEK_API_KEY=sk-xxx
+MINIMAX_API_KEY=mk-xxx
+```
+
+### Security Best Practice
+
+| Method | Security | Use Case |
+|--------|----------|----------|
+| `.env` file | Medium | Development (add to `.gitignore`) |
+| Environment | High | Production, CI/CD |
+| Hardcoded | Low | Never use in shared code |
+
+See [Gemini Integration](gemini-integration.md) for detailed security guidance.
+
 ## Full Schema
 
 ```json
@@ -30,8 +69,6 @@ CCR-Rust reads its configuration from a JSON file. The location is determined by
     "default": "provider,model",
     "background": "provider,model",
     "think": "provider,model",
-    "longContext": "provider,model",
-    "longContextThreshold": 1048576,
     "webSearch": "provider,model",
     "tierRetries": {
       "tier-0": {
@@ -122,8 +159,6 @@ The `Router` section configures how incoming requests are routed to providers.
 | `default` | string | Yes | - | Default route format: `"provider,model"`. |
 | `background` | string | No | - | Route for background tasks. |
 | `think` | string | No | - | Route for reasoning/thinking models. |
-| `longContext` | string | No | - | Route for long-context requests. |
-| `longContextThreshold` | number | No | 1048576 | Token threshold for `longContext` route. |
 | `webSearch` | string | No | - | Route for web search requests. |
 | `tierRetries` | object | No | - | Per-tier retry configuration. |
 | `forceNonStreaming` | boolean | No | false | Disable streaming for agent workloads. |
@@ -140,8 +175,7 @@ Example:
 {
   "Router": {
     "default": "deepseek,deepseek-chat",
-    "think": "deepseek,deepseek-reasoner",
-    "longContext": "openrouter,google/gemini-2.5-pro-preview"
+    "think": "deepseek,deepseek-reasoner"
   }
 }
 ```
@@ -236,7 +270,7 @@ With defaults (100ms base, 2.0 multiplier, 10000ms max):
     {
       "name": "deepseek",
       "api_base_url": "https://api.deepseek.com/chat/completions",
-      "api_key": "sk-deepseek-key",
+      "api_key": "${DEEPSEEK_API_KEY}",
       "models": ["deepseek-chat", "deepseek-reasoner"],
       "transformer": {
         "use": ["deepseek"],
@@ -244,38 +278,35 @@ With defaults (100ms base, 2.0 multiplier, 10000ms max):
       }
     },
     {
-      "name": "openrouter",
-      "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
-      "api_key": "sk-openrouter-key",
-      "models": ["google/gemini-2.5-pro-preview", "anthropic/claude-3.5-sonnet"],
-      "transformer": { "use": ["openrouter"] }
+      "name": "gemini",
+      "api_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api_key": "${GEMINI_API_KEY}",
+      "models": ["gemini-3-flash-preview"],
+      "transformer": { "use": ["anthropic"] }
     },
     {
-      "name": "modelscope",
-      "api_base_url": "https://api-inference.modelscope.cn/v1/chat/completions",
-      "api_key": "",
-      "models": ["Qwen/Qwen3-Coder-480B"],
-      "transformer": {
-        "use": [["maxtoken", {"max_tokens": 65536}], "enhancetool"],
-        "Qwen/Qwen3-235B-A22B-Thinking-2507": { "use": ["reasoning"] }
-      }
+      "name": "openrouter",
+      "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+      "api_key": "${OPENROUTER_API_KEY}",
+      "models": ["anthropic/claude-3.5-sonnet"],
+      "transformer": { "use": ["openrouter"] }
     }
   ],
   "Router": {
     "default": "deepseek,deepseek-chat",
     "think": "deepseek,deepseek-reasoner",
-    "longContext": "openrouter,google/gemini-2.5-pro-preview",
-    "longContextThreshold": 1048576,
     "tierRetries": {
       "tier-0": { "max_retries": 3, "base_backoff_ms": 100 },
       "tier-1": { "max_retries": 2, "base_backoff_ms": 200 }
     }
   },
+  "Presets": {
+    "coding": { "route": "deepseek,deepseek-chat" },
+    "reasoning": { "route": "deepseek,deepseek-reasoner" },
+    "documentation": { "route": "gemini,gemini-3-flash-preview" }
+  },
   "PORT": 3456,
   "HOST": "127.0.0.1",
-  "API_TIMEOUT_MS": 600000,
-  "POOL_MAX_IDLE_PER_HOST": 64,
-  "POOL_IDLE_TIMEOUT_MS": 90000,
-  "SSE_BUFFER_SIZE": 32
+  "API_TIMEOUT_MS": 600000
 }
 ```
