@@ -461,14 +461,6 @@ pub struct RouterConfig {
     #[serde(rename = "ignoreDirect")]
     pub ignore_direct: bool,
 
-    #[serde(default)]
-    #[serde(rename = "longContext")]
-    pub long_context: Option<String>,
-
-    #[serde(default = "default_long_context_threshold")]
-    #[serde(rename = "longContextThreshold")]
-    pub long_context_threshold: u32,
-
     /// Explicit tier ordering for cascading fallback.
     /// If present, overrides automatic tier construction from default/background/think.
     #[serde(default)]
@@ -488,6 +480,21 @@ pub struct RouterConfig {
     #[serde(default)]
     #[serde(rename = "presets")]
     pub presets: HashMap<String, PresetConfig>,
+
+    /// Request batching configuration.
+    #[serde(default)]
+    #[serde(rename = "batching")]
+    pub batching: Option<BatchingConfig>,
+
+    /// Number of top-performing providers to consider for routing.
+    #[serde(default)]
+    #[serde(rename = "topK")]
+    pub top_k: Option<usize>,
+
+    /// Temperature for softmax routing. Higher values flatten the distribution.
+    #[serde(default)]
+    #[serde(rename = "routingTemperature")]
+    pub routing_temperature: Option<f64>,
 }
 
 /// Per-tier retry limits and backoff configuration.
@@ -508,6 +515,18 @@ pub struct TierRetryConfig {
     /// Maximum backoff delay in milliseconds.
     #[serde(default = "default_max_backoff_ms")]
     pub max_backoff_ms: u64,
+}
+
+/// Request batching configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchingConfig {
+    /// Maximum number of requests to buffer before sending a batch.
+    #[serde(default = "default_batching_max_requests")]
+    pub max_requests: usize,
+
+    /// Maximum time in milliseconds to wait before sending a batch, even if not full.
+    #[serde(default = "default_batching_max_latency_ms")]
+    pub max_latency_ms: u64,
 }
 
 impl Config {
@@ -587,10 +606,7 @@ impl Config {
         // Fallback: build from individual fields
         let mut tiers = vec![r.default.clone()];
 
-        for tier in [&r.background, &r.think, &r.long_context]
-            .into_iter()
-            .flatten()
-        {
+        for tier in [&r.background, &r.think].into_iter().flatten() {
             if !tiers.contains(tier) {
                 tiers.push(tier.clone());
             }
@@ -707,10 +723,6 @@ fn default_timeout() -> u64 {
     600000 // 10 minutes
 }
 
-fn default_long_context_threshold() -> u32 {
-    1048576
-}
-
 fn default_max_retries() -> usize {
     3
 }
@@ -725,6 +737,14 @@ fn default_backoff_multiplier() -> f64 {
 
 fn default_max_backoff_ms() -> u64 {
     10000
+}
+
+fn default_batching_max_requests() -> usize {
+    16
+}
+
+fn default_batching_max_latency_ms() -> u64 {
+    100
 }
 
 fn default_pool_max_idle_per_host() -> usize {

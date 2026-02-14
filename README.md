@@ -13,7 +13,7 @@
 |----------|--------|----------|
 | **Z.AI (GLM)** | GLM-5 | Fast code generation, daily driver |
 | **DeepSeek** | deepseek-chat, deepseek-reasoner | Deep reasoning, complex refactors |
-| **MiniMax** | MiniMax-M2.1 | High-performance reasoning, long context |
+| **MiniMax** | MiniMax-M2.5 | High-performance reasoning |
 | **Kimi (Moonshot)** | Kimi K2.5 | Extended context (1M+ tokens) |
 | **OpenRouter** | 200+ models | Fallback to anything |
 
@@ -134,7 +134,6 @@ ccr-rust validate    # Check config for errors
 | `transformer.use` | Request/response transformer chain |
 | `Router.default` | Primary tier (requests go here first) |
 | `Router.think` | Used for reasoning-heavy tasks |
-| `Router.longContext` | Used when tokens exceed `longContextThreshold` |
 
 ### Transformer Notes
 
@@ -167,14 +166,12 @@ The `transformer` field is optional. Common uses:
             "name": "minimax",
             "api_base_url": "https://api.minimax.io/v1",
             "api_key": "sk-xxx",
-            "models": ["MiniMax-M2.1"]
+            "models": ["MiniMax-M2.5"]
         }
     ],
     "Router": {
         "default": "zai,glm-5",
-        "think": "deepseek,deepseek-reasoner",
-        "longContext": "minimax,MiniMax-M2.1",
-        "longContextThreshold": 60000
+        "think": "deepseek,deepseek-reasoner"
     }
 }
 ```

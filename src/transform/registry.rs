@@ -35,7 +35,7 @@ impl TransformerRegistry {
         // into a standardized format for the AlphaHENG system.
         // Tier 2: Z.AI GLM-5
         registry.register("zai", |_opts| Box::new(GlmTransformer::default()));
-        // Tier 4: Minimax M2.1
+        // Tier 4: Minimax M2.5 (high-performance reasoning, long context)
         registry.register("minimax", |_opts| Box::new(MinimaxTransformer));
         // Tier 3: Moonshot Kimi
         // Keep both provider aliases mapped to the same transformer.

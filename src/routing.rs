@@ -199,20 +199,44 @@ impl EwmaTracker {
             .collect()
     }
 
-    /// Sort tiers with config-aware tier name resolution.
+    /// Sort tiers using config-aware settings, with optional softmax-based top-K selection.
     ///
-    /// Uses `tier_name` from provider config when available.
+    /// This function calculates logits from EWMA latencies, applies a softmax
+    /// function to get probabilities, and returns the top K tiers sorted by
+    /// probability. If `topK` is not configured, it sorts all available tiers.
     pub fn sort_tiers_with_config(
         &self,
         tiers: &[String],
         config: &crate::config::Config,
     ) -> Vec<(String, String)> {
+        let router_config = config.router();
         let state = self.state.read();
 
-        let mut entries: Vec<(usize, String, String, Option<f64>)> = tiers
+        // If top_k is not specified, default to all tiers.
+        let top_k = router_config.top_k.unwrap_or(tiers.len());
+
+        // Fallback to simple latency sort if all tiers are unmeasured.
+        if state.is_empty() {
+            let entries: Vec<(String, String)> = tiers
+                .iter()
+                .map(|tier| (tier.clone(), config.backend_abbreviation_with_config(tier)))
+                .collect();
+
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let order: Vec<String> = entries.iter().map(|(_, name)| name.clone()).collect();
+                debug!(
+                    order = ?order,
+                    "tier routing order (unmeasured, using config order)"
+                );
+            }
+            return entries;
+        }
+
+        let temperature = router_config.routing_temperature.unwrap_or(1.0).max(1e-6);
+
+        let entries: Vec<(String, String, f64)> = tiers
             .iter()
-            .enumerate()
-            .map(|(idx, tier)| {
+            .map(|tier| {
                 let tier_name = config.backend_abbreviation_with_config(tier);
                 let ewma = state.get(&tier_name).and_then(|s| {
                     if s.samples >= self.min_samples {
@@ -221,31 +245,58 @@ impl EwmaTracker {
                         None
                     }
                 });
-                (idx, tier.clone(), tier_name, ewma)
+
+                // Higher latency = lower score (logit). Penalize unmeasured tiers.
+                let logit = match ewma {
+                    Some(latency) => -latency / temperature,
+                    None => -1.0e9, // A large penalty for unmeasured tiers
+                };
+
+                (tier.clone(), tier_name, logit)
             })
             .collect();
 
-        entries.sort_by(|a, b| match (a.3, b.3) {
-            (Some(la), Some(lb)) => la.partial_cmp(&lb).unwrap_or(std::cmp::Ordering::Equal),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.0.cmp(&b.0),
+        // Apply softmax
+        let max_logit = entries
+            .iter()
+            .map(|(_, _, logit)| *logit)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let exp_sum = entries
+            .iter()
+            .map(|(_, _, logit)| (logit - max_logit).exp())
+            .sum::<f64>();
+
+        let mut probabilities: Vec<(String, String, f64)> = entries
+            .into_iter()
+            .map(|(tier, name, logit)| {
+                let probability = if exp_sum > 0.0 {
+                    ((logit - max_logit).exp()) / exp_sum
+                } else {
+                    0.0
+                };
+                (tier, name, probability)
+            })
+            .collect();
+
+        // Sort by probability descending
+        probabilities.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         if tracing::enabled!(tracing::Level::DEBUG) {
-            let order: Vec<String> = entries
+            let order: Vec<String> = probabilities
                 .iter()
-                .map(|(_, _, name, ewma)| match ewma {
-                    Some(e) => format!("{}({:.3}s)", name, e),
-                    None => format!("{}(?)", name),
-                })
+                .map(|(_, name, prob)| format!("{}({:.2}%)", name, prob * 100.0))
                 .collect();
-            debug!(order = ?order, "tier routing order (config-aware)");
+            debug!(order = ?order, k=top_k, "tier routing order (softmax-based)");
         }
 
-        entries
+        // Truncate to top K and return
+        probabilities
             .into_iter()
-            .map(|(_, tier, name, _)| (tier, name))
+            .take(top_k)
+            .map(|(tier, name, _)| (tier, name))
             .collect()
     }
 }

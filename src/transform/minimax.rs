@@ -1,4 +1,4 @@
-//! Minimax M2.1 API transformer.
+//! Minimax M2.5 API transformer.
 //!
 //! Handles Minimax-specific request/response transformations:
 //! - Request: add `reasoning_split: true` for interleaved thinking
@@ -6,7 +6,10 @@
 //! - Response: map `reasoning_details` -> `reasoning_content` (OpenAI format)
 //! - Response: convert thinking-only Anthropic responses to text content
 //!
-//! M2.1 supports 204,800 token context window with up to 128K output tokens.
+//! M2.5 supports 204,800 token context window with up to 128K output tokens.
+//! MiniMax-M2.5 offers peak performance for code understanding, multi-turn dialogue,
+//! and reasoning capabilities.
+//!
 //! max_tokens is passed through unchanged - clients control their own limits.
 
 use crate::transformer::Transformer;
@@ -155,7 +158,7 @@ mod tests {
     fn test_transform_request_adds_reasoning_split() {
         let transformer = MinimaxTransformer;
         let request = json!({
-            "model": "minimax-m2.1",
+            "model": "minimax-m2.5",
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 4096,
             "metadata": {"user_id": "abc"},
@@ -166,7 +169,7 @@ mod tests {
 
         let transformed_request = transformer.transform_request(request).unwrap();
         assert_eq!(transformed_request["reasoning_split"], json!(true));
-        // max_tokens passed through unchanged - M2.1 supports 128K output
+        // max_tokens passed through unchanged - M2.5 supports 128K output
         assert_eq!(transformed_request["max_tokens"], json!(4096));
         assert!(transformed_request.get("metadata").is_none());
         assert!(transformed_request.get("anthropic-beta").is_none());
@@ -178,7 +181,7 @@ mod tests {
     fn test_transform_request_preserves_max_tokens() {
         let transformer = MinimaxTransformer;
         let request = json!({
-            "model": "minimax-m2.1",
+            "model": "minimax-m2.5",
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 100000
         });

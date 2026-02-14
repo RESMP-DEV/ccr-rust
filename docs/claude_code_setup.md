@@ -99,14 +99,14 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
       "name": "openrouter",
       "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
       "api_key": "${OPENROUTER_API_KEY}",
-      "models": ["minimax/minimax-m2.1", "google/gemini-2.5-pro-preview"],
+      "models": ["minimax/minimax-m2.5", "google/gemini-2.5-pro-preview"],
       "transformer": { "use": ["openrouter", "openai_to_anthropic"] }
     }
   ],
   "Router": {
     "default": "anthropic,claude-3-5-sonnet-20241022",
     "think": "deepseek,deepseek-reasoner",
-    "longContext": "openrouter,minimax/minimax-m2.1",
+    "longContext": "openrouter,minimax/minimax-m2.5",
     "longContextThreshold": 1048576,
     "tierRetries": {
       "tier-0": {
@@ -145,7 +145,7 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
       "temperature": 0.1
     },
     "documentation": {
-      "route": "openrouter,minimax/minimax-m2.1",
+      "route": "openrouter,minimax/minimax-m2.5",
       "max_tokens": 32768
     }
   },
@@ -305,7 +305,7 @@ Claude Code displays thinking blocks differently based on the model:
 | Model | Thinking Display | Configuration |
 |-------|-----------------|---------------|
 | Claude 3 Opus | Native thinking | Automatic |
-| DeepSeek Reasoner | Tagged blocks | `<think>...</think>` |
+| DeepSeek Reasoner | Tagged blocks | `<|im_start|>...ground` |
 | GLM-5 | Via transformer | Hidden by default |
 
 ### 4.3 Controlling Thinking Output
@@ -329,7 +329,7 @@ Use CCR-Rust transformers to customize thinking block handling:
 ```
 
 **Transformer options:**
-- `thinktag`: Wraps thinking content in `<think>` tags
+- `thinktag`: Wraps thinking content in `<|im_start|>` tags
 - `thinkstrip`: Removes thinking content entirely
 
 ### 4.4 Environment Variable Control
@@ -374,8 +374,8 @@ All reasoning-capable providers now return `reasoning_content` as a structured f
 | Provider | Input Format | Output Format |
 |----------|--------------|---------------|
 | DeepSeek | `reasoning_content` (native) | `reasoning_content` (preserved) |
-| Minimax M2.1 | `reasoning_details` | `reasoning_content` (mapped) |
-| GLM-5 (Z.AI) | `<think>` tags | `reasoning_content` (extracted) |
+| Minimax M2.5 | `reasoning_details` | `reasoning_content` (mapped) |
+| GLM-5 (Z.AI) | `<|im_start|>` tags | `reasoning_content` (extracted) |
 | Kimi K2 | `◁think▷` tokens | `reasoning_content` (extracted) |
 
 ### Multi-Turn Tool Use
@@ -425,7 +425,7 @@ Provider setup used by AlphaHENG (`contrib/ccr-rust/config.alphaheng.json`):
       "name": "minimax",
       "api_base_url": "https://api.minimax.io/v1",
       "api_key": "${MINIMAX_API_KEY}",
-      "models": ["MiniMax-M2.1"]
+      "models": ["MiniMax-M2.5"]
     },
     {
       "name": "openrouter",
@@ -437,7 +437,7 @@ Provider setup used by AlphaHENG (`contrib/ccr-rust/config.alphaheng.json`):
   "Router": {
     "default": "zai,glm-5",
     "think": "deepseek,deepseek-reasoner",
-    "longContext": "minimax,MiniMax-M2.1"
+    "longContext": "minimax,MiniMax-M2.5"
   }
 }
 ```
@@ -683,7 +683,7 @@ CCR-Rust automatically routes based on model availability and latency. Claude Co
   "Router": {
     "default": "anthropic,claude-3-5-sonnet-20241022",
     "think": "deepseek,deepseek-reasoner",
-    "longContext": "openrouter,minimax/minimax-m2.1"
+    "longContext": "openrouter,minimax/minimax-m2.5"
   }
 }
 ```

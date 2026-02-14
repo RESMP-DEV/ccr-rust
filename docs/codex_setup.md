@@ -79,7 +79,7 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
       "name": "minimax",
       "api_base_url": "https://api.minimax.io/v1",
       "api_key": "${MINIMAX_API_KEY}",
-      "models": ["MiniMax-M2.1"]
+      "models": ["MiniMax-M2.5"]
     },
     {
       "name": "openrouter",
@@ -91,7 +91,7 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
   "Router": {
     "default": "zai,glm-5",
     "think": "deepseek,deepseek-reasoner",
-    "longContext": "minimax,MiniMax-M2.1",
+    "longContext": "minimax,MiniMax-M2.5",
     "longContextThreshold": 1048576,
     "tierRetries": {
       "tier-0": {
@@ -117,7 +117,7 @@ Edit your CCR-Rust configuration file (default: `~/.claude-code-router/config.js
       "route": "deepseek,deepseek-reasoner"
     },
     "documentation": {
-      "route": "minimax,MiniMax-M2.1"
+      "route": "minimax,MiniMax-M2.5"
     }
   },
   "PORT": 3456,
@@ -141,7 +141,7 @@ The `Router` section configures automatic tier-based routing:
 |-------|----------------|-------------|
 | `default` | `zai,glm-5` | Primary tier—requests go here first |
 | `think` | `deepseek,deepseek-reasoner` | Used for reasoning-heavy tasks |
-| `longContext` | `minimax,MiniMax-M2.1` | Used when token count exceeds threshold |
+| `longContext` | `minimax,MiniMax-M2.5` | Used when token count exceeds threshold |
 
 **Format:** `"provider,model"` where `provider` matches a provider name and `model` is in that provider's models list.
 
@@ -153,7 +153,7 @@ Presets provide named routing configurations for different task types:
 |--------|-------|----------|
 | `coding` | Z.AI GLM-5 | Fast code generation (P0/P1 tasks) |
 | `reasoning` | DeepSeek Reasoner | Complex analysis requiring CoT |
-| `documentation` | MiniMax M2.1 | Long-form content generation |
+| `documentation` | MiniMax M2.5 | Long-form content generation |
 
 ### 2.4 Start CCR-Rust
 
@@ -290,8 +290,8 @@ All reasoning-capable providers return `reasoning_content` as a structured field
 | Provider | Input Format | Output Format |
 |----------|--------------|---------------|
 | DeepSeek | `reasoning_content` (native) | `reasoning_content` (preserved) |
-| Minimax M2.1 | `reasoning_details` | `reasoning_content` (mapped) |
-| GLM-5 (Z.AI) | `<think>` tags | `reasoning_content` (extracted) |
+| Minimax M2.5 | `reasoning_details` | `reasoning_content` (mapped) |
+| GLM-5 (Z.AI) | `<|im_start|>` tags | `reasoning_content` (extracted) |
 | Kimi K2 | `◁think▷` tokens | `reasoning_content` (extracted) |
 
 ### 5.2 Multi-Turn Tool Use
@@ -544,7 +544,7 @@ CCR-Rust automatically routes based on model availability and latency. Codex req
   "Router": {
     "default": "openai,gpt-4o",
     "think": "deepseek,deepseek-reasoner",
-    "background": "openrouter,minimax/minimax-m2.1"
+    "background": "openrouter,minimax/minimax-m2.5"
   }
 }
 ```

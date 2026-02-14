@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn test_capture_builder() {
         let capture = CaptureBuilder::new(1, "minimax", "ccr-mm")
-            .model("MiniMax-M2.1")
+            .model("MiniMax-M2.5")
             .url("https://api.minimax.chat/v1/chat/completions")
             .request_body(serde_json::json!({"model": "test", "messages": []}))
             .streaming(false)
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn test_capture_builder_error() {
         let capture = CaptureBuilder::new(2, "minimax", "ccr-mm")
-            .model("MiniMax-M2.1")
+            .model("MiniMax-M2.5")
             .url("https://api.minimax.chat/v1/chat/completions")
             .request_body(serde_json::json!({"model": "test"}))
             .complete_with_error("Connection timeout");
@@ -625,7 +625,7 @@ mod tests {
 
         // Record a capture
         let interaction = CaptureBuilder::new(1, "minimax", "ccr-mm")
-            .model("MiniMax-M2.1")
+            .model("MiniMax-M2.5")
             .request_body(serde_json::json!({"test": true}))
             .complete(200, r#"{"result": "ok"}"#, None, None);
 

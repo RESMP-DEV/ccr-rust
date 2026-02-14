@@ -147,12 +147,12 @@ Example: `minimax_ccr-mm_20260209_183742_00001234.json`
   "request_id": 1234,
   "provider": "minimax",
   "tier_name": "ccr-mm",
-  "model": "MiniMax-M2.1",
+  "model": "MiniMax-M2.5",
   "timestamp": "2026-02-09T18:37:42.123456Z",
   "url": "https://api.minimax.io/anthropic/v1/messages",
   "method": "POST",
   "request_body": {
-    "model": "MiniMax-M2.1",
+    "model": "MiniMax-M2.5",
     "messages": [...],
     "max_tokens": 4096
   },
