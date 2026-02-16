@@ -26,7 +26,7 @@ Several providers offer subscription plans with better rates than pay-as-you-go:
 | Provider | Plan | Savings |
 |----------|------|---------|
 | **Z.AI** | [Coding Plan](https://z.ai/subscribe?ic=Y8HASOW1RU) | **10% off** — Best value for daily use |
-| **Qwen** | [Benefits Program](https://www.alibabacloud.com/campaign/benefits?referral_code=A92LFK) | **Free credits** for new users |
+| **Qwen** | [Coding Plan](https://www.alibabacloud.com/help/en/model-studio/coding-plan) | **$10-50/month**, up to 90K requests |
 | **MiniMax** | [Coding Plan](https://platform.minimax.io/subscribe/coding-plan?code=AnKU0nzXQG&source=link) | **10% off** |
 | DeepSeek | Pay-as-you-go | Usage-based pricing |
 | OpenRouter | Pay-as-you-go | Usage-based pricing |
@@ -278,6 +278,7 @@ cargo build --release # Build release binary
 
 - [Presets](docs/presets.md) — Named routing presets for different workloads
 - [Gemini Integration](docs/gemini-integration.md) — Context compression with Gemini Flash
+- [Qwen Coding Plan](docs/qwen-coding-plan.md) — Alibaba Cloud's subscription plan for coding
 - [Observability](docs/observability.md) — Prometheus metrics, token drift monitoring
 - [Deployment](docs/deployment.md) — Docker, Kubernetes, systemd
 
