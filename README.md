@@ -12,6 +12,7 @@
 | Provider | Models | Best For |
 |----------|--------|----------|
 | **Z.AI (GLM)** | GLM-5 | Fast code generation, daily driver |
+| **Qwen (Alibaba)** | Qwen-Coder, Qwen-Plus | Code generation, multi-language support |
 | **DeepSeek** | deepseek-chat, deepseek-reasoner | Deep reasoning, complex refactors |
 | **MiniMax** | MiniMax-M2.5 | High-performance reasoning |
 | **Kimi (Moonshot)** | Kimi K2.5 | Extended context (1M+ tokens) |
@@ -25,6 +26,7 @@ Several providers offer subscription plans with better rates than pay-as-you-go:
 | Provider | Plan | Savings |
 |----------|------|---------|
 | **Z.AI** | [Coding Plan](https://z.ai/subscribe?ic=Y8HASOW1RU) | **10% off** — Best value for daily use |
+| **Qwen** | [Benefits Program](https://www.alibabacloud.com/campaign/benefits?referral_code=A92LFK) | **Free credits** for new users |
 | **MiniMax** | [Coding Plan](https://platform.minimax.io/subscribe/coding-plan?code=AnKU0nzXQG&source=link) | **10% off** |
 | DeepSeek | Pay-as-you-go | Usage-based pricing |
 | OpenRouter | Pay-as-you-go | Usage-based pricing |
