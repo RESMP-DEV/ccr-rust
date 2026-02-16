@@ -1528,6 +1528,8 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
     // Create a channel for streaming response
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(100);
 
+    increment_active_streams(1);
+
     tokio::spawn(async move {
         let mut stream = body.into_data_stream();
         let mut decoder = SseFrameDecoder::new();
@@ -1601,6 +1603,8 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         if !sent_done {
             let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
         }
+
+        increment_active_streams(-1);
     });
 
     Response::from_parts(parts, Body::from_stream(ReceiverStream::new(rx)))
