@@ -57,6 +57,22 @@
                     "anthropic"
                 ]
             }
+        },
+        {
+            "name": "qwen",
+            "_comment": "Alibaba Cloud Model Studio Coding Plan. Use coding-intl.dashscope.aliyuncs.com for subscription plans (sk-sp-xxx keys). Standard DashScope keys (sk-xxx) use dashscope-intl.aliyuncs.com.",
+            "api_base_url": "https://coding-intl.dashscope.aliyuncs.com/v1",
+            "api_key": "${QWEN_API_KEY}",
+            "models": [
+                "qwen3-coder-plus",
+                "qwen3-max-2026-01-23"
+            ],
+            "transformer": {
+                "use": [
+                    "anthropic"
+                ]
+            },
+            "tier_name": "ccr-qwen"
         }
     ],
     "Router": {
