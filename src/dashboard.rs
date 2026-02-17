@@ -187,6 +187,7 @@ impl SessionInfo {
 #[derive(Debug, Clone, Default)]
 pub struct GlobalStats {
     pub active_streams: f64,
+    pub active_requests: f64,
     pub total_requests: u64,
     pub total_failures: u64,
     pub total_input_tokens: u64,
@@ -207,6 +208,7 @@ fn sync_ui_state(shared: &SharedDashboardState, ui_state: &mut UiState) {
                 // Extract global stats from the fetched UsageSummary
                 ui_state.global_stats = GlobalStats {
                     active_streams: data.usage.active_streams,
+                    active_requests: data.usage.active_requests,
                     total_requests: data.usage.total_requests,
                     total_failures: data.usage.total_failures,
                     total_input_tokens: data.usage.total_input_tokens,
@@ -347,8 +349,8 @@ fn render_header(f: &mut ratatui::Frame, area: Rect, host: &str, port: u16, stat
         ])
         .split(area);
 
-    // Column 1: Active Streams (high-visibility)
-    let active_streams_style = if stats.active_streams > 0.0 {
+    // Column 1: Active Requests (high-visibility)
+    let active_requests_style = if stats.active_requests > 0.0 {
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD)
@@ -356,10 +358,10 @@ fn render_header(f: &mut ratatui::Frame, area: Rect, host: &str, port: u16, stat
         Style::default().fg(Color::Gray)
     };
 
-    let active_streams_text = format!("{:.0}", stats.active_streams);
+    let active_requests_text = format!("{:.0}", stats.active_requests);
     let streams_paragraph = Paragraph::new(Line::from(vec![
-        Span::styled("Active Streams: ", Style::default().fg(Color::White)),
-        Span::styled(&active_streams_text, active_streams_style),
+        Span::styled("Active Requests: ", Style::default().fg(Color::White)),
+        Span::styled(&active_requests_text, active_requests_style),
     ]))
     .block(
         Block::default()

@@ -69,6 +69,12 @@ lazy_static! {
     )
     .unwrap();
 
+    static ref ACTIVE_REQUESTS: Gauge = register_gauge!(
+        "ccr_active_requests",
+        "Current number of in-flight requests (streaming or non-streaming)"
+    )
+    .unwrap();
+
     // Usage reporting: token counters per tier
     static ref INPUT_TOKENS_TOTAL: CounterVec = register_counter_vec!(
         "ccr_input_tokens_total",
@@ -1094,6 +1100,21 @@ pub fn get_active_streams() -> f64 {
     ACTIVE_STREAMS.get()
 }
 
+/// Get the current number of active requests (streaming or non-streaming).
+pub fn get_active_requests() -> f64 {
+    ACTIVE_REQUESTS.get()
+}
+
+/// Increment or decrement the active requests counter.
+/// Call with +1 when a request starts, -1 when it completes.
+pub fn increment_active_requests(delta: i64) {
+    if delta > 0 {
+        ACTIVE_REQUESTS.add(delta as f64);
+    } else {
+        ACTIVE_REQUESTS.sub((-delta) as f64);
+    }
+}
+
 fn frontend_label(frontend: FrontendType) -> &'static str {
     match frontend {
         FrontendType::Codex => "codex",
@@ -1520,6 +1541,7 @@ pub struct UsageSummary {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub active_streams: f64,
+    pub active_requests: f64,
     pub tiers: Vec<TierUsage>,
 }
 
@@ -1701,6 +1723,7 @@ pub async fn usage_handler() -> impl IntoResponse {
         total_input_tokens: TOTAL_INPUT_TOKENS.load(Ordering::Relaxed),
         total_output_tokens: TOTAL_OUTPUT_TOKENS.load(Ordering::Relaxed),
         active_streams: ACTIVE_STREAMS.get(),
+        active_requests: ACTIVE_REQUESTS.get(),
         tiers: tier_list,
     };
 

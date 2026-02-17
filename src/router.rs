@@ -16,9 +16,9 @@ use crate::debug_capture::{CaptureBuilder, DebugCapture};
 use crate::frontend::codex::CodexFrontend;
 use crate::frontend::{detect_frontend, Frontend};
 use crate::metrics::{
-    record_failure, record_pre_request_tokens, record_rate_limit_backoff, record_rate_limit_hit,
-    record_request_duration_with_frontend, record_request_with_frontend, record_usage,
-    sync_ewma_gauge, verify_token_usage,
+    increment_active_requests, record_failure, record_pre_request_tokens,
+    record_rate_limit_backoff, record_rate_limit_hit, record_request_duration_with_frontend,
+    record_request_with_frontend, record_usage, sync_ewma_gauge, verify_token_usage,
 };
 use crate::ratelimit::RateLimitTracker;
 use crate::routing::{AttemptTimer, EwmaTracker};
@@ -26,6 +26,22 @@ use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
 use crate::transform::anthropic_to_openai::AnthropicToOpenAiResponseTransformer;
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
+
+/// RAII guard that decrements active_requests when dropped.
+struct ActiveRequestGuard;
+
+impl ActiveRequestGuard {
+    fn new() -> Self {
+        increment_active_requests(1);
+        Self
+    }
+}
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        increment_active_requests(-1);
+    }
+}
 
 /// Extract rate limit information from upstream response headers.
 fn extract_rate_limit_headers(
@@ -1055,6 +1071,7 @@ pub async fn handle_messages(
     headers: HeaderMap,
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
+    let _guard = ActiveRequestGuard::new();
     let start = std::time::Instant::now();
     let config = &state.config;
     let tiers = config.backend_tiers();
