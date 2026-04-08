@@ -234,6 +234,17 @@ pub struct Provider {
     /// for Kimi's coding agent identity check).
     #[serde(default)]
     pub extra_headers: Option<std::collections::HashMap<String, String>>,
+
+    /// When true (default), proactively skip this tier if upstream reports
+    /// `X-RateLimit-Remaining: 0` on a successful response.  Set to false
+    /// for providers like Z.AI that include rate-limit headers on every 200
+    /// as informational warnings without actually rejecting at quota zero.
+    #[serde(default = "default_honor_ratelimit_headers")]
+    pub honor_ratelimit_headers: bool,
+}
+
+fn default_honor_ratelimit_headers() -> bool {
+    true
 }
 
 impl Provider {

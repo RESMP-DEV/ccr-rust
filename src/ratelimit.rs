@@ -32,12 +32,18 @@ impl RateLimitTracker {
         Self::default()
     }
 
-    pub fn should_skip_tier(&self, tier: &str) -> bool {
+    /// Check whether a tier should be skipped before dispatching.
+    ///
+    /// `honor_remaining` controls whether `X-RateLimit-Remaining: 0` from a
+    /// successful response causes proactive skipping.  Set to `false` for
+    /// providers that include rate-limit headers on every 200 as informational
+    /// warnings (e.g. Z.AI).
+    pub fn should_skip_tier(&self, tier: &str, honor_remaining: bool) -> bool {
         let tiers = self.tiers.read();
         if let Some(state) = tiers.get(tier) {
             let now = Instant::now();
 
-            // Check if we're in exponential backoff due to previous 429s
+            // Always skip when in exponential backoff from a real 429.
             if let Some(until) = state.backoff_until {
                 if now < until {
                     tracing::debug!(
@@ -49,21 +55,38 @@ impl RateLimitTracker {
                 }
             }
 
-            // Check if remaining quota is exhausted and we haven't reset yet
+            // Proactive skip when remaining quota is exhausted — only when
+            // the provider's headers are trusted (honor_ratelimit_headers).
             if let Some(0) = state.remaining {
                 if let Some(reset) = state.reset_at {
                     if now < reset {
+                        if honor_remaining {
+                            tracing::debug!(
+                                tier = %tier,
+                                reset_remaining_secs = %reset.saturating_duration_since(now).as_secs(),
+                                "Skipping tier: quota exhausted"
+                            );
+                            return true;
+                        }
                         tracing::debug!(
                             tier = %tier,
                             reset_remaining_secs = %reset.saturating_duration_since(now).as_secs(),
-                            "Skipping tier: quota exhausted"
+                            "Informational: quota appears exhausted (not blocking)"
                         );
-                        return true;
                     }
                 }
             }
         }
         false
+    }
+
+    /// Returns true if the tier is in exponential backoff from a real 429.
+    pub fn has_backoff(&self, tier: &str) -> bool {
+        let tiers = self.tiers.read();
+        tiers
+            .get(tier)
+            .and_then(|state| state.backoff_until)
+            .is_some_and(|until| Instant::now() < until)
     }
 
     pub fn record_429(&self, tier: &str, retry_after: Option<Duration>) {

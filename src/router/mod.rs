@@ -160,7 +160,14 @@ pub async fn handle_messages(
 
     // Try each tier with retries
     for (tier, tier_name) in ordered.iter() {
-        if state.ratelimit_tracker.should_skip_tier(tier_name) {
+        let honor_remaining = config
+            .resolve_provider(tier)
+            .map(|p| p.honor_ratelimit_headers)
+            .unwrap_or(true);
+        if state
+            .ratelimit_tracker
+            .should_skip_tier(tier_name, honor_remaining)
+        {
             tracing::debug!(tier = %tier_name, "Skipping rate-limited tier");
             continue;
         }
