@@ -191,7 +191,8 @@ Tiers are specified as `"provider_name,model_id"` strings. Resolution splits on 
 
 - Use `anyhow::Result` for fallible operations
 - HTTP handlers return appropriate status codes (the router maps provider errors to client-facing errors)
-- Rate limit 429s trigger exponential backoff per tier (`ratelimit.rs`)
+- Rate limit 429s are **passed through** to the client (not cascaded internally) — see 429 Pass-Through below
+- Non-rate-limit failures (5xx, timeouts) still cascade to the next tier
 
 ### Metrics
 
@@ -221,6 +222,20 @@ Integration tests use `wiremock` to mock upstream providers.
 | `config.gemini.json`                | Multi-backend config with Gemini                               |
 | `~/.claude-code-router/config.json` | Deployed config (not in repo)                                  |
 | `~/.claude-code-router/.env`        | API keys loaded at startup                                     |
+
+## 429 Pass-Through (v1.3.0)
+
+As of v1.3.0, CCR-Rust **passes 429 responses through** to the client instead of silently cascading to the next tier. This is a deliberate architectural choice:
+
+- **Dispatch layer** (`router/dispatch.rs`): On 429, reads the upstream body+headers, normalizes the error body (sets `type: "rate_limit_error"`, `code: "rate_limited"`), forwards allowed upstream headers (filtering hop-by-hop and `content-length`/`content-encoding`), stamps `x-ccr-tier`, and returns `Ok(Response)` instead of `Err(RateLimited)`.
+- **Coordination layer** (`router/mod.rs`): Detects 429 status on the `Ok` path, records EWMA failure, and returns immediately — no cascade.
+- **All-tiers-exhausted** now only fires for non-rate-limit failures and always returns 503.
+
+### Lessons from 429 refactor
+
+- **Return-type trick**: Dispatch returns `Ok(Response)` with status 429 instead of `Err(RateLimited)`. The coordinator checks `response.status() == 429` on the success path. This avoids threading body bytes through the error enum.
+- **Header forwarding requires a deny-list**: Forward all upstream headers except hop-by-hop (RFC 7230 §6.1), representation headers that go stale (`content-length`, `content-encoding`), and CCR's own (`x-ccr-tier`). Use `should_forward_429_header()` for this.
+- **`honor_ratelimit_headers` defaults to `true`**: Proactively skip tiers reporting `X-RateLimit-Remaining: 0` on 200s. Set `false` only for providers (like Z.AI) that send informational headers without enforcement.
 
 ## Pitfalls
 
