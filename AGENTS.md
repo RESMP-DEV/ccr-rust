@@ -70,10 +70,12 @@ This keeps `~/.cargo/bin/ccr-rust` (used by `ccr-rust dashboard`, etc.) in sync 
 Client Request
   -> Frontend detection (Claude Code or Codex)
   -> Parse into InternalRequest
+  -> EWMA sort tiers, apply direct-routing pins
+  -> (optional) GP reranker reorders non-pinned candidates
   -> Build transformer chain from provider config
   -> Apply request transformers
   -> Route to provider (OpenAI or Anthropic protocol)
-  -> On failure: record EWMA penalty, try next tier
+  -> On failure: record EWMA penalty + GP observation, try next tier
   -> Apply response transformers
   -> Serialize to client's format
   -> Return response
@@ -94,6 +96,7 @@ Client Request
 | `src/router/translate_request.rs`  | Anthropic→OpenAI request translation                                       |
 | `src/router/translate_response.rs` | OpenAI→Anthropic response translation                                      |
 | `src/routing.rs`                   | EWMA latency tracker per tier                                              |
+| `src/gp_router.rs`                 | Optional GP-based tier reranker (Bayesian optimization layer over EWMA)     |
 | `src/transformer.rs`               | `Transformer` trait, common transformer impls                              |
 | `src/transform/registry.rs`        | `TransformerRegistry` — maps names to transformer instances                |
 | `src/frontend/mod.rs`              | `Frontend` trait, `InternalRequest`/`InternalResponse`                     |
@@ -191,7 +194,8 @@ Tiers are specified as `"provider_name,model_id"` strings. Resolution splits on 
 
 - Use `anyhow::Result` for fallible operations
 - HTTP handlers return appropriate status codes (the router maps provider errors to client-facing errors)
-- Rate limit 429s trigger exponential backoff per tier (`ratelimit.rs`)
+- Rate limit 429s are returned as `Err(TryRequestError::RateLimited(retry_after))` from the dispatch layer so the coordinator in `router/mod.rs` can track all outcomes (including for GP observations). The coordinator builds a synthetic 429 via `rate_limit_exhausted_response` when all tiers are exhausted due to rate limits.
+- 5xx errors and timeouts trigger internal failover/cascading; 429s do **not** cascade.
 
 ### Metrics
 
@@ -247,6 +251,26 @@ CCR-Rust enforces source lines of code limits to prevent files from growing into
 - Optimize the ratio of module size to interface — a 500-line module with 2 public functions is better than 5 files of 100 lines each re-exporting everything
 - When splitting: create `module_name/mod.rs` + submodules, re-export public API from `mod.rs`
 - Existing oversized files are grandfathered with a ratchet — they can only shrink, never grow
+
+## Lessons Learned
+
+### 429 Handling: Coordinator Must See All Outcomes
+
+The 429 pass-through pattern (forwarding upstream body/headers directly to the client) was initially implemented in `dispatch.rs` but later reverted. The problem: when the dispatch layer returns a 429 response directly, the coordinator loop in `router/mod.rs` never sees the failure, so it cannot record EWMA penalties or GP observations. The current design returns `Err(TryRequestError::RateLimited(retry_after))` from dispatch, letting the coordinator track the outcome and build a synthetic 429 if all tiers are exhausted.
+
+**Rule**: Error classification decisions belong in the coordinator, not the dispatch layer. Dispatch should report outcomes; the coordinator decides what to do.
+
+### GP Reranker: Pinned Prefix Pattern
+
+When direct-routing or search-provider pins move a tier to the front of the list, the GP reranker must not reorder those pinned entries. The `pinned_prefix_len` variable tracks how many leading tiers are pinned; the GP only reranks positions after the prefix. When adding any new "force to front" routing logic, always increment `pinned_prefix_len`.
+
+### AppState Field Additions Require Test Updates
+
+Adding a field to `AppState` (like `gp_router` or `max_streams`) breaks every integration test that constructs `AppState` directly. All integration tests in `tests/` use `build_app()` helpers that construct `AppState` by hand. When adding a new `AppState` field: add it to `AppState` struct, set a sensible default in every `build_app()`, and `grep -r "AppState {" tests/` to verify.
+
+### External Path Dependencies
+
+The `gp-routing` crate is referenced as `gp-routing = { path = "../gp-routing" }` in `Cargo.toml`. This means the crate must exist at a sibling directory during builds. CI/CD pipelines and fresh clones need both repos checked out adjacently.
 
 ## License
 
