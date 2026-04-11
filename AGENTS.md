@@ -81,32 +81,30 @@ Client Request
 
 ### Key Files
 
-| File                               | Purpose                                                                    |
-| ---------------------------------- | -------------------------------------------------------------------------- |
-| `src/main.rs`                      | CLI entry point, 8 subcommands (clap)                                      |
-| `src/config.rs`                    | Config parsing, `Provider`, `RouterConfig`, `ProviderProtocol` enum        |
-| `src/router/mod.rs`                | HTTP handlers (`handle_messages`, `handle_preset_messages`, `list_models`) |
-| `src/router/types.rs`              | `AnthropicRequest`, `AppState`, `TryRequestArgs`, shared types             |
-| `src/router/dispatch.rs`           | `try_request`, protocol dispatch, header building                          |
-| `src/router/streaming.rs`          | SSE streaming + pseudo-streaming response translation                      |
-| `src/router/openai_compat.rs`      | `/v1/chat/completions` handler                                             |
-| `src/router/responses_api.rs`      | `/v1/responses` handler                                                    |
-| `src/router/translate_request.rs`  | Anthropic→OpenAI request translation                                       |
-| `src/router/translate_response.rs` | OpenAI→Anthropic response translation                                      |
-| `src/routing.rs`                   | EWMA latency tracker per tier                                              |
-| `src/transformer.rs`               | `Transformer` trait, common transformer impls                              |
-| `src/transform/registry.rs`        | `TransformerRegistry` — maps names to transformer instances                |
-| `src/frontend/mod.rs`              | `Frontend` trait, `InternalRequest`/`InternalResponse`                     |
-| `src/frontend/codex.rs`            | OpenAI format parsing/serialization                                        |
-| `src/frontend/claude_code.rs`      | Anthropic format parsing/serialization                                     |
-| `src/metrics/mod.rs`               | Prometheus metric definitions, recording functions                         |
-| `src/metrics/handlers.rs`          | HTTP handler endpoints (`/metrics`, `/usage`, `/latencies`)                |
-| `src/metrics/persistence.rs`       | Redis persistence for metrics (save/restore)                               |
-| `src/mcp/server.rs`                | MCP JSON-RPC server                                                        |
-| `src/mcp/catalog.rs`               | Tool catalog aggregation and compression                                   |
-| `src/sse.rs`                       | SSE frame parser/serializer                                                |
-| `src/debug_capture.rs`             | Request/response capture to disk                                           |
-| `src/ratelimit.rs`                 | Rate limit state, exponential backoff                                      |
+- `src/main.rs` — CLI entry point, 8 subcommands (clap)
+- `src/config.rs` — Config parsing, `Provider`, `RouterConfig`, `ProviderProtocol` enum
+- `src/router/mod.rs` — HTTP handlers (`handle_messages`, `handle_preset_messages`, `list_models`)
+- `src/router/types.rs` — `AnthropicRequest`, `AppState`, `TryRequestArgs`, shared types
+- `src/router/dispatch.rs` — `try_request`, protocol dispatch, header building
+- `src/router/streaming.rs` — SSE streaming + pseudo-streaming response translation
+- `src/router/openai_compat.rs` — `/v1/chat/completions` handler
+- `src/router/responses_api.rs` — `/v1/responses` handler
+- `src/router/translate_request.rs` — Anthropic→OpenAI request translation
+- `src/router/translate_response.rs` — OpenAI→Anthropic response translation
+- `src/routing.rs` — EWMA latency tracker per tier
+- `src/transformer.rs` — `Transformer` trait, common transformer impls
+- `src/transform/registry.rs` — `TransformerRegistry` — maps names to transformer instances
+- `src/frontend/mod.rs` — `Frontend` trait, `InternalRequest`/`InternalResponse`
+- `src/frontend/codex.rs` — OpenAI format parsing/serialization
+- `src/frontend/claude_code.rs` — Anthropic format parsing/serialization
+- `src/metrics/mod.rs` — Prometheus metric definitions, recording functions
+- `src/metrics/handlers.rs` — HTTP handler endpoints (`/metrics`, `/usage`, `/latencies`)
+- `src/metrics/persistence.rs` — Redis persistence for metrics (save/restore)
+- `src/mcp/server.rs` — MCP JSON-RPC server
+- `src/mcp/catalog.rs` — Tool catalog aggregation and compression
+- `src/sse.rs` — SSE frame parser/serializer
+- `src/debug_capture.rs` — Request/response capture to disk
+- `src/ratelimit.rs` — Rate limit state, exponential backoff
 
 ### Protocols
 
@@ -215,12 +213,10 @@ Integration tests use `wiremock` to mock upstream providers.
 
 ## Config Files
 
-| File                                | Purpose                                                        |
-| ----------------------------------- | -------------------------------------------------------------- |
-| `config.example.json`               | Starter template — copy to `~/.claude-code-router/config.json` |
-| `config.gemini.json`                | Multi-backend config with Gemini                               |
-| `~/.claude-code-router/config.json` | Deployed config (not in repo)                                  |
-| `~/.claude-code-router/.env`        | API keys loaded at startup                                     |
+- `config.example.json` — Starter template — copy to `~/.claude-code-router/config.json`
+- `config.gemini.json` — Multi-backend config with Gemini
+- `~/.claude-code-router/config.json` — Deployed config (not in repo)
+- `~/.claude-code-router/.env` — API keys loaded at startup
 
 ## Pitfalls
 
@@ -233,11 +229,9 @@ Integration tests use `wiremock` to mock upstream providers.
 
 CCR-Rust enforces source lines of code limits to prevent files from growing into unmanageable monoliths. Configuration: `.sloc-guard.toml`.
 
-| Threshold  | Lines (SLOC) | Action                                 |
-| ---------- | ------------ | -------------------------------------- |
-| Warning    | 600          | Plan a split — file is getting complex |
-| Hard limit | 750          | Must split before merging              |
-| Tests      | 1000         | Test files get more headroom           |
+- **Warning** (600 SLOC): Plan a split — file is getting complex.
+- **Hard limit** (750 SLOC): Must split before merging.
+- **Tests** (1000 SLOC): Test files get more headroom.
 
 **SLOC = source lines only** (comments and blank lines excluded).
 
