@@ -25,6 +25,7 @@ mod dashboard {
 mod frontend {
     // frontend module re-exports are used by downstream consumers
 }
+#[cfg(feature = "gp")]
 mod gp_router {
     pub use ccr_rust::gp_router::*;
 }
@@ -46,6 +47,7 @@ mod transformer {
 
 use crate::config::Config;
 use ccr_rust::debug_capture::DebugCapture;
+#[cfg(feature = "gp")]
 use gp_router::GpRequestRouter;
 use ratelimit::RateLimitTracker;
 use router::AppState;
@@ -340,6 +342,7 @@ async fn run_server(
     metrics::init_persistence(config.persistence(), &ewma_tracker)?;
     let transformer_registry = std::sync::Arc::new(TransformerRegistry::new());
     let ratelimit_tracker = std::sync::Arc::new(RateLimitTracker::new());
+    #[cfg(feature = "gp")]
     let gp_router = if config.router().gp_routing.enabled {
         let tiers = config.backend_tiers();
         Some(Arc::new(GpRequestRouter::new(
@@ -349,6 +352,8 @@ async fn run_server(
     } else {
         None
     };
+    #[cfg(not(feature = "gp"))]
+    let gp_router: Option<()> = None;
 
     // Initialize debug capture if enabled
     let debug_capture = if config.debug_capture().enabled {

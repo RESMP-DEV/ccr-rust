@@ -4,6 +4,7 @@ pub mod config;
 pub mod dashboard;
 pub mod debug_capture;
 pub mod frontend;
+#[cfg(feature = "gp")]
 pub mod gp_router;
 pub mod mcp;
 pub mod metrics;

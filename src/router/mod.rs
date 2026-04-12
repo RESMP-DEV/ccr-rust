@@ -25,6 +25,7 @@ use axum::{
     Json,
 };
 use std::collections::BTreeSet;
+#[cfg(feature = "gp")]
 use std::sync::atomic::Ordering;
 use tracing::{error, info, warn};
 
@@ -168,11 +169,13 @@ pub async fn handle_messages(
         if let Some(ref search_provider) = state.config.router().web_search.search_provider {
             // Prepend search provider as first tier
             ordered.insert(0, (search_provider.clone(), "search".to_string()));
-            pinned_prefix_len = pinned_prefix_len.saturating_add(1);
+            #[allow(unused_assignments)]
+            { pinned_prefix_len = pinned_prefix_len.saturating_add(1); }
             tracing::info!("Web search enabled, prepending {}", search_provider);
         }
     }
 
+    #[cfg(feature = "gp")]
     let gp_plan = state.gp_router.as_ref().map(|gp_router| {
         let active_streams = state.active_streams.load(Ordering::Relaxed);
         gp_router.plan_rerank(
@@ -184,6 +187,7 @@ pub async fn handle_messages(
             pinned_prefix_len,
         )
     });
+    #[cfg(feature = "gp")]
     if let Some(plan) = gp_plan.as_ref() {
         ordered = plan.ordered.clone();
     }
@@ -267,6 +271,7 @@ pub async fn handle_messages(
                         // 429 passthrough is an intentional non-cascading return path,
                         // but it must be tracked as a failed attempt for EWMA scoring.
                         timer.finish_failure();
+                        #[cfg(feature = "gp")]
                         if let (Some(gp_router), Some(plan)) =
                             (state.gp_router.as_ref(), gp_plan.as_ref())
                         {
@@ -282,6 +287,7 @@ pub async fn handle_messages(
                     }
 
                     let attempt_duration = timer.finish_success();
+                    #[cfg(feature = "gp")]
                     if let (Some(gp_router), Some(plan)) =
                         (state.gp_router.as_ref(), gp_plan.as_ref())
                     {
@@ -314,6 +320,7 @@ pub async fn handle_messages(
                     // Note: With 429 pass-through in dispatch, this arm fires
                     // only for edge cases where dispatch still returns RateLimited.
                     timer.finish_failure();
+                    #[cfg(feature = "gp")]
                     if let (Some(gp_router), Some(plan)) =
                         (state.gp_router.as_ref(), gp_plan.as_ref())
                     {
@@ -342,6 +349,7 @@ pub async fn handle_messages(
                 }
                 Err(TryRequestError::Other(e)) => {
                     timer.finish_failure();
+                    #[cfg(feature = "gp")]
                     if let (Some(gp_router), Some(plan)) =
                         (state.gp_router.as_ref(), gp_plan.as_ref())
                     {
