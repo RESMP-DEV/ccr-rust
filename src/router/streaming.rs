@@ -22,9 +22,13 @@ use crate::metrics::{
     increment_active_streams, record_stream_backpressure, record_throughput, record_ttft,
 };
 
+/// A boxed byte stream that both streaming handlers accept.
+pub type BoxByteStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+
 /// Stream response with OpenAI -> Anthropic translation.
 pub async fn stream_response_translated(
-    resp: reqwest::Response,
+    byte_stream: BoxByteStream,
     buffer_size: usize,
     verify_ctx: Option<StreamVerifyCtx>,
     model_name: &str,
@@ -36,7 +40,7 @@ pub async fn stream_response_translated(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(buffer_size);
 
     tokio::spawn(async move {
-        let mut stream = resp.bytes_stream();
+        let mut stream = byte_stream;
         let mut decoder = SseFrameDecoder::new();
         let mut is_first = true;
         let mut accumulated_content = String::new();
@@ -246,7 +250,7 @@ pub async fn stream_response_translated(
 /// Parses Anthropic SSE events (`message_delta` with usage) to track tokens.
 /// Used for Anthropic-protocol providers that may not return token counts.
 pub async fn stream_anthropic_response_with_tracking(
-    resp: reqwest::Response,
+    byte_stream: BoxByteStream,
     buffer_size: usize,
     verify_ctx: StreamVerifyCtx,
     chain: TransformerChain,
@@ -258,7 +262,7 @@ pub async fn stream_anthropic_response_with_tracking(
     let local_estimate = verify_ctx.local_estimate;
 
     tokio::spawn(async move {
-        let mut stream = resp.bytes_stream();
+        let mut stream = byte_stream;
         let mut decoder = SseFrameDecoder::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;

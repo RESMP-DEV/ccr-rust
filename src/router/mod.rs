@@ -10,7 +10,9 @@ mod dispatch;
 use dispatch::*;
 
 mod streaming;
-pub use streaming::{stream_anthropic_response_with_tracking, stream_response_translated};
+pub use streaming::{
+    stream_anthropic_response_with_tracking, stream_response_translated, BoxByteStream,
+};
 
 mod openai_compat;
 pub use openai_compat::handle_chat_completions;

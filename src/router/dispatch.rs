@@ -4,7 +4,9 @@ use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 use tracing::{trace, warn};
 
-use super::streaming::{stream_anthropic_response_with_tracking, stream_response_translated};
+use super::streaming::{
+    stream_anthropic_response_with_tracking, stream_response_translated, BoxByteStream,
+};
 use super::translate_request::translate_request_anthropic_to_openai;
 use super::translate_response::{build_transformer_chain, translate_response_openai_to_anthropic};
 use super::types::*;
@@ -17,6 +19,91 @@ use crate::ratelimit::RateLimitTracker;
 use crate::sse::StreamVerifyCtx;
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
+use futures::StreamExt;
+
+/// Peek at the first chunk of a streaming response to detect error payloads
+/// wrapped in HTTP 200 (e.g. Z.AI returns quota errors as raw JSON in a
+/// `text/event-stream` body).  Returns `Err` if an error is found, or a
+/// `BoxByteStream` with the peeked bytes prepended for normal processing.
+///
+/// Uses a short timeout so that legitimate slow-start streams are not
+/// penalised — error responses arrive near-instantly whereas real model
+/// inference may take seconds for the first token.
+async fn check_stream_for_embedded_error(
+    mut resp: reqwest::Response,
+    tier_name: &str,
+) -> Result<BoxByteStream, TryRequestError> {
+    // Error responses arrive in < 100ms; real TTFT can be seconds.
+    // If we don't get a chunk quickly, assume it's a valid stream and
+    // return it without blocking SSE headers any further.
+    let first_chunk = match tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        resp.chunk(),
+    )
+    .await
+    {
+        Ok(Ok(Some(bytes))) => bytes,
+        Ok(Ok(None)) => return Ok(Box::pin(futures::stream::empty())),
+        Ok(Err(e)) => return Err(TryRequestError::Other(e.into())),
+        Err(_timeout) => {
+            trace!(tier = tier_name, "Stream first-chunk timeout, skipping error peek");
+            return Ok(Box::pin(resp.bytes_stream()));
+        }
+    };
+
+    let text = String::from_utf8_lossy(&first_chunk);
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if json.get("error").is_some() {
+                let msg = json["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error in stream body");
+                let code = json["error"]["code"].as_str().unwrap_or("unknown");
+                warn!(
+                    tier = tier_name,
+                    error_code = code,
+                    "Provider returned error in 200 stream body: {}",
+                    msg
+                );
+                return Err(TryRequestError::Other(anyhow::anyhow!(
+                    "Provider error in 200 stream (code {}): {}",
+                    code,
+                    msg
+                )));
+            }
+        }
+    }
+
+    // Chain the peeked bytes back onto the remaining body.
+    let rest = resp.bytes_stream();
+    let first = futures::stream::once(async move { Ok(first_chunk) });
+    Ok(Box::pin(first.chain(rest)))
+}
+
+/// Check a non-streaming response body for an embedded error in a 200.
+fn check_body_for_embedded_error(body: &[u8], tier_name: &str) -> Result<(), TryRequestError> {
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
+        if json.get("error").is_some() && json.get("content").is_none() {
+            let msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error in response body");
+            let code = json["error"]["code"].as_str().unwrap_or("unknown");
+            warn!(
+                tier = tier_name,
+                error_code = code,
+                "Provider returned error in 200 body: {}",
+                msg
+            );
+            return Err(TryRequestError::Other(anyhow::anyhow!(
+                "Provider error in 200 body (code {}): {}",
+                code,
+                msg
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Extract rate limit information from upstream response headers.
 pub(super) fn extract_rate_limit_headers(
@@ -421,6 +508,10 @@ pub(super) async fn try_request_via_openai_protocol(
     if stream_flag {
         // For streaming, we need to translate OpenAI SSE events to Anthropic SSE.
         let rate_limit_info = extract_rate_limit_headers(&resp);
+
+        // Peek at first chunk to detect errors embedded in 200 streams.
+        let byte_stream = check_stream_for_embedded_error(resp, tier_name).await?;
+
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
             local_estimate,
@@ -430,7 +521,7 @@ pub(super) async fn try_request_via_openai_protocol(
         };
         Ok(
             stream_response_translated(
-                resp,
+                byte_stream,
                 config.sse_buffer_size(),
                 Some(ctx),
                 model_name,
@@ -441,7 +532,6 @@ pub(super) async fn try_request_via_openai_protocol(
     } else {
         // Extract rate limit headers for non-streaming.
         let rate_limit_info = extract_rate_limit_headers(&resp);
-        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
 
         // For non-streaming, translate the full response.
         let resp_status = resp.status().as_u16();
@@ -449,6 +539,13 @@ pub(super) async fn try_request_via_openai_protocol(
             .bytes()
             .await
             .map_err(|e| TryRequestError::Other(e.into()))?;
+
+        // Check for embedded error in 200 body BEFORE recording success,
+        // otherwise a failed request corrupts tier rate-limit state.
+        check_body_for_embedded_error(&body, tier_name)?;
+
+        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+
         let body_str = String::from_utf8_lossy(&body);
 
         // Record capture for non-streaming response
@@ -631,6 +728,10 @@ pub(super) async fn try_request_via_anthropic_protocol(
     if request.stream.unwrap_or(false) {
         // Use streaming token tracking for Anthropic protocol
         let rate_limit_info = extract_rate_limit_headers(&resp);
+
+        // Peek at first chunk to detect errors embedded in 200 streams.
+        let byte_stream = check_stream_for_embedded_error(resp, tier_name).await?;
+
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
             local_estimate,
@@ -640,13 +741,12 @@ pub(super) async fn try_request_via_anthropic_protocol(
         };
 
         let mut response =
-            stream_anthropic_response_with_tracking(resp, config.sse_buffer_size(), ctx, chain)
+            stream_anthropic_response_with_tracking(byte_stream, config.sse_buffer_size(), ctx, chain)
                 .await;
         insert_ccr_tier_header(&mut response, tier_name);
         Ok(response)
     } else {
         let rate_limit_info = extract_rate_limit_headers(&resp);
-        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
 
         let resp_status = resp.status().as_u16();
         let status = reqwest_status_to_axum(resp.status());
@@ -654,6 +754,12 @@ pub(super) async fn try_request_via_anthropic_protocol(
             .bytes()
             .await
             .map_err(|e| TryRequestError::Other(e.into()))?;
+
+        // Check for embedded error before recording success.
+        check_body_for_embedded_error(&body, tier_name)?;
+
+        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+
         let body_str = String::from_utf8_lossy(&body);
 
         // Record capture for non-streaming Anthropic response
