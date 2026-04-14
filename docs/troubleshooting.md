@@ -165,9 +165,8 @@ curl -s -N http://127.0.0.1:3456/v1/messages \
 
 **Detection**:
 
-```bash
-tail -500 /tmp/ccr-rust.log | grep -E "Direct routing|moved to front"
-```
+Search the terminal or service-manager logs where `ccr-rust` is running for
+`Direct routing` or `moved to front`.
 
 If you see lines like:
 
@@ -189,17 +188,18 @@ This confirms the client is requesting a specific tier.
 
 This forces all requests to start from tier 0, regardless of what model the client specifies.
 
-**Restart required** after changing config:
+**Restart required** after changing config. If you run CCR-Rust in the
+foreground, stop it with `Ctrl+C` and start it again:
 
 ```bash
-ccr-rust stop && ccr-rust start
+ccr-rust start
 ```
 
 ## Debugging
 
 ```bash
 # Enable debug logging
-RUST_LOG=ccr_rust=debug,tower_http=debug ./ccr-rust
+RUST_LOG=ccr_rust=debug,tower_http=debug ccr-rust start
 
 # Check metrics
 curl localhost:3456/metrics | grep ccr_

@@ -27,7 +27,8 @@ cargo install --path . --force
 ### 2. Create a config
 
 ```bash
-ccr-rust install-config   # writes ~/.claude-code-router/config.json
+mkdir -p ~/.claude-code-router
+cp config.example.json ~/.claude-code-router/config.json
 ```
 
 Edit the config to add your provider API keys. See [Configuration guide](docs/configuration.md) for the full schema.
@@ -99,7 +100,7 @@ Rate limiting is handled with transparency for orchestrators and clients:
 - **5xx/timeout errors** cascade to the next tier automatically. The client only sees an error if all tiers are exhausted.
 - **Informational headers** (`X-RateLimit-Remaining: 0` on 200 responses) trigger proactive tier-skipping by default. Set `"honor_ratelimit_headers": false` per provider for those (like Z.AI) that send these as informational warnings without actual enforcement.
 
-This design works well with external orchestrators (e.g., AlphaHENG's AdaptiveRouter) that need accurate rate-limit signal for intelligent routing. Standalone users should implement client-side retry logic for 429s.
+This design works well with external orchestrators and retry-aware clients that need accurate rate-limit signal for intelligent routing. Standalone users should implement client-side retry logic for 429s when they want automatic recovery from rate limits.
 
 ## Observability
 
@@ -107,8 +108,11 @@ This design works well with external orchestrators (e.g., AlphaHENG's AdaptiveRo
 # Prometheus metrics
 curl http://localhost:3456/metrics
 
-# Live TUI dashboard (auto-connects to hub after `source scripts/connect-hub.sh`)
+# Live TUI dashboard
 ccr-rust dashboard
+
+# Remote dashboard target via environment
+CCR_DASHBOARD_HOST=10.0.0.5 CCR_DASHBOARD_PORT=3456 ccr-rust dashboard
 ```
 
 Tracks: token counts (in/out), latencies (p50/p90/p99), provider success rates, circuit-breaker states, cost per tier.

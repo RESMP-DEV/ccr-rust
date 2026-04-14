@@ -71,8 +71,11 @@ Add the provider to `~/.claude-code-router/config.json`:
 
 ### 4. Restart CCR-Rust
 
+Restart your running CCR-Rust process so it reloads the updated config. If you
+run it in the foreground, stop it with `Ctrl+C` and start it again:
+
 ```bash
-./scripts/ccr-rust.sh stop && ./scripts/ccr-rust.sh start
+ccr-rust start
 ```
 
 ### 5. Verify Integration
@@ -211,10 +214,8 @@ If requests fall through to other tiers instead of Qwen:
     {"model": "qwen,qwen3-coder-next", ...}
    ```
 
-3. Check logs for routing decisions:
-   ```bash
-   grep "ccr-qwen" /tmp/ccr-rust.log | tail -5
-   ```
+3. Check the terminal or service logs where `ccr-rust` is running for
+    `ccr-qwen` routing decisions.
 
 ### Quota Exceeded
 

@@ -61,28 +61,8 @@
             },
             "tier_name": "ccr-qwen"
         },
-        {
-            "name": "wafer",
-            "_comment": "Wafer Unlimited — optimized Qwen3.5-397B-A17B. Flat rate, no per-token cost.",
-            "api_base_url": "https://pass.wafer.ai/v1",
-            "api_key": "${WAFER_API_KEY}",
-            "models": [
-                "Qwen3.5-397B-A17B"
-            ],
-            "transformer": {
-                "use": [
-                    "anthropic",
-                    [
-                        "toolcompress",
-                        {
-                            "level": "medium"
-                        }
-                    ],
-                    "output_compress"
-                ]
-            },
-            "tier_name": "ccr-wafer"
-        }
+
+        
     ],
     "Router": {
         "default": "wafer,Qwen3.5-397B-A17B",

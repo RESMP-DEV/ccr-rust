@@ -132,7 +132,7 @@ AnthropicContentBlock::Thinking { .. } => { /* emit thinking */ }
 | ---------------------------------------------------------------------------- | ----------------------------------- | --------------------------------------------------------------- |
 | `ede_diagnostic result_type=user last_content_type=n/a stop_reason=tool_use` | Pseudo-SSE dropping tool_use blocks | HTTP capture vs task capture comparison                         |
 | `model not progressing for 300s`                                             | Backend timeout or stall            | Check ccr-rust logs + backend health                            |
-| All tasks route to lowest tier                                               | Client caching model field          | `grep "Direct routing" /tmp/ccr-rust.log`                       |
+| All tasks route to lowest tier                                               | Client caching model field          | Search your ccr-rust logs for `Direct routing`                  |
 | 429 on all requests                                                          | Provider rate limit                 | `curl localhost:3456/metrics \| grep rate_limit`                |
 | Exit code 1, events=[init, result] (no assistant)                            | Response conversion failure         | HTTP capture shows valid response but SSE conversion mangled it |
 | Exit code 1, events=[init, api_retry×N, result]                              | API error after retries             | Check `error_status` in api_retry events                        |

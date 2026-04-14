@@ -27,15 +27,22 @@ The savings compound: `toolcompress` reduces input tokens per request (20+ tools
 
 ## Defaults
 
-The config template (`configs/ccr-rust.config.template.json`, installed via `./scripts/ccr-rust.sh install-config`) ships at the **Recommended** level:
+The starter config (`config.example.json`) demonstrates these transformers, but usage is intentionally provider-specific. A practical starting point is the **Recommended** level:
 
-| Transformer | Default | Providers | Notes |
-|------------|---------|-----------|-------|
-| `toolcompress` (medium) | **Enabled** | All providers | Truncates tool descriptions to 200 chars, strips property descriptions |
-| `output_compress` | **Enabled** | All providers | Pattern-based compression of build logs, test output, grep results |
-| `thinktag` | **Enabled** | Kimi only | Strips standard `<think>` blocks from reasoning model output |
-| `kimi` | **Enabled** | Kimi only | Extracts Unicode think tokens (◁think▷/◁/think▷) into `reasoning_content` |
-| `enhancetool` | **Enabled** | Kimi only | Adds `cache_control` annotations. No-op for Kimi's server-side caching, but harmless. Included for Anthropic protocol completeness. |
+- enable `toolcompress` (medium) on providers with large tool catalogs or tight token budgets,
+- enable `output_compress` for agent workloads that return verbose tool output,
+- enable `thinktag` on reasoning-capable models when you want to discard visible thinking output,
+- add provider-specific transformers such as `kimi` only where required.
+
+Some deployments choose to disable compression on flat-rate or fidelity-sensitive tiers; that is an operator preference, not a CCR-Rust requirement.
+
+| Transformer | Suggested default | Applies to | Notes |
+|------------|-------------------|------------|-------|
+| `toolcompress` (medium) | **Recommended** | Providers with large tool catalogs | Truncates tool descriptions to 200 chars, strips property descriptions |
+| `output_compress` | **Recommended** | Agent workloads with verbose tool output | Pattern-based compression of build logs, test output, grep results |
+| `thinktag` | **Optional** | Reasoning-capable models | Strips standard `<think>` blocks from reasoning model output |
+| `kimi` | **Optional** | Kimi only | Extracts Unicode think tokens (◁think▷/◁/think▷) into `reasoning_content` |
+| `enhancetool` | **Optional** | Anthropic-compatible tool workflows | Adds `cache_control` annotations where the upstream may honor them |
 
 ### Provider prompt caching landscape
 
@@ -62,7 +69,7 @@ Although you can't control caching via `cache_control`, you can improve hit rate
 
 ### Upgrading existing installs
 
-If you installed CCR-Rust before this change, your `~/.claude-code-router/config.json` won't have these transformers. Either re-run `./scripts/ccr-rust.sh install-config` (overwrites config) or add them manually:
+If your current `~/.claude-code-router/config.json` predates these transformers, either copy a fresh `config.example.json` into place and re-apply your API keys/routes, or add them manually:
 
 ```json
 "transformer": {
@@ -74,10 +81,10 @@ If you installed CCR-Rust before this change, your `~/.claude-code-router/config
 }
 ```
 
-**Kimi provider changes:** The template now includes the `kimi` transformer
-(for Unicode think-token extraction), `enhancetool`, and `extra_headers` for
-`User-Agent` forwarding. If your existing config has a `kimi` provider, add
-these manually or re-run `./scripts/ccr-rust.sh install-config`.
+**Kimi provider note:** If you add a `kimi` provider, consider the `kimi`
+transformer (for Unicode think-token extraction), `enhancetool`, and any
+`extra_headers` you need for downstream client identification. Add them
+manually in your provider config.
 
 ## Output Compression
 

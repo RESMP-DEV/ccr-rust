@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   normalized error body (`type: "rate_limit_error"`, `code: "rate_limited"`) and upstream
   headers intact, plus an `x-ccr-tier` header identifying which tier was rate-limited.
   Previously, ccr-rust silently cascaded to the next tier internally. This change enables
-  external orchestrators (like AlphaHENG's AdaptiveRouter) to make informed routing decisions
-  with accurate rate-limit signal. OSS users relying on the internal cascade should implement
+  external orchestrators and retry-aware clients to make informed routing decisions with
+  accurate rate-limit signal. OSS users relying on the internal cascade should implement
   client-side retry logic or configure their proxy to retry on 429.
 
 - **`honor_ratelimit_headers` default changed to `true`** — Per-provider setting now defaults

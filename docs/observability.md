@@ -99,10 +99,7 @@ CCR-Rust includes an interactive dashboard for real-time monitoring:
 ```bash
 ccr-rust dashboard                                # localhost:3456
 ccr-rust dashboard --host 10.0.0.5 --port 3456    # remote server
-
-# Hub mode (auto-connects via env vars after sourcing connect-hub.sh):
-source scripts/connect-hub.sh
-ccr-rust dashboard                                # connects to hub, no flags needed
+CCR_DASHBOARD_HOST=10.0.0.5 CCR_DASHBOARD_PORT=3456 ccr-rust dashboard
 ```
 
 The dashboard reads `CCR_DASHBOARD_HOST` and `CCR_DASHBOARD_PORT` environment variables,

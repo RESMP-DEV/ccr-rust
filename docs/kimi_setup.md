@@ -5,9 +5,8 @@ native Anthropic protocol at `api.kimi.com/coding/v1`.
 
 ## Prerequisites
 
-- ccr-rust running (`./scripts/ccr-rust.sh status`)
+- ccr-rust running (`ccr-rust status`)
 - Moonshot API key (`KIMI_API_KEY`)
-- Claude Code CLI installed (ccr-kimi routes through it)
 
 ## Configuration
 
@@ -32,7 +31,7 @@ Export your key and start ccr-rust:
 
 ```bash
 export KIMI_API_KEY="your-moonshot-api-key"
-./scripts/ccr-rust.sh start
+ccr-rust start
 ```
 
 ## Verification
@@ -64,6 +63,12 @@ curl http://127.0.0.1:3456/v1/latencies
 
 ## How ccr-kimi Integrates with Claude Code
 
-Claude Code CLI routes through ccr-rust with `ANTHROPIC_BASE_URL` overridden
-to `https://api.kimi.com/coding/`. Kimi checks `User-Agent` for coding agent
-identity, and Claude Code natively passes this check.
+Point Claude Code at your local CCR-Rust instance:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:3456
+claude
+```
+
+CCR-Rust then routes requests to the configured `kimi` provider using the
+native Anthropic protocol.
