@@ -43,6 +43,11 @@ fn parse_sse_frames(payload: &str) -> Vec<(Option<String>, String)> {
     frames
 }
 
+fn looks_like_sse_payload(payload: &str) -> bool {
+    let trimmed = payload.trim_start();
+    trimmed.starts_with("event:") || trimmed.starts_with("data:")
+}
+
 pub(super) fn decode_request_body(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, String> {
     let content_encoding = headers
         .get(axum::http::header::CONTENT_ENCODING)
@@ -470,7 +475,21 @@ async fn convert_openai_json_response_to_responses(response: Response) -> Respon
 
     let openai_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) => value,
-        Err(_) => return Response::from_parts(parts, Body::from(body_bytes)),
+        Err(_) => {
+            // Defensive fallback: some upstream paths can still return SSE here
+            // (e.g. force-non-streaming mismatches). Convert it instead of
+            // passing through Anthropic/OpenAI event payloads to Responses clients.
+            let payload = String::from_utf8_lossy(&body_bytes);
+            if looks_like_sse_payload(&payload) {
+                parts.headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("text/event-stream"),
+                );
+                parts.status = StatusCode::OK;
+                return Response::from_parts(parts, Body::from(convert_sse_payload_to_responses(&payload)));
+            }
+            return Response::from_parts(parts, Body::from(body_bytes));
+        }
     };
 
     if parts.status != StatusCode::OK {
@@ -546,10 +565,10 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
         }
     };
 
-    let mut output = String::new();
     let payload = String::from_utf8_lossy(&body_bytes);
 
     if parts.status != StatusCode::OK {
+        let mut output = String::new();
         // Check if this is a rate limit error (429)
         let is_rate_limit = parts.status == StatusCode::TOO_MANY_REQUESTS;
         let retry_after = parts
@@ -593,6 +612,17 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
         return Response::from_parts(parts, Body::from(output));
     }
 
+    let output = convert_sse_payload_to_responses(&payload);
+
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    parts.status = StatusCode::OK;
+    Response::from_parts(parts, Body::from(output))
+}
+
+fn convert_sse_payload_to_responses(payload: &str) -> String {
     #[derive(Default)]
     struct ToolAccum {
         id: String,
@@ -601,6 +631,7 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
         added: bool,
     }
 
+    let mut output = String::new();
     let mut response_id = "resp_stream".to_string();
     let mut created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -614,7 +645,7 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
     let mut tools: std::collections::BTreeMap<usize, ToolAccum> = std::collections::BTreeMap::new();
     let mut usage = map_openai_usage_to_responses_usage(&serde_json::json!({}));
 
-    for (_event_type, data) in parse_sse_frames(&payload) {
+    for (event_type, data) in parse_sse_frames(payload) {
         if data.trim() == "[DONE]" {
             break;
         }
@@ -624,6 +655,7 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
             Err(_) => continue,
         };
 
+        // OpenAI chunk metadata
         if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
             response_id = id.to_string();
         }
@@ -632,6 +664,28 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
         }
         if let Some(m) = chunk.get("model").and_then(|v| v.as_str()) {
             model = m.to_string();
+        }
+
+        // Anthropic message_start metadata fallback
+        if event_type.as_deref() == Some("message_start")
+            || chunk.get("type").and_then(|v| v.as_str()) == Some("message_start")
+        {
+            if let Some(msg) = chunk.get("message") {
+                if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
+                    response_id = id.to_string();
+                }
+                if let Some(m) = msg.get("model").and_then(|v| v.as_str()) {
+                    model = m.to_string();
+                }
+                if let Some(u) = msg.get("usage") {
+                    usage = map_openai_usage_to_responses_usage(&serde_json::json!({
+                        "prompt_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "completion_tokens": u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "total_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                            + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                    }));
+                }
+            }
         }
 
         if !created_sent {
@@ -655,39 +709,21 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
             usage = map_openai_usage_to_responses_usage(u);
         }
 
+        // OpenAI chunk path
         let choice = chunk
             .get("choices")
             .and_then(|v| v.as_array())
             .and_then(|v| v.first());
-        let Some(choice) = choice else {
-            continue;
-        };
 
-        let delta = choice.get("delta").cloned().unwrap_or_default();
+        if let Some(choice) = choice {
+            let delta = choice.get("delta").cloned().unwrap_or_default();
 
-        if delta
-            .get("role")
-            .and_then(|v| v.as_str())
-            .is_some_and(|r| r == "assistant")
-            && !message_item_added
-        {
-            let added = serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {
-                    "id": format!("msg_{}", response_id),
-                    "type": "message",
-                    "role": "assistant",
-                    "content": []
-                }
-            });
-            output.push_str("event: response.output_item.added\ndata: ");
-            output.push_str(&added.to_string());
-            output.push_str("\n\n");
-            message_item_added = true;
-        }
-
-        if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
-            if !message_item_added {
+            if delta
+                .get("role")
+                .and_then(|v| v.as_str())
+                .is_some_and(|r| r == "assistant")
+                && !message_item_added
+            {
                 let added = serde_json::json!({
                     "type": "response.output_item.added",
                     "item": {
@@ -703,74 +739,155 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
                 message_item_added = true;
             }
 
-            message_text.push_str(text);
-            let delta_event = serde_json::json!({
-                "type": "response.output_text.delta",
-                "delta": text
-            });
-            output.push_str("event: response.output_text.delta\ndata: ");
-            output.push_str(&delta_event.to_string());
-            output.push_str("\n\n");
-        }
-
-        if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-            reasoning_text.push_str(reasoning);
-            let delta_event = serde_json::json!({
-                "type": "response.reasoning_text.delta",
-                "delta": reasoning,
-                "content_index": 0
-            });
-            output.push_str("event: response.reasoning_text.delta\ndata: ");
-            output.push_str(&delta_event.to_string());
-            output.push_str("\n\n");
-        }
-
-        if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
-            for tool_call in tool_calls {
-                let index = tool_call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let entry = tools.entry(index).or_default();
-
-                if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
-                    entry.id = id.to_string();
-                }
-                if let Some(name) = tool_call
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|v| v.as_str())
-                {
-                    entry.name = name.to_string();
-                }
-                if let Some(args) = tool_call
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|v| v.as_str())
-                {
-                    entry.arguments.push_str(args);
-                }
-
-                if !entry.added && (!entry.id.is_empty() || !entry.name.is_empty()) {
-                    if entry.id.is_empty() {
-                        entry.id = format!("call_{}", index);
-                    }
-                    if entry.name.is_empty() {
-                        entry.name = "tool".to_string();
-                    }
+            if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
+                if !message_item_added {
                     let added = serde_json::json!({
                         "type": "response.output_item.added",
                         "item": {
-                            "id": entry.id,
-                            "type": "function_call",
-                            "call_id": entry.id,
-                            "name": entry.name,
-                            "arguments": entry.arguments
+                            "id": format!("msg_{}", response_id),
+                            "type": "message",
+                            "role": "assistant",
+                            "content": []
                         }
                     });
                     output.push_str("event: response.output_item.added\ndata: ");
                     output.push_str(&added.to_string());
                     output.push_str("\n\n");
-                    entry.added = true;
+                    message_item_added = true;
+                }
+
+                message_text.push_str(text);
+                let delta_event = serde_json::json!({
+                    "type": "response.output_text.delta",
+                    "delta": text
+                });
+                output.push_str("event: response.output_text.delta\ndata: ");
+                output.push_str(&delta_event.to_string());
+                output.push_str("\n\n");
+            }
+
+            if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                reasoning_text.push_str(reasoning);
+                let delta_event = serde_json::json!({
+                    "type": "response.reasoning_text.delta",
+                    "delta": reasoning,
+                    "content_index": 0
+                });
+                output.push_str("event: response.reasoning_text.delta\ndata: ");
+                output.push_str(&delta_event.to_string());
+                output.push_str("\n\n");
+            }
+
+            if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                for tool_call in tool_calls {
+                    let index = tool_call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let entry = tools.entry(index).or_default();
+
+                    if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
+                        entry.id = id.to_string();
+                    }
+                    if let Some(name) = tool_call
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                    {
+                        entry.name = name.to_string();
+                    }
+                    if let Some(args) = tool_call
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|v| v.as_str())
+                    {
+                        entry.arguments.push_str(args);
+                    }
+
+                    if !entry.added && (!entry.id.is_empty() || !entry.name.is_empty()) {
+                        if entry.id.is_empty() {
+                            entry.id = format!("call_{}", index);
+                        }
+                        if entry.name.is_empty() {
+                            entry.name = "tool".to_string();
+                        }
+                        let added = serde_json::json!({
+                            "type": "response.output_item.added",
+                            "item": {
+                                "id": entry.id,
+                                "type": "function_call",
+                                "call_id": entry.id,
+                                "name": entry.name,
+                                "arguments": entry.arguments
+                            }
+                        });
+                        output.push_str("event: response.output_item.added\ndata: ");
+                        output.push_str(&added.to_string());
+                        output.push_str("\n\n");
+                        entry.added = true;
+                    }
                 }
             }
+            continue;
+        }
+
+        // Anthropic event fallback path (when OpenAI conversion did not happen upstream)
+        let event_type = event_type
+            .or_else(|| chunk.get("type").and_then(|v| v.as_str()).map(str::to_string));
+        match event_type.as_deref() {
+            Some("content_block_delta") => {
+                if !message_item_added {
+                    let added = serde_json::json!({
+                        "type": "response.output_item.added",
+                        "item": {
+                            "id": format!("msg_{}", response_id),
+                            "type": "message",
+                            "role": "assistant",
+                            "content": []
+                        }
+                    });
+                    output.push_str("event: response.output_item.added\ndata: ");
+                    output.push_str(&added.to_string());
+                    output.push_str("\n\n");
+                    message_item_added = true;
+                }
+
+                if let Some(delta) = chunk.get("delta") {
+                    if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                        if !text.is_empty() {
+                            message_text.push_str(text);
+                            let delta_event = serde_json::json!({
+                                "type": "response.output_text.delta",
+                                "delta": text
+                            });
+                            output.push_str("event: response.output_text.delta\ndata: ");
+                            output.push_str(&delta_event.to_string());
+                            output.push_str("\n\n");
+                        }
+                    }
+                    if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
+                        if !thinking.is_empty() {
+                            reasoning_text.push_str(thinking);
+                            let delta_event = serde_json::json!({
+                                "type": "response.reasoning_text.delta",
+                                "delta": thinking,
+                                "content_index": 0
+                            });
+                            output.push_str("event: response.reasoning_text.delta\ndata: ");
+                            output.push_str(&delta_event.to_string());
+                            output.push_str("\n\n");
+                        }
+                    }
+                }
+            }
+            Some("message_delta") => {
+                if let Some(u) = chunk.get("usage") {
+                    usage = map_openai_usage_to_responses_usage(&serde_json::json!({
+                        "prompt_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "completion_tokens": u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "total_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                            + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                    }));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -850,12 +967,7 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
     output.push_str(&completed.to_string());
     output.push_str("\n\n");
 
-    parts.headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("text/event-stream"),
-    );
-    parts.status = StatusCode::OK;
-    Response::from_parts(parts, Body::from(output))
+    output
 }
 
 /// Handle OpenAI Responses API requests.

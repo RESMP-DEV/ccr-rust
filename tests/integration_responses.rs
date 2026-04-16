@@ -1050,3 +1050,90 @@ async fn test_responses_stream_maps_errors_to_response_failed() {
         .is_some());
     assert_eq!(failed.data["response"]["error"]["code"], "upstream_error");
 }
+
+#[tokio::test]
+async fn test_responses_stream_recovers_when_upstream_sends_anthropic_events() {
+    if skip_if_localhost_bind_unavailable(
+        "test_responses_stream_recovers_when_upstream_sends_anthropic_events",
+    ) {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    let anthropic_sse = [
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_passthrough\",\"model\":\"test-model\",\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ]
+    .join("");
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(anthropic_sse),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config_json = make_test_config(&mock_server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let request = json!({
+        "model": "mock,test-model",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Hello"}]
+        }],
+        "stream": true
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    let events = parse_sse_events(&text);
+
+    assert!(
+        events.iter().any(|e| e.event == "response.created"),
+        "expected response.created event"
+    );
+
+    let completed = events
+        .iter()
+        .find(|e| e.event == "response.completed")
+        .expect("expected response.completed event");
+    assert_eq!(completed.data["response"]["status"], "completed");
+
+    let joined_deltas = events
+        .iter()
+        .filter(|e| e.event == "response.output_text.delta")
+        .filter_map(|e| e.data["delta"].as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(joined_deltas, "Hello");
+}
