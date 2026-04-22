@@ -291,4 +291,13 @@ async fn valid_200_response_not_treated_as_error() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resp_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(
+        resp_json.get("content").is_some(),
+        "Valid response should contain translated content"
+    );
 }
