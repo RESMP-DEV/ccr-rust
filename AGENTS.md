@@ -1,247 +1,83 @@
-# CCR-Rust Agent Instructions
+# CCR-Rust — Repository Guide
 
-> `CLAUDE.md` is a symlink to this file. Both Claude Code and Codex read it automatically.
+> `CLAUDE.md` is a symlink to this file. Use this as the canonical local guide.
 
-## Set Up from Scratch
+## Project Scope
 
-Prerequisites: Rust toolchain (`rustup`), at least one LLM API key.
+CCR-Rust is a multi-protocol LLM router for Claude Code, Codex, OpenAI-compatible clients, and optional MCP aggregation. It handles protocol translation, transformer pipelines, routing, metrics, and streaming.
 
-```bash
-# 1. Build
-cargo build --release
-cargo install --path . --force
+## Environment and Setup
 
-# 2. Create config directory and install the example config
-mkdir -p ~/.claude-code-router
-cp config.example.json ~/.claude-code-router/config.json
+Use the Rust-native workflow.
 
-# 3. Add your API keys (edit the file or create a .env)
-cat > ~/.claude-code-router/.env << 'EOF'
-DEEPSEEK_API_KEY=sk-your-deepseek-key
-MINIMAX_API_KEY=your-minimax-key
-OPENROUTER_API_KEY=sk-or-your-openrouter-key
-EOF
+- `cargo check`
+- `cargo fmt`
+- `cargo clippy`
+- `cargo test`
+- `cargo build --release`
 
-# 4. Start the router
-ccr-rust start
+After code changes, run `cargo install --path . --force` so the installed CLI binary stays in sync with the freshly built one.
 
-# 5. Point Claude Code at CCR
-export ANTHROPIC_BASE_URL=http://127.0.0.1:3456
-claude
-```
+For a clean local setup:
 
-The config uses `${ENV_VAR}` placeholders. CCR-Rust loads `.env` files from the current directory and `~/.claude-code-router/.env` automatically.
+- copy `config.example.json` to `~/.claude-code-router/config.json`,
+- add API keys via environment-backed placeholders,
+- start the router with `ccr-rust start`,
+- verify with `ccr-rust status`, `ccr-rust validate`, or `ccr-rust dashboard`.
 
-**Verify it works:**
+## Repository Layout
 
-```bash
-ccr-rust status     # Health check
-ccr-rust validate   # Config validation
-ccr-rust dashboard  # Live TUI dashboard
-```
+Important files and areas:
 
-## What This Is
+- `src/main.rs` — CLI entry point.
+- `src/config.rs` — configuration parsing and provider protocol definitions.
+- `src/router/` — HTTP handlers, dispatch, request translation, response translation, and streaming.
+- `src/frontend/` — client-format normalization.
+- `src/transform/` and `src/transformer.rs` — transformer implementations and registry plumbing.
+- `src/metrics/` — Prometheus metrics and persistence.
+- `src/mcp/` — MCP server and tool-catalog handling.
+- `src/ratelimit.rs` — provider backoff logic.
+- `tests/` — integration coverage.
 
-CCR-Rust is a multi-protocol AI proxy (~20K lines of Rust) that routes requests from Claude Code, Codex, and OpenAI-compatible clients through multiple LLM providers with automatic failover. It handles protocol translation, request/response transformation, MCP tool aggregation, token accounting, and streaming.
+## Working Rules
 
-## Build & Test
+Keep these invariants intact:
 
-```bash
-cargo check          # Type check (fast)
-cargo clippy         # Lint
-cargo fmt            # Format
-cargo test           # Run all tests
-cargo build --release  # Release build (LTO enabled, slow)
-```
+- Standard OpenAI- or Anthropic-compatible upstreams should be added through config first; only add code when a provider truly needs normalization or a new protocol.
+- If you add a transformer, register it in both registry construction paths.
+- Keep frontend detection and serialization aligned when adding client-specific behavior.
+- Use environment-backed config placeholders instead of embedding secrets.
+- Preserve the existing rate-limit and retry model unless the change is explicitly about routing semantics.
 
-After any code change, sync the CLI binary:
+## Common Change Patterns
 
-```bash
-cargo install --path . --force
-```
+For new providers:
 
-This keeps `~/.cargo/bin/ccr-rust` (used by `ccr-rust dashboard`, etc.) in sync with `target/release/ccr-rust` (used by `ccr-rust start`).
+- use config-only wiring when the upstream speaks a supported protocol,
+- add a transformer only when request or response normalization is required,
+- and add a new protocol variant only when the upstream cannot fit the current transport model.
 
-## Architecture
+For new CLI commands:
 
-### Request Flow
+- add the command enum variant,
+- hook it into the top-level dispatch,
+- and keep command behavior consistent with the existing subcommand style.
 
-```
-Client Request
-  -> Frontend detection (Claude Code or Codex)
-  -> Parse into InternalRequest
-  -> Build transformer chain from provider config
-  -> Apply request transformers
-  -> Route to provider (OpenAI or Anthropic protocol)
-  -> On failure: record EWMA penalty, try next tier
-  -> Apply response transformers
-  -> Serialize to client's format
-  -> Return response
-```
+## Validation Expectations
 
-### Key Files
+Run at least the relevant unit or integration tests for the area you changed. For routing, translation, or config work, `cargo test` is usually the minimum acceptable validation path.
 
-- `src/main.rs` — CLI entry point, 8 subcommands (clap)
-- `src/config.rs` — Config parsing, `Provider`, `RouterConfig`, `ProviderProtocol` enum
-- `src/router/mod.rs` — HTTP handlers (`handle_messages`, `handle_preset_messages`, `list_models`)
-- `src/router/types.rs` — `AnthropicRequest`, `AppState`, `TryRequestArgs`, shared types
-- `src/router/dispatch.rs` — `try_request`, protocol dispatch, header building
-- `src/router/streaming.rs` — SSE streaming + pseudo-streaming response translation
-- `src/router/openai_compat.rs` — `/v1/chat/completions` handler
-- `src/router/responses_api.rs` — `/v1/responses` handler
-- `src/router/translate_request.rs` — Anthropic→OpenAI request translation
-- `src/router/translate_response.rs` — OpenAI→Anthropic response translation
-- `src/routing.rs` — EWMA latency tracker per tier
-- `src/transformer.rs` — `Transformer` trait, common transformer impls
-- `src/transform/registry.rs` — `TransformerRegistry` — maps names to transformer instances
-- `src/frontend/mod.rs` — `Frontend` trait, `InternalRequest`/`InternalResponse`
-- `src/frontend/codex.rs` — OpenAI format parsing/serialization
-- `src/frontend/claude_code.rs` — Anthropic format parsing/serialization
-- `src/metrics/mod.rs` — Prometheus metric definitions, recording functions
-- `src/metrics/handlers.rs` — HTTP handler endpoints (`/metrics`, `/usage`, `/latencies`)
-- `src/metrics/persistence.rs` — Redis persistence for metrics (save/restore)
-- `src/mcp/server.rs` — MCP JSON-RPC server
-- `src/mcp/catalog.rs` — Tool catalog aggregation and compression
-- `src/sse.rs` — SSE frame parser/serializer
-- `src/debug_capture.rs` — Request/response capture to disk
-- `src/ratelimit.rs` — Rate limit state, exponential backoff
-
-### Protocols
-
-The `ProviderProtocol` enum (`config.rs`) determines how requests are sent upstream:
-
-- **`Openai`** (default) — POST to `{api_base_url}/chat/completions`. Uses `Authorization: Bearer {api_key}`. Most providers use this (including Gemini via OpenAI-compatible API).
-- **`Anthropic`** — POST to `{api_base_url}/messages`. Uses `x-api-key` header. For Kimi, MiniMax when using native Anthropic protocol.
-
-### Transformer System
-
-Transformers implement the `Transformer` trait (`transformer.rs`):
-
-```rust
-pub trait Transformer: Send + Sync {
-    fn transform_request(&self, request: Value) -> Result<Value>;
-    fn transform_response(&self, response: Value) -> Result<Value>;
-    fn name(&self) -> &str;
-}
-```
-
-Registered in **both** `TransformerRegistry::new()` locations:
-
-- `transformer/mod.rs` — the runtime registry used by `AppState`
-- `transform/registry.rs` — the factory-based registry
-
-To add a new transformer:
-
-1. Create `src/transform/your_provider.rs` implementing `Transformer`
-2. Add `pub mod your_provider;` to `src/transform/mod.rs`
-3. Register in **both** `transformer/mod.rs::TransformerRegistry::new()` and `transform/registry.rs::TransformerRegistry::new()`
-4. Reference in config: `"transformer": { "use": ["your_provider"] }`
-
-Existing transformers: anthropic, anthropic-to-openai, deepseek, openai-to-anthropic, minimax, openrouter, tooluse, identity, reasoning, enhancetool, thinktag, glm, kimi.
-
-### Frontend System
-
-Frontends normalize between client formats. The `Frontend` trait (`frontend/mod.rs`) handles:
-
-- Request parsing into `InternalRequest`
-- Response serialization from `InternalResponse`
-- Stream chunk formatting
-
-Detection logic is in `frontend/detection.rs` — checks headers and body shape.
-
-## Adding a New Provider
-
-**If the provider uses standard OpenAI or Anthropic API format**: config-only, no code changes.
-
-```json
-{
-  "name": "new_provider",
-  "api_base_url": "https://api.example.com/v1",
-  "api_key": "${NEW_PROVIDER_API_KEY}",
-  "models": ["model-name"],
-  "tier_name": "ccr-new"
-}
-```
-
-Set `"protocol": "anthropic"` if the provider uses Anthropic's Messages API natively. Otherwise it defaults to OpenAI.
-
-**If the provider needs request/response normalization**: add a transformer (see Transformer System above).
-
-**If the provider uses a completely new protocol**: add a variant to `ProviderProtocol` in `config.rs`, add a handler function in `router/dispatch.rs`, and add a match arm in the protocol dispatch logic.
-
-## Adding a New CLI Command
-
-1. Add a variant to the clap `Commands` enum in `main.rs`
-2. Add a match arm in the `main()` function
-3. Implement the command logic
-
-## Common Patterns
-
-### Config Environment Variables
-
-API keys in config support `${ENV_VAR}` syntax. CCR-Rust loads `.env` from the current directory and `~/.claude-code-router/.env`, resolving placeholders at startup.
-
-### Tier Route Format
-
-Tiers are specified as `"provider_name,model_id"` strings. Resolution splits on comma and looks up the provider by name.
-
-### Error Handling
-
-- Use `anyhow::Result` for fallible operations
-- HTTP handlers return appropriate status codes (the router maps provider errors to client-facing errors)
-- Rate limit 429s trigger exponential backoff per tier (`ratelimit.rs`)
-
-### Metrics
-
-Add new metrics in `metrics/mod.rs` using `lazy_static!` + prometheus macros. Existing patterns:
-
-- `IntCounterVec` for counts by label (tier, reason)
-- `HistogramVec` for distributions (latency buckets)
-- `IntGauge` for current values (active streams)
-
-## Testing
-
-Tests are in `/tests/` (integration) and inline `#[cfg(test)]` modules.
-
-```bash
-cargo test                           # All tests
-cargo test --test integration_codex  # Specific integration test
-cargo test -- --nocapture            # Show println output
-```
-
-Integration tests use `wiremock` to mock upstream providers.
-
-## Config Files
-
-- `config.example.json` — Starter template — copy to `~/.claude-code-router/config.json`
-- `config.gemini.json` — Multi-backend config with Gemini
-- `~/.claude-code-router/config.json` — Deployed config (not in repo)
-- `~/.claude-code-router/.env` — API keys loaded at startup
+Integration tests use mocked upstreams, so prefer updating those over inventing ad hoc manual checks.
 
 ## Pitfalls
 
-- **Binary sync**: After `cargo build --release`, always run `cargo install --path . --force`. The server uses `target/release/ccr-rust` but CLI commands like `dashboard` and `version` use `~/.cargo/bin/ccr-rust`. If these diverge, behavior is inconsistent.
-- **Transformer ordering**: Transformers apply in the order listed in `"use": [...]`. For providers that need both protocol translation AND provider-specific normalization, protocol translation (`"anthropic"`) typically goes first.
-- **Streaming vs non-streaming**: `forceNonStreaming: true` is recommended for agent workloads. Interactive use should leave it `false`.
-- **MCP compression levels**: `full` compression can strip too much context from tool descriptions. Use `medium` for production.
+Watch out for these recurring mistakes:
 
-## File Size Limits (SLOC Guard)
+- forgetting the post-build `cargo install --path . --force`,
+- registering a transformer in only one registry path,
+- relying on the wrong transformer order,
+- and changing streaming behavior without checking both streaming and non-streaming call paths.
 
-CCR-Rust enforces source lines of code limits to prevent files from growing into unmanageable monoliths. Configuration: `.sloc-guard.toml`.
+## File Growth Policy
 
-- **Warning** (600 SLOC): Plan a split — file is getting complex.
-- **Hard limit** (750 SLOC): Must split before merging.
-- **Tests** (1000 SLOC): Test files get more headroom.
-
-**SLOC = source lines only** (comments and blank lines excluded).
-
-**Methodology** (based on matklad's "minimize the cut" principle):
-
-- Split when a file contains multiple independent subsystems (not just because it's long)
-- Optimize the ratio of module size to interface — a 500-line module with 2 public functions is better than 5 files of 100 lines each re-exporting everything
-- When splitting: create `module_name/mod.rs` + submodules, re-export public API from `mod.rs`
-- Existing oversized files are grandfathered with a ratchet — they can only shrink, never grow
-
-## License
-
-AGPL-3.0-or-later. See [LICENSE](LICENSE).
+This repo enforces a SLOC ratchet. Split files when they accumulate multiple independent concerns, and prefer clear module boundaries over one giant orchestration file.

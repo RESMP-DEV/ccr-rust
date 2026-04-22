@@ -36,7 +36,10 @@
             "api_base_url": "https://openrouter.ai/api/v1",
             "api_key": "${OPENROUTER_API_KEY}",
             "models": [
-                "openrouter/aurora-alpha"
+                "inclusionai/ling-2.6-flash:free",
+                "nvidia/nemotron-3-super-120b-a12b:free",
+                "minimax/minimax-m2.5:free",
+                "xiaomi/mimo-v2-pro"
             ],
             "transformer": {
                 "use": [
@@ -71,7 +74,7 @@
             "wafer,Qwen3.5-397B-A17B",
             "deepseek,deepseek-reasoner",
             "minimax,MiniMax-M2.7",
-            "openrouter,openrouter/aurora-alpha"
+            "openrouter,inclusionai/ling-2.6-flash:free"
         ]
     },
     "Presets": {

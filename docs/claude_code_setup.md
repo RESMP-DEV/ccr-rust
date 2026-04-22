@@ -437,7 +437,7 @@ Example multi-provider configuration:
       "name": "openrouter",
       "api_base_url": "https://openrouter.ai/api/v1",
       "api_key": "${OPENROUTER_API_KEY}",
-      "models": ["openrouter/aurora-alpha"]
+      "models": ["inclusionai/ling-2.6-flash:free"]
     }
   ],
   "Router": {

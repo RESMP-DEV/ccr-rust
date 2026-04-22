@@ -57,8 +57,10 @@
             "api_base_url": "https://openrouter.ai/api/v1",
             "api_key": "${OPENROUTER_API_KEY}",
             "models": [
-                "openrouter/aurora-alpha",
-                "stepfun/step-3.5-flash:free"
+                "inclusionai/ling-2.6-flash:free",
+                "nvidia/nemotron-3-super-120b-a12b:free",
+                "minimax/minimax-m2.5:free",
+                "xiaomi/mimo-v2-pro"
             ],
             "transformer": {
                 "use": [
@@ -86,9 +88,9 @@
         "tiers": [
             "zai,glm-5.1",
             "minimax,MiniMax-M2.7",
-            "openrouter,openrouter/aurora-alpha",
+            "openrouter,inclusionai/ling-2.6-flash:free",
             "deepseek,deepseek-reasoner",
-            "openrouter,stepfun/step-3.5-flash:free"
+            "gemini,gemini-3.1-pro-preview"
         ],
         "forceNonStreaming": true,
         "ignoreDirect": false

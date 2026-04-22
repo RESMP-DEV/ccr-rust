@@ -182,7 +182,7 @@ Example:
 
 ### Ignore Direct Routing
 
-By default, if a client sends a request with an explicit `model` in `provider,model` format (e.g., `openrouter,openrouter/aurora-alpha`), CCR-Rust will prioritize that tier and move it to the front of the cascade.
+By default, if a client sends a request with an explicit `model` in `provider,model` format (e.g., `openrouter,inclusionai/ling-2.6-flash:free`), CCR-Rust will prioritize that tier and move it to the front of the cascade.
 
 This behavior exists because some clients cache the last successful model. However, this can cause problems:
 

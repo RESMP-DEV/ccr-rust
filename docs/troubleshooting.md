@@ -161,7 +161,7 @@ curl -s -N http://127.0.0.1:3456/v1/messages \
 
 **Symptom**: Lower-priority tiers (e.g., OpenRouter) receive all traffic while higher-priority tiers (e.g., GLM, Minimax) are never hit.
 
-**Cause**: Clients like Codex CLI and Claude Code cache the `model` field from successful responses. If a request once fell back to `openrouter,openrouter/aurora-alpha`, subsequent requests will include that exact model string, causing CCR-Rust to prioritize that tier.
+**Cause**: Clients like Codex CLI and Claude Code cache the `model` field from successful responses. If a request once fell back to `openrouter,inclusionai/ling-2.6-flash:free`, subsequent requests will include that exact model string, causing CCR-Rust to prioritize that tier.
 
 **Detection**:
 
@@ -171,7 +171,7 @@ Search the terminal or service-manager logs where `ccr-rust` is running for
 If you see lines like:
 
 ```
-Direct routing: openrouter,openrouter/aurora-alpha moved to front
+Direct routing: openrouter,inclusionai/ling-2.6-flash:free moved to front
 ```
 
 This confirms the client is requesting a specific tier.
