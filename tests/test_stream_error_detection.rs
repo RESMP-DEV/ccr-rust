@@ -44,9 +44,9 @@ fn skip_if_localhost_bind_unavailable(test_name: &str) -> bool {
     true
 }
 
-/// Z.AI returns a quota exhaustion error as a JSON body inside an HTTP 200
-/// with `content-type: text/event-stream`. CCR-Rust must detect this and
-/// cascade to tier-1.
+/// Z.AI returns a quota exhaustion error as an SSE frame inside an HTTP 200
+/// `text/event-stream` body. The `stream: true` flag exercises
+/// `check_stream_for_embedded_error` (the first-chunk peek path).
 #[tokio::test]
 async fn stream_error_in_200_cascades_to_next_tier() {
     if skip_if_localhost_bind_unavailable("stream_error_in_200_cascades_to_next_tier") {
@@ -56,14 +56,14 @@ async fn stream_error_in_200_cascades_to_next_tier() {
     let tier0_server = MockServer::start().await;
     let tier1_server = MockServer::start().await;
 
-    // tier-0 (Z.AI): returns 200 with error JSON in body
+    // tier-0 (Z.AI): returns 200 with error JSON wrapped in an SSE data frame
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(
-                    r#"{"error":{"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-04-15 10:20:22"}}"#,
+                    "data: {\"error\":{\"code\":\"1310\",\"message\":\"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-04-15 10:20:22\"}}\n\n",
                 ),
         )
         .mount(&tier0_server)
@@ -124,7 +124,8 @@ async fn stream_error_in_200_cascades_to_next_tier() {
     let body = json!({
         "model": "auto",
         "messages": [{"role": "user", "content": "hello"}],
-        "max_tokens": 100
+        "max_tokens": 100,
+        "stream": true
     });
 
     let resp = app
@@ -146,7 +147,8 @@ async fn stream_error_in_200_cascades_to_next_tier() {
     );
 }
 
-/// Z.AI overload error (code 1305) in a 200 body should also cascade.
+/// Z.AI overload error (code 1305) in a streaming 200 body should also
+/// cascade. Uses raw JSON (no SSE `data:` prefix) to cover that variant.
 #[tokio::test]
 async fn overload_error_in_200_cascades() {
     if skip_if_localhost_bind_unavailable("overload_error_in_200_cascades") {
@@ -159,9 +161,11 @@ async fn overload_error_in_200_cascades() {
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_string(
-                r#"{"error":{"code":"1305","message":"Service temporarily overloaded, please try again later"}}"#,
-            ),
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    r#"{"error":{"code":"1305","message":"Service temporarily overloaded, please try again later"}}"#,
+                ),
         )
         .mount(&tier0_server)
         .await;
@@ -207,7 +211,8 @@ async fn overload_error_in_200_cascades() {
     let body = json!({
         "model": "auto",
         "messages": [{"role": "user", "content": "hello"}],
-        "max_tokens": 100
+        "max_tokens": 100,
+        "stream": true
     });
 
     let resp = app

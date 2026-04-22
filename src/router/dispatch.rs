@@ -29,32 +29,51 @@ use futures::StreamExt;
 /// Uses a short timeout so that legitimate slow-start streams are not
 /// penalised — error responses arrive near-instantly whereas real model
 /// inference may take seconds for the first token.
+///
+/// Accumulates bytes in a loop (within the timeout window) to handle TCP
+/// fragmentation — a single `resp.chunk()` may not contain a complete SSE
+/// frame or JSON object.
 async fn check_stream_for_embedded_error(
     mut resp: reqwest::Response,
     tier_name: &str,
 ) -> Result<BoxByteStream, TryRequestError> {
-    // Error responses arrive in < 100ms; real TTFT can be seconds.
-    // If we don't get a chunk quickly, assume it's a valid stream and
-    // return it without blocking SSE headers any further.
-    let first_chunk = match tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        resp.chunk(),
-    )
-    .await
-    {
-        Ok(Ok(Some(bytes))) => bytes,
-        Ok(Ok(None)) => return Ok(Box::pin(futures::stream::empty())),
-        Ok(Err(e)) => return Err(TryRequestError::Other(e.into())),
-        Err(_timeout) => {
-            trace!(tier = tier_name, "Stream first-chunk timeout, skipping error peek");
-            return Ok(Box::pin(resp.bytes_stream()));
-        }
-    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+    let mut buf = Vec::new();
 
-    let text = String::from_utf8_lossy(&first_chunk);
+    loop {
+        match tokio::time::timeout_at(deadline, resp.chunk()).await {
+            Ok(Ok(Some(bytes))) => {
+                buf.extend_from_slice(&bytes);
+                let text = String::from_utf8_lossy(&buf);
+                let trimmed = text.trim();
+                // Raw JSON that closes its top-level object, or a complete
+                // SSE frame (terminated by `\n\n`) — we have enough to check.
+                let have_complete_payload = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                    || text.contains("\n\n");
+                if have_complete_payload {
+                    break;
+                }
+            }
+            Ok(Ok(None)) => {
+                if buf.is_empty() {
+                    return Ok(Box::pin(futures::stream::empty()));
+                }
+                break;
+            }
+            Ok(Err(e)) => return Err(TryRequestError::Other(e.into())),
+            Err(_timeout) => {
+                if buf.is_empty() {
+                    trace!(tier = tier_name, "Stream first-chunk timeout, skipping error peek");
+                    return Ok(Box::pin(resp.bytes_stream()));
+                }
+                break;
+            }
+        }
+    }
+
+    let text = String::from_utf8_lossy(&buf);
     let trimmed = text.trim();
 
-    // Extract JSON to check — either raw JSON or inside an SSE `data:` line.
     let json_candidate = if trimmed.starts_with('{') {
         Some(trimmed.to_string())
     } else {
@@ -87,16 +106,16 @@ async fn check_stream_for_embedded_error(
         }
     }
 
-    // Chain the peeked bytes back onto the remaining body.
+    let peeked = bytes::Bytes::from(buf);
     let rest = resp.bytes_stream();
-    let first = futures::stream::once(async move { Ok(first_chunk) });
+    let first = futures::stream::once(async move { Ok(peeked) });
     Ok(Box::pin(first.chain(rest)))
 }
 
 /// Check a non-streaming response body for an embedded error in a 200.
 fn check_body_for_embedded_error(body: &[u8], tier_name: &str) -> Result<(), TryRequestError> {
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
-        if json.get("error").is_some() && json.get("content").is_none() {
+        if json.get("error").is_some() {
             let msg = json["error"]["message"]
                 .as_str()
                 .unwrap_or("Unknown error in response body");
