@@ -12,7 +12,7 @@ Task-oriented index for all CCR-Rust documentation.
 
 ## Client Integrations
 
-- [Claude Code](claude_code_setup.md) — point Claude Code at your local CCR
+- [Claude Code fallback how-to](claude_code_setup.md) — step-by-step guide for keeping Claude Code useful after Claude usage limits kick in
 - [Codex](codex_setup.md) — Codex CLI routing
 - [OpenAI SDK](openai_sdk_setup.md) — Python/JavaScript OpenAI client setup
 - [Kimi](kimi_setup.md) — Kimi K2.5, token optimization, thinking blocks

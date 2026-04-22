@@ -1,8 +1,14 @@
 # CCR-Rust
 
-High-throughput multi-protocol LLM router for **Claude Code**, **Codex**, **OpenCode**, and any **OpenAI-compatible** client.
+CCR-Rust is a local LLM router for **Claude Code**, **Codex**, **OpenCode**, and other **OpenAI-compatible** clients.
 
-Your Claude Code instance hits daily usage limits and you're blocked. CCR-Rust automatically routes to backup providers—Opus, Kimi, Gemini—keeping you unblocked. When limits reset, it routes back to Claude. One endpoint, automatic failover, zero client changes.
+The easiest way to think about it:
+
+- your client keeps talking to one local URL,
+- CCR-Rust decides which provider/model should handle the request,
+- and you keep the same workflow even when you need to switch away from Claude.
+
+For many people, the main use case is simple: **when your Claude plan runs out, keep using Claude Code with a GLM-5.1/MiniMax 2.7 instead of changing tools.**
 
 ## Features
 
@@ -11,11 +17,13 @@ Your Claude Code instance hits daily usage limits and you're blocked. CCR-Rust a
 - **Cost routing** — send traffic classes (default/think/background) to different models
 - **Observability** — Prometheus metrics, live TUI dashboard, token/latency tracking
 - **MCP aggregation** — optional tool server proxying
-- **Compression** — response and tool-output compression for agent workloads
+- **Compression** — response and tool-output compression for long-running client sessions
 
-~15 MB binary, <50 ms P99 routing overhead, built for high-concurrency agent swarms.
+~15 MB binary, <50 ms P99 routing overhead, designed to stay out of your way.
 
 ## Getting Started
+
+If you are opening this repository to make changes and you do not normally work in Rust repos, read [`AGENTS.md`](AGENTS.md) first. It explains the expected workflow, validation steps, and local conventions.
 
 ### 1. Build and install
 
@@ -32,6 +40,10 @@ cp config.example.json ~/.claude-code-router/config.json
 ```
 
 Edit the config to add your provider API keys. See [Configuration guide](docs/configuration.md) for the full schema.
+
+If your main goal is “keep working after Claude usage runs out”, start with the step-by-step guide:
+
+- [Claude Code fallback how-to](docs/claude_code_setup.md)
 
 ### 3. Start the router
 
@@ -58,6 +70,22 @@ opencode
 
 Any OpenAI-compatible client works the same way — just set the base URL.
 
+If Claude Code complains about a missing `ANTHROPIC_API_KEY`, keep that environment variable set locally as well. CCR-Rust still uses the upstream provider keys from its own config file.
+
+## What it is doing
+
+If you have ever looked at CCR-Rust and thought, “what in the world is this thing doing?”, here is the short version:
+
+1. **Your client sends one request to CCR-Rust**.
+  - Claude Code talks to the Anthropic-style endpoint.
+  - Codex and most SDKs talk to the OpenAI-style endpoint.
+2. **CCR-Rust picks a configured provider/model** using your routing rules.
+3. **If the upstream provider uses a different API format, CCR-Rust translates the request.**
+4. **It sends the request upstream, collects the response, and translates it back if needed.**
+5. **Your client still sees the format it expects.**
+
+That means you can keep using Claude Code as your interface even when the actual model behind it changes.
+
 ## API Surface
 
 | Endpoint               | Method | Purpose                     |
@@ -75,22 +103,50 @@ CCR-Rust reads `~/.claude-code-router/config.json`. Supports `${ENV_VAR}` substi
 
 ```json
 {
-  "router": {
-    "default_provider": "claude",
-    "backends": {
-      "claude": { "type": "anthropic", "api_key": "${ANTHROPIC_API_KEY}" },
-      "opus": {
-        "type": "openai",
-        "api_key": "${OPUS_API_KEY}",
-        "base_url": "..."
+  "Providers": [
+    {
+      "name": "deepseek",
+      "api_base_url": "https://api.deepseek.com",
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "models": ["deepseek-chat", "deepseek-reasoner"]
+    },
+    {
+      "name": "openrouter",
+      "api_base_url": "https://openrouter.ai/api/v1",
+      "api_key": "${OPENROUTER_API_KEY}",
+      "models": [
+        "inclusionai/ling-2.6-flash:free",
+        "minimax/minimax-m2.5:free"
+      ],
+      "transformer": {
+        "use": ["anthropic", "openrouter"]
       }
     }
-  }
+  ],
+  "Router": {
+    "default": "deepseek,deepseek-chat",
+    "tiers": [
+      "deepseek,deepseek-chat",
+      "openrouter,inclusionai/ling-2.6-flash:free"
+    ]
+  },
+  "PORT": 3456,
+  "HOST": "127.0.0.1"
 }
 ```
 
 For full schema and provider setup, see [Configuration guide](docs/configuration.md).
 For common presets (Claude-only, multi-tier, cost-optimized), see [Presets](docs/presets.md).
+
+## A simple mental model for Claude Code users
+
+If you only remember one thing, remember this:
+
+- **Claude Code stays the interface.**
+- **CCR-Rust becomes the local switchboard.**
+- **Your actual model provider can change underneath without changing your day-to-day CLI flow.**
+
+That is why it is useful when Claude usage limits kick in: you keep your editor, prompts, and habits, and only swap the engine behind the curtain.
 
 ### Rate Limiting
 
@@ -122,7 +178,7 @@ Tracks: token counts (in/out), latencies (p50/p90/p99), provider success rates, 
 See [docs/index.md](docs/index.md) for the full documentation index:
 
 - **Setup:** [CLI reference](docs/cli.md) · [Configuration](docs/configuration.md) · [Presets](docs/presets.md) · [Deployment](docs/deployment.md)
-- **Integrations:** [Claude Code](docs/claude_code_setup.md) · [Codex](docs/codex_setup.md) · [OpenAI SDK](docs/openai_sdk_setup.md) · [Kimi](docs/kimi_setup.md) · [Gemini](docs/gemini-integration.md)
+- **Integrations:** [Claude Code fallback how-to](docs/claude_code_setup.md) · [Codex](docs/codex_setup.md) · [OpenAI SDK](docs/openai_sdk_setup.md) · [Kimi](docs/kimi_setup.md) · [Gemini](docs/gemini-integration.md)
 - **Operations:** [Observability](docs/observability.md) · [Debug capture](docs/debug_capture.md) · [Streaming](docs/streaming_incremental_design.md) · [Token optimization](docs/token_optimization.md)
 - **Troubleshooting:** [Common issues](docs/troubleshooting.md)
 
