@@ -596,14 +596,17 @@ async fn test_responses_stream_emits_required_events() {
         vec!["Hel".to_string(), "lo".to_string()]
     );
 
+    // Reasoning from non-Anthropic providers is stripped in the
+    // Anthropic translation layer (missing thinking signatures), so
+    // reasoning_text.delta events are absent in the Responses output.
     let reasoning_deltas: Vec<String> = events
         .iter()
         .filter(|event| event.event == "response.reasoning_text.delta")
         .filter_map(|event| event.data["delta"].as_str().map(ToOwned::to_owned))
         .collect();
-    assert_eq!(
-        reasoning_deltas,
-        vec!["Thinking ".to_string(), "step-by-step".to_string()]
+    assert!(
+        reasoning_deltas.is_empty(),
+        "reasoning should be stripped for non-Anthropic providers"
     );
 
     let completed = events

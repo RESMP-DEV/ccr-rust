@@ -502,20 +502,13 @@ async fn test_claude_code_thinking_preserved_in_response() {
         .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    // Verify thinking block is preserved as first content block
+    // Reasoning from non-Anthropic providers is stripped (missing thinking
+    // signature causes SDK parse failures), so only the text block remains.
     assert!(response_json["content"].is_array());
-    assert_eq!(response_json["content"].as_array().unwrap().len(), 2);
+    assert_eq!(response_json["content"].as_array().unwrap().len(), 1);
 
-    // First block should be thinking
-    assert_eq!(response_json["content"][0]["type"], "thinking");
-    assert_eq!(
-        response_json["content"][0]["thinking"],
-        "Let me analyze this step by step:\n1. First, understand the problem\n2. Then, solve it"
-    );
-
-    // Second block should be text
-    assert_eq!(response_json["content"][1]["type"], "text");
-    assert_eq!(response_json["content"][1]["text"], "The answer is 42.");
+    assert_eq!(response_json["content"][0]["type"], "text");
+    assert_eq!(response_json["content"][0]["text"], "The answer is 42.");
 }
 
 #[tokio::test]
@@ -609,9 +602,9 @@ async fn test_claude_code_thinking_in_streaming_response() {
         .unwrap();
     let body_text = String::from_utf8(body_bytes.to_vec()).unwrap();
 
-    // Verify thinking_delta events are present in the stream
-    assert!(body_text.contains("thinking_delta"));
-    assert!(body_text.contains("Analyzing the problem..."));
+    // Reasoning from non-Anthropic providers is skipped in streaming
+    // translation (missing thinking signature → SDK parse failures).
+    assert!(!body_text.contains("thinking_delta"));
     assert!(body_text.contains("text_delta"));
     assert!(body_text.contains("The solution is ready."));
 }
@@ -753,13 +746,9 @@ async fn test_claude_code_thinking_only_no_content() {
         .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    // Should have only thinking block
-    assert_eq!(response_json["content"].as_array().unwrap().len(), 1);
-    assert_eq!(response_json["content"][0]["type"], "thinking");
-    assert_eq!(
-        response_json["content"][0]["thinking"],
-        "Thinking deeply about this..."
-    );
+    // Reasoning from non-Anthropic providers is stripped, so content is empty
+    // when the model produced only reasoning_content with no text.
+    assert_eq!(response_json["content"].as_array().unwrap().len(), 0);
 }
 
 // ---------------------------------------------------------------------------

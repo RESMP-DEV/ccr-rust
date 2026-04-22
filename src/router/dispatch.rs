@@ -53,8 +53,20 @@ async fn check_stream_for_embedded_error(
 
     let text = String::from_utf8_lossy(&first_chunk);
     let trimmed = text.trim();
-    if trimmed.starts_with('{') {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+
+    // Extract JSON to check — either raw JSON or inside an SSE `data:` line.
+    let json_candidate = if trimmed.starts_with('{') {
+        Some(trimmed.to_string())
+    } else {
+        trimmed
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .filter(|d| d.starts_with('{'))
+            .map(|d| d.to_string())
+    };
+
+    if let Some(ref candidate) = json_candidate {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(candidate) {
             if json.get("error").is_some() {
                 let msg = json["error"]["message"]
                     .as_str()

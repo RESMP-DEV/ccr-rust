@@ -20,15 +20,12 @@ pub(super) fn translate_response_openai_to_anthropic(
     let content = if let Some(choice) = openai_resp.choices.first() {
         let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
 
-        // Include reasoning content if present (from reasoning models)
-        if let Some(reasoning) = &choice.message.reasoning_content {
-            if !reasoning.is_empty() {
-                blocks.push(AnthropicContentBlock::Thinking {
-                    thinking: reasoning.clone(),
-                    signature: String::new(), // OpenAI doesn't provide signatures
-                });
-            }
-        }
+        // Skip reasoning content from OpenAI-compatible providers.
+        // Non-Anthropic models don't provide thinking signatures, and
+        // emitting a thinking block with an empty signature causes
+        // downstream Anthropic SDK clients to fail with
+        // "reasoning part 0 not found".
+        // Reasoning is still available via the OpenAI response path.
 
         // Main content
         if let Some(content_value) = &choice.message.content {
@@ -125,15 +122,43 @@ pub(super) fn translate_response_openai_to_anthropic(
     }
 }
 
+/// Tracks state across streaming chunks for proper Anthropic event sequencing.
+///
+/// OpenAI streams are stateless per-chunk, but Anthropic's protocol requires
+/// matching `content_block_start`/`content_block_stop` pairs for every block.
+/// This state tracks which blocks have been opened so we can close them all
+/// when `finish_reason` arrives.
+#[derive(Debug, Default)]
+pub(super) struct StreamTranslationState {
+    pub is_first: bool,
+    pub text_block_started: bool,
+    /// Anthropic-side indices of tool_use blocks we've started.
+    pub active_tool_indices: Vec<usize>,
+    /// The OpenAI finish_reason from the terminal chunk (e.g. "stop", "tool_calls").
+    pub finish_reason: Option<String>,
+}
+
+impl StreamTranslationState {
+    pub fn new() -> Self {
+        Self {
+            is_first: true,
+            ..Default::default()
+        }
+    }
+}
+
 /// Translate an OpenAI streaming chunk to Anthropic streaming events.
+///
+/// `state` is mutated to track which content blocks have been opened so that
+/// `content_block_stop` events are emitted for every block when the stream ends.
 pub(super) fn translate_stream_chunk_to_anthropic(
     chunk: &OpenAIStreamChunk,
-    is_first: bool,
+    state: &mut StreamTranslationState,
 ) -> Vec<AnthropicStreamEvent> {
     let mut events = Vec::new();
 
     // Send message_start on first chunk
-    if is_first {
+    if state.is_first {
         events.push(AnthropicStreamEvent {
             event_type: "message_start".to_string(),
             message: Some(serde_json::json!({
@@ -150,7 +175,6 @@ pub(super) fn translate_stream_chunk_to_anthropic(
             stop_reason: None,
         });
 
-        // Start content block
         events.push(AnthropicStreamEvent {
             event_type: "content_block_start".to_string(),
             message: None,
@@ -163,29 +187,15 @@ pub(super) fn translate_stream_chunk_to_anthropic(
             usage: None,
             stop_reason: None,
         });
+        state.text_block_started = true;
+        state.is_first = false;
     }
 
-    // Handle content delta
     if let Some(choice) = chunk.choices.first() {
-        // Handle reasoning content (for reasoning models)
-        if let Some(ref reasoning) = choice.delta.reasoning_content {
-            if !reasoning.is_empty() {
-                events.push(AnthropicStreamEvent {
-                    event_type: "content_block_delta".to_string(),
-                    message: None,
-                    index: Some(0),
-                    content_block: None,
-                    delta: Some(serde_json::json!({
-                        "type": "thinking_delta",
-                        "thinking": reasoning
-                    })),
-                    usage: None,
-                    stop_reason: None,
-                });
-            }
-        }
+        // Skip reasoning content from OpenAI-compatible providers.
+        // Non-Anthropic models lack thinking signatures, and emitting
+        // thinking_delta events causes Anthropic SDK parse failures.
 
-        // Handle regular content
         if let Some(ref content) = choice.delta.content {
             if !content.is_empty() {
                 events.push(AnthropicStreamEvent {
@@ -203,10 +213,10 @@ pub(super) fn translate_stream_chunk_to_anthropic(
             }
         }
 
-        // Handle tool call deltas.
         if let Some(tool_calls) = &choice.delta.tool_calls {
             for tool_call in tool_calls {
                 let tool_index = tool_call.index + 1;
+
                 if tool_call.id.is_some()
                     || tool_call
                         .function
@@ -236,6 +246,9 @@ pub(super) fn translate_stream_chunk_to_anthropic(
                         usage: None,
                         stop_reason: None,
                     });
+                    if !state.active_tool_indices.contains(&tool_index) {
+                        state.active_tool_indices.push(tool_index);
+                    }
                 }
 
                 if let Some(arguments) = tool_call
@@ -260,37 +273,63 @@ pub(super) fn translate_stream_chunk_to_anthropic(
             }
         }
 
-        // Handle finish reason
-        if choice.finish_reason.is_some() {
-            events.push(AnthropicStreamEvent {
-                event_type: "content_block_stop".to_string(),
-                message: None,
-                index: Some(0),
-                content_block: None,
-                delta: None,
-                usage: None,
-                stop_reason: None,
-            });
+        if let Some(ref reason) = choice.finish_reason {
+            state.finish_reason = Some(reason.clone());
+
+            if state.text_block_started {
+                events.push(AnthropicStreamEvent {
+                    event_type: "content_block_stop".to_string(),
+                    message: None,
+                    index: Some(0),
+                    content_block: None,
+                    delta: None,
+                    usage: None,
+                    stop_reason: None,
+                });
+            }
+
+            for &tool_idx in &state.active_tool_indices {
+                events.push(AnthropicStreamEvent {
+                    event_type: "content_block_stop".to_string(),
+                    message: None,
+                    index: Some(tool_idx),
+                    content_block: None,
+                    delta: None,
+                    usage: None,
+                    stop_reason: None,
+                });
+            }
         }
     }
 
     events
 }
 
-/// Create final Anthropic stream events (message_delta, message_stop)
+/// Create final Anthropic stream events (message_delta, message_stop).
+///
+/// `finish_reason` is the raw OpenAI finish reason (e.g. "stop", "tool_calls")
+/// and is mapped to the Anthropic equivalent for the `stop_reason` field.
 pub(super) fn create_stream_stop_events(
     usage: Option<AnthropicUsage>,
+    finish_reason: Option<&str>,
 ) -> Vec<AnthropicStreamEvent> {
     let mut events = Vec::new();
 
     let usage = usage.unwrap_or_default();
+
+    let stop_reason = match finish_reason {
+        Some("tool_calls") => "tool_use",
+        Some("length") => "max_tokens",
+        Some("content_filter") => "stop_sequence",
+        _ => "end_turn",
+    };
 
     events.push(AnthropicStreamEvent {
         event_type: "message_delta".to_string(),
         message: None,
         index: None,
         content_block: None,
-        delta: Some(serde_json::json!({"stop_reason": "end_turn"})),
+        delta: Some(serde_json::json!({"stop_reason": stop_reason})),
         usage: Some(usage.clone()),
         stop_reason: None,
     });
