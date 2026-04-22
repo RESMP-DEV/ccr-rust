@@ -47,6 +47,9 @@ fn skip_if_localhost_bind_unavailable(test_name: &str) -> bool {
 /// Z.AI returns a quota exhaustion error as an SSE frame inside an HTTP 200
 /// `text/event-stream` body. The `stream: true` flag exercises
 /// `check_stream_for_embedded_error` (the first-chunk peek path).
+///
+/// Tier-1's `.expect(1)` proves cascade occurred — if tier-0's embedded error
+/// were missed, the request would fail instead of reaching tier-1.
 #[tokio::test]
 async fn stream_error_in_200_cascades_to_next_tier() {
     if skip_if_localhost_bind_unavailable("stream_error_in_200_cascades_to_next_tier") {
@@ -69,7 +72,8 @@ async fn stream_error_in_200_cascades_to_next_tier() {
         .mount(&tier0_server)
         .await;
 
-    // tier-1 (Wafer): returns a valid OpenAI response
+    // tier-1 (Wafer): returns a valid OpenAI response.
+    // expect(1) proves cascade happened — tier-0 error was detected.
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -149,6 +153,8 @@ async fn stream_error_in_200_cascades_to_next_tier() {
 
 /// Z.AI overload error (code 1305) in a streaming 200 body should also
 /// cascade. Uses raw JSON (no SSE `data:` prefix) to cover that variant.
+///
+/// Tier-1's `.expect(1)` proves cascade occurred.
 #[tokio::test]
 async fn overload_error_in_200_cascades() {
     if skip_if_localhost_bind_unavailable("overload_error_in_200_cascades") {
@@ -170,6 +176,7 @@ async fn overload_error_in_200_cascades() {
         .mount(&tier0_server)
         .await;
 
+    // expect(1) proves cascade happened — tier-0 error was detected.
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
