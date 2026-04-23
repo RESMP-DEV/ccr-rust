@@ -10,7 +10,9 @@ mod dispatch;
 use dispatch::*;
 
 mod streaming;
-pub use streaming::{stream_anthropic_response_with_tracking, stream_response_translated};
+pub use streaming::{
+    stream_anthropic_response_with_tracking, stream_response_translated, BoxByteStream,
+};
 
 mod openai_compat;
 pub use openai_compat::handle_chat_completions;
@@ -620,13 +622,11 @@ mod tests {
         let anthropic_resp =
             translate_response_openai_to_anthropic(openai_resp, "deepseek-reasoner");
 
-        assert_eq!(anthropic_resp.content.len(), 2);
+        // Reasoning from non-Anthropic providers is skipped (no thinking
+        // signature → Anthropic SDK failures), so only the text block remains.
+        assert_eq!(anthropic_resp.content.len(), 1);
         assert!(matches!(
             anthropic_resp.content[0],
-            AnthropicContentBlock::Thinking { .. }
-        ));
-        assert!(matches!(
-            anthropic_resp.content[1],
             AnthropicContentBlock::Text { .. }
         ));
         assert_eq!(anthropic_resp.usage.input_tokens, 10);
@@ -653,11 +653,14 @@ mod tests {
             usage: None,
         };
 
-        let events = translate_stream_chunk_to_anthropic(&chunk, true);
+        let mut state = StreamTranslationState::new();
+        let events = translate_stream_chunk_to_anthropic(&chunk, &mut state);
 
         assert!(!events.is_empty());
         assert_eq!(events[0].event_type, "message_start");
         assert_eq!(events[1].event_type, "content_block_start");
+        assert!(!state.is_first);
+        assert!(state.text_block_started);
     }
 
     #[test]
@@ -680,12 +683,128 @@ mod tests {
             usage: None,
         };
 
-        let events = translate_stream_chunk_to_anthropic(&chunk, false);
+        let mut state = StreamTranslationState::new();
+        state.is_first = false;
+        let events = translate_stream_chunk_to_anthropic(&chunk, &mut state);
 
-        // Should have a thinking_delta event
-        assert!(!events.is_empty());
+        // Reasoning from non-Anthropic providers is intentionally skipped to
+        // avoid Anthropic SDK parse failures (missing thinking signatures).
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_translate_stream_tool_calls() {
+        let mut state = StreamTranslationState::new();
+
+        // First chunk: message_start + text block start
+        let first_chunk = OpenAIStreamChunk {
+            id: "chunk_1".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 1234567890,
+            model: "qwen-3.5".to_string(),
+            choices: vec![OpenAIStreamChoice {
+                index: 0,
+                delta: OpenAIDelta {
+                    role: Some("assistant".to_string()),
+                    content: Some("I'll read the file.".to_string()),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let events = translate_stream_chunk_to_anthropic(&first_chunk, &mut state);
+        assert_eq!(events[0].event_type, "message_start");
+        assert_eq!(events[1].event_type, "content_block_start");
+        assert_eq!(events[2].event_type, "content_block_delta");
+
+        // Second chunk: tool call start
+        let tool_start_chunk = OpenAIStreamChunk {
+            id: "chunk_1".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 1234567890,
+            model: "qwen-3.5".to_string(),
+            choices: vec![OpenAIStreamChoice {
+                index: 0,
+                delta: OpenAIDelta {
+                    role: None,
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Some(vec![OpenAIStreamToolCall {
+                        index: 0,
+                        id: Some("call_abc".to_string()),
+                        function: Some(OpenAIStreamToolFunction {
+                            name: Some("bash".to_string()),
+                            arguments: Some(String::new()),
+                        }),
+                    }]),
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let events = translate_stream_chunk_to_anthropic(&tool_start_chunk, &mut state);
+        assert_eq!(events[0].event_type, "content_block_start");
+        let block = events[0].content_block.as_ref().unwrap();
+        assert_eq!(block["type"], "tool_use");
+        assert_eq!(block["id"], "call_abc");
+        assert_eq!(block["name"], "bash");
+        assert_eq!(state.active_tool_indices, vec![1]);
+
+        // Third chunk: tool call arguments
+        let tool_args_chunk = OpenAIStreamChunk {
+            id: "chunk_1".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 1234567890,
+            model: "qwen-3.5".to_string(),
+            choices: vec![OpenAIStreamChoice {
+                index: 0,
+                delta: OpenAIDelta {
+                    role: None,
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Some(vec![OpenAIStreamToolCall {
+                        index: 0,
+                        id: None,
+                        function: Some(OpenAIStreamToolFunction {
+                            name: None,
+                            arguments: Some("{\"command\":\"ls\"}".to_string()),
+                        }),
+                    }]),
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let events = translate_stream_chunk_to_anthropic(&tool_args_chunk, &mut state);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "content_block_delta");
         let delta = events[0].delta.as_ref().unwrap();
-        assert_eq!(delta["type"], "thinking_delta");
+        assert_eq!(delta["type"], "input_json_delta");
+        assert_eq!(delta["partial_json"], "{\"command\":\"ls\"}");
+
+        // Fourth chunk: finish_reason
+        let finish_chunk = OpenAIStreamChunk {
+            id: "chunk_1".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 1234567890,
+            model: "qwen-3.5".to_string(),
+            choices: vec![OpenAIStreamChoice {
+                index: 0,
+                delta: OpenAIDelta::default(),
+                finish_reason: Some("tool_calls".to_string()),
+            }],
+            usage: None,
+        };
+        let events = translate_stream_chunk_to_anthropic(&finish_chunk, &mut state);
+        // Should have content_block_stop for text (index 0) and tool (index 1)
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "content_block_stop");
+        assert_eq!(events[0].index, Some(0));
+        assert_eq!(events[1].event_type, "content_block_stop");
+        assert_eq!(events[1].index, Some(1));
+        assert_eq!(state.finish_reason.as_deref(), Some("tool_calls"));
     }
 
     #[test]

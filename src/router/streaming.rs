@@ -4,7 +4,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use tracing::{trace, warn};
 
-use super::translate_response::{create_stream_stop_events, translate_stream_chunk_to_anthropic};
+use super::translate_response::{
+    create_stream_stop_events, translate_stream_chunk_to_anthropic, StreamTranslationState,
+};
 use super::types::*;
 use crate::metrics::{record_usage, verify_token_usage};
 use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
@@ -22,9 +24,13 @@ use crate::metrics::{
     increment_active_streams, record_stream_backpressure, record_throughput, record_ttft,
 };
 
+/// A boxed byte stream that both streaming handlers accept.
+pub type BoxByteStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+
 /// Stream response with OpenAI -> Anthropic translation.
 pub async fn stream_response_translated(
-    resp: reqwest::Response,
+    byte_stream: BoxByteStream,
     buffer_size: usize,
     verify_ctx: Option<StreamVerifyCtx>,
     model_name: &str,
@@ -36,15 +42,15 @@ pub async fn stream_response_translated(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(buffer_size);
 
     tokio::spawn(async move {
-        let mut stream = resp.bytes_stream();
+        let mut stream = byte_stream;
         let mut decoder = SseFrameDecoder::new();
-        let mut is_first = true;
+        let mut translation_state = StreamTranslationState::new();
         let mut accumulated_content = String::new();
         let mut accumulated_reasoning = String::new();
         let mut _has_reasoning = false;
+        let mut accumulated_tool_calls: Vec<(String, String, String)> = Vec::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
-        // TTFT/throughput timing: capture when first content token arrives
         let stream_start = verify_ctx.as_ref().map(|ctx| ctx.stream_start);
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_token_time: Option<std::time::Instant> = None;
@@ -73,13 +79,12 @@ pub async fn stream_response_translated(
                                         output_tokens = usage.completion_tokens;
                                     }
 
-                                    // Translate to Anthropic events
+                                    let was_first = translation_state.is_first;
                                     let events =
-                                        translate_stream_chunk_to_anthropic(&chunk, is_first);
-                                    if is_first {
+                                        translate_stream_chunk_to_anthropic(&chunk, &mut translation_state);
+                                    if was_first {
                                         first_token_time = Some(std::time::Instant::now());
                                     }
-                                    is_first = false;
                                     last_token_time = Some(std::time::Instant::now());
 
                                     for event in events {
@@ -98,7 +103,6 @@ pub async fn stream_response_translated(
                                         }
                                     }
 
-                                    // Accumulate content for usage estimation
                                     if let Some(choice) = chunk.choices.first() {
                                         if let Some(ref content) = choice.delta.content {
                                             accumulated_content.push_str(content);
@@ -107,6 +111,29 @@ pub async fn stream_response_translated(
                                         {
                                             accumulated_reasoning.push_str(reasoning);
                                             _has_reasoning = true;
+                                        }
+                                        if let Some(ref tool_calls) = choice.delta.tool_calls {
+                                            for tc in tool_calls {
+                                                let idx = tc.index;
+                                                while accumulated_tool_calls.len() <= idx {
+                                                    accumulated_tool_calls.push((
+                                                        String::new(),
+                                                        String::new(),
+                                                        String::new(),
+                                                    ));
+                                                }
+                                                if let Some(ref id) = tc.id {
+                                                    accumulated_tool_calls[idx].0.clone_from(id);
+                                                }
+                                                if let Some(ref func) = tc.function {
+                                                    if let Some(ref name) = func.name {
+                                                        accumulated_tool_calls[idx].1.clone_from(name);
+                                                    }
+                                                    if let Some(ref args) = func.arguments {
+                                                        accumulated_tool_calls[idx].2.push_str(args);
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 } else {
@@ -148,22 +175,22 @@ pub async fn stream_response_translated(
             })
         };
 
-        // Apply response transformers to final accumulated content if chain is not empty
-        // For streaming, we apply transforms to the final accumulated message structure
         if !chain.is_empty() {
-            // Build a minimal Anthropic-like response for transformation
             let mut content_blocks = Vec::new();
-            if !accumulated_reasoning.is_empty() {
-                content_blocks.push(serde_json::json!({
-                    "type": "thinking",
-                    "thinking": accumulated_reasoning,
-                    "signature": ""
-                }));
-            }
             if !accumulated_content.is_empty() {
                 content_blocks.push(serde_json::json!({
                     "type": "text",
                     "text": accumulated_content
+                }));
+            }
+            for (id, name, arguments) in &accumulated_tool_calls {
+                let input = serde_json::from_str::<serde_json::Value>(arguments)
+                    .unwrap_or_else(|_| serde_json::json!({"raw_arguments": arguments}));
+                content_blocks.push(serde_json::json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": input
                 }));
             }
 
@@ -176,13 +203,15 @@ pub async fn stream_response_translated(
             });
 
             if let Ok(transformed) = chain.apply_response(resp_value) {
-                // Extract transformed values (for potential future use)
                 trace!(transformed_response = %serde_json::to_string(&transformed).unwrap_or_default(),
                        "streaming response transformed");
             }
         }
 
-        let stop_events = create_stream_stop_events(usage.clone());
+        let stop_events = create_stream_stop_events(
+            usage.clone(),
+            translation_state.finish_reason.as_deref(),
+        );
         for event in stop_events {
             let event_json = serde_json::to_string(&event).unwrap_or_default();
             let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
@@ -246,7 +275,7 @@ pub async fn stream_response_translated(
 /// Parses Anthropic SSE events (`message_delta` with usage) to track tokens.
 /// Used for Anthropic-protocol providers that may not return token counts.
 pub async fn stream_anthropic_response_with_tracking(
-    resp: reqwest::Response,
+    byte_stream: BoxByteStream,
     buffer_size: usize,
     verify_ctx: StreamVerifyCtx,
     chain: TransformerChain,
@@ -258,7 +287,7 @@ pub async fn stream_anthropic_response_with_tracking(
     let local_estimate = verify_ctx.local_estimate;
 
     tokio::spawn(async move {
-        let mut stream = resp.bytes_stream();
+        let mut stream = byte_stream;
         let mut decoder = SseFrameDecoder::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
