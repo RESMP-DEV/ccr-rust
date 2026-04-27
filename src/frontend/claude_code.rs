@@ -9,6 +9,8 @@ use anyhow::Result;
 use axum::http::HeaderMap;
 use serde_json::Value;
 
+use tracing::debug;
+
 use crate::frontend::{
     ContentBlock, Frontend, ImageSource, InternalRequest, InternalResponse, Message, Tool,
 };
@@ -68,6 +70,7 @@ impl Frontend for ClaudeCodeFrontend {
     ///
     /// Converts Anthropic Messages API format to InternalRequest.
     fn parse_request(&self, body: Value) -> Result<InternalRequest> {
+        debug!("parsing Claude Code request");
         // Extract model
         let model = body
             .get("model")
@@ -176,6 +179,7 @@ impl Frontend for ClaudeCodeFrontend {
     ///
     /// Converts InternalResponse to Anthropic JSON response format.
     fn serialize_response(&self, response: InternalResponse) -> Result<Vec<u8>> {
+        debug!(response_id = %response.id, content_blocks = response.content.len(), "serializing Claude Code response");
         // Convert content blocks to Anthropic format
         let content: Vec<Value> = response
             .content

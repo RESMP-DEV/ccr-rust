@@ -9,6 +9,8 @@ use axum::http::HeaderMap;
 use serde_json::Value;
 use std::collections::VecDeque;
 
+use tracing::debug;
+
 use crate::frontend::{ContentBlock, Frontend, InternalRequest, InternalResponse, Message, Tool};
 
 /// Frontend for the OpenAI Codex CLI client.
@@ -144,7 +146,7 @@ impl Frontend for CodexFrontend {
     ///
     /// Converts OpenAI Chat Completions API format to InternalRequest.
     fn parse_request(&self, body: Value) -> Result<InternalRequest> {
-        // Extract model
+        debug!("parsing Codex request");
         let model = body
             .get("model")
             .and_then(|v| v.as_str())
@@ -332,7 +334,7 @@ impl Frontend for CodexFrontend {
     ///
     /// Converts InternalResponse to OpenAI JSON response format.
     fn serialize_response(&self, response: InternalResponse) -> Result<Vec<u8>> {
-        // Extract text and reasoning content from content blocks
+        debug!(response_id = %response.id, content_blocks = response.content.len(), "serializing Codex response");
         let mut content = String::new();
         let mut reasoning_content = String::new();
         let mut tool_calls: Vec<Value> = Vec::new();

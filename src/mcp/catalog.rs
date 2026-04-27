@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use std::collections::HashMap;
+use tracing::{debug, info, warn};
 
 use super::protocol::McpTool;
 
@@ -11,6 +12,7 @@ pub struct ToolCatalog {
 
 impl ToolCatalog {
     pub fn add_backend_tools(&mut self, idx: usize, tools: Vec<McpTool>) {
+        info!(backend_idx = idx, tool_count = tools.len(), "registering backend tools");
         for tool in tools {
             let name = tool.name.clone();
             self.routes.insert(name.clone(), idx);
@@ -55,6 +57,12 @@ impl ToolCatalog {
     }
 
     pub fn route(&self, name: &str) -> Option<usize> {
-        self.routes.get(name).copied()
+        let result = self.routes.get(name).copied();
+        if result.is_none() {
+            warn!(tool_name = name, "no route found for tool");
+        } else {
+            debug!(tool_name = name, backend_idx = ?result, "tool routed");
+        }
+        result
     }
 }

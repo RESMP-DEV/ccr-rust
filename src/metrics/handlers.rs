@@ -8,6 +8,7 @@
 use axum::response::IntoResponse;
 use axum::Json;
 use prometheus::core::Collector;
+use tracing::debug;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -111,6 +112,7 @@ pub struct TierUsage {
 
 /// Handler for GET /v1/usage - returns JSON usage summary.
 pub async fn usage_handler() -> impl IntoResponse {
+    debug!("usage_handler called");
     let mut tiers: HashMap<String, TierUsage> = HashMap::new();
 
     // Collect per-tier request counts
@@ -408,6 +410,7 @@ fn histogram_percentile(metric: &prometheus::proto::Metric, quantile: f64) -> f6
 
 /// Handler for GET /v1/throughput - returns per-tier TTFT and tok/s metrics.
 pub async fn throughput_handler() -> impl IntoResponse {
+    debug!("throughput_handler called");
     let mut tiers: HashMap<String, TierThroughput> = HashMap::new();
     let throughput_state = get_throughput_state();
 

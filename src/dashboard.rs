@@ -18,6 +18,7 @@ use std::io;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use tracing::info;
 
 use crate::metrics::{
     FrontendMetrics, TierLatency, TierThroughput, TierTokenDrift, TierUsage, UsageSummary,
@@ -49,6 +50,7 @@ pub type SharedDashboardState = Arc<RwLock<Option<DashboardData>>>;
 /// Returns a `SharedDashboardState` that holds the latest data fetched from
 /// `http://{host}:{port}/v1/usage`, `/v1/latencies`, and `/v1/token-drift`.
 pub fn spawn_dashboard_fetcher(host: String, port: u16) -> SharedDashboardState {
+    info!(%host, port, "starting dashboard data fetcher");
     let state: SharedDashboardState = Arc::new(RwLock::new(None));
     let state_clone = Arc::clone(&state);
 
@@ -241,6 +243,7 @@ fn sync_ui_state(shared: &SharedDashboardState, ui_state: &mut UiState) {
 }
 
 pub fn run_dashboard(host: String, port: u16) -> Result<()> {
+    info!(%host, port, "launching TUI dashboard");
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();

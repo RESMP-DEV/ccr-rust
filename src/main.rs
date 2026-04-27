@@ -129,6 +129,16 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         exclude: Option<Vec<String>>,
     },
+    /// Run as a shared MCP daemon (HTTP transport, native tools)
+    McpDaemon {
+        /// Daemon port
+        #[arg(short, long, default_value = "3457")]
+        port: u16,
+
+        /// Directory for memory graph persistence
+        #[arg(long, env = "CCR_MCP_MEMORY_DIR")]
+        memory_dir: Option<String>,
+    },
     /// List and analyze debug captures.
     Captures {
         /// Filter by provider name (e.g., "minimax")
@@ -535,6 +545,13 @@ async fn main() -> Result<()> {
                 backends,
                 include,
                 exclude,
+            })
+            .await?;
+        }
+        Some(Commands::McpDaemon { port, memory_dir }) => {
+            ccr_rust::mcp::daemon::run(ccr_rust::mcp::daemon::DaemonArgs {
+                port,
+                memory_dir: memory_dir.map(std::path::PathBuf::from),
             })
             .await?;
         }

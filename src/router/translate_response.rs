@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use super::types::*;
 use crate::transformer::{TransformerChain, TransformerRegistry};
+use tracing::debug;
 
 // ============================================================================
 // Response Translation: OpenAI -> Anthropic
@@ -11,6 +12,7 @@ pub(super) fn translate_response_openai_to_anthropic(
     openai_resp: OpenAIResponse,
     model: &str,
 ) -> AnthropicResponse {
+    debug!(model, response_id = %openai_resp.id, "translating OpenAI response to Anthropic format");
     let response_model = if openai_resp.model.is_empty() {
         model.to_string()
     } else {

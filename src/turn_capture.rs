@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
+use tracing::{debug, info};
 
 /// Tracks multi-thread streaming state during a proxied turn.
 #[derive(Debug, Clone)]
@@ -73,6 +74,7 @@ impl TurnCaptureState {
         if self.completed {
             return;
         }
+        debug!(method, root_thread = %self.root_thread_id, "processing notification");
 
         match method {
             "thread/started" => {
@@ -136,20 +138,19 @@ impl TurnCaptureState {
             "turn/completed" => {
                 let thread_id = json_str(params, "threadId");
 
-                // Subagent turn completed — remove from active set and check for inferred completion.
                 if thread_id != self.root_thread_id {
                     self.active_subagent_turns.remove(&thread_id);
-                    // Don't complete the overall turn; just check if we can infer completion.
+                    debug!(thread_id = %thread_id, "subagent turn completed");
                     return;
                 }
 
-                // Root thread turn completed.
                 if let Some(turn) = params.get("turn") {
                     if self.turn_id.is_none() {
                         self.turn_id = Some(json_str(turn, "id"));
                     }
                 }
                 self.completed = true;
+                info!(root_thread = %self.root_thread_id, "root turn completed");
             }
             _ => {}
         }

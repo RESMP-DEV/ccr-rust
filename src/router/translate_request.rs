@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use super::types::*;
+use tracing::debug;
 
 // ============================================================================
 // Request Translation: Anthropic -> OpenAI
@@ -155,6 +156,7 @@ pub(super) fn translate_request_anthropic_to_openai(
     anthropic_req: &AnthropicRequest,
     model: &str,
 ) -> OpenAIRequest {
+    debug!(model, message_count = anthropic_req.messages.len(), "translating Anthropic request to OpenAI format");
     let mut messages: Vec<OpenAIMessage> = Vec::new();
     let is_reasoning_model = model.to_lowercase().contains("reasoner")
         || model.to_lowercase().contains("r1")

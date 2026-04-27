@@ -3,6 +3,7 @@
 
 use axum::http::{header::USER_AGENT, HeaderMap};
 use serde_json::Value;
+use tracing::debug;
 
 /// Frontend type inferred from headers and request body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,11 +40,13 @@ pub fn detect_frontend(headers: &HeaderMap, body: &Value) -> FrontendType {
     let claude_body = has_anthropic_format(body);
     let codex_body = has_openai_format(body);
 
-    if claude_body && !codex_body {
+    let result = if claude_body && !codex_body {
         FrontendType::ClaudeCode
     } else {
         FrontendType::Codex
-    }
+    };
+    debug!(?result, "frontend detected");
+    result
 }
 
 fn has_codex_user_agent(headers: &HeaderMap) -> bool {

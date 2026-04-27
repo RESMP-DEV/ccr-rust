@@ -7,6 +7,7 @@ pub mod test_runner;
 
 use lazy_static::lazy_static;
 use regex::Regex;
+use tracing::debug;
 
 lazy_static! {
     static ref ANSI_RE: Regex = Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
@@ -32,6 +33,7 @@ pub fn strip_progress_bars(text: &str) -> String {
 /// Apply all pattern-based compressions to text.
 /// Returns the cleaned/compressed text.
 pub fn compress(text: &str) -> String {
+    debug!(input_len = text.len(), "output compress: applying pattern compression");
     // Clean first
     let cleaned = strip_ansi(text);
     let cleaned = collapse_blank_lines(&cleaned);
@@ -54,7 +56,7 @@ pub fn compress(text: &str) -> String {
         return result;
     }
 
-    // No pattern matched — return cleaned text
+    debug!(output_len = cleaned.len(), "output compress: no pattern matched, returning cleaned text");
     cleaned
 }
 

@@ -12,6 +12,7 @@ use super::{
 use crate::config::TransformerEntry;
 use crate::transformer::{Transformer, TransformerChain};
 use std::collections::HashMap;
+use tracing::{debug, info, warn};
 
 /// Type alias for a transformer factory function.
 ///
@@ -96,6 +97,7 @@ impl TransformerRegistry {
     pub fn build(&self, entry: &TransformerEntry) -> Option<Box<dyn Transformer>> {
         let factory = self.factories.get(entry.name())?;
         let options = entry.options();
+        debug!(transformer = entry.name(), "building transformer");
         Some(factory(options))
     }
 
@@ -107,8 +109,11 @@ impl TransformerRegistry {
         for entry in entries {
             if let Some(transformer) = self.build(entry) {
                 chain = chain.with_transformer(std::sync::Arc::from(transformer));
+            } else {
+                warn!(transformer = entry.name(), "skipping unregistered transformer");
             }
         }
+        info!(chain_len = chain.len(), "transformer chain built");
         chain
     }
 

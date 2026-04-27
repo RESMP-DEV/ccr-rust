@@ -11,6 +11,7 @@ categories = ["web-programming", "command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0"
+async-trait = "0.1"
 axum = "0.7"
 base64 = "0.21"
 bytes = "1"
@@ -23,6 +24,7 @@ env_logger = "0.11"
 flate2 = "1.0"
 futures = "0.3"
 gp-routing = { path = "../gp-routing", optional = true }
+sindexer = { path = "../rust_sindexer", default-features = false, optional = true }
 hex = "0.4"
 humantime = "2"
 jsonschema = "0.29"
@@ -64,9 +66,10 @@ name = "concurrent_streams"
 harness = false
 
 [features]
-default = ["dashboard"]
+default = ["dashboard", "sindexer"]
 dashboard = ["reqwest/blocking"]
 gp = ["dep:gp-routing"]
+sindexer = ["dep:sindexer"]
 
 [profile.release]
 opt-level = 3

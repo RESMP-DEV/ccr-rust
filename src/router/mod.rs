@@ -2,6 +2,9 @@
 mod types;
 pub use types::*;
 
+mod usage_metrics;
+pub use usage_metrics::extract_normalized_usage;
+
 mod translate_request;
 
 mod translate_response;
