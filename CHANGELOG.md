@@ -5,7 +5,25 @@ All notable changes to CCR-Rust will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Recording rules
+
+- Keep `Unreleased` current.
+- Record routing, protocol, operator workflow, dependency, and validation changes.
+- Summarize the effect of syncs or upstream pulls instead of pasting commit logs.
+
 ## [Unreleased]
+
+### Added
+
+- **Centralized Pyright type-checking via MCP daemon** — New `type_check` native tool runs
+  Pyright on the hub, eliminating per-worker Pyright/Pylance instances. Workers send file paths
+  and optional content overlays; the hub creates ephemeral workspaces, runs `pyright --outputjson`,
+  and returns structured diagnostics. Bounded to 3 concurrent invocations via semaphore.
+- **`--host` flag for MCP daemon** — Daemon now accepts an explicit bind address while
+  keeping the default on `127.0.0.1`; set `--host 0.0.0.0` or `CCR_MCP_DAEMON_HOST`
+  to opt into worker access from other machines.
+- **`--pyright-root` flag for MCP daemon** — Sets the project root for Pyright workspace
+  preparation. Gated: tool only registers when the flag or `PYRIGHT_PROJECT_ROOT` env var is set.
 
 ## [1.3.0] - 2026-04-09
 

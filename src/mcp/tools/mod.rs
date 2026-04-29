@@ -2,6 +2,7 @@
 pub mod context7;
 pub mod exa;
 pub mod memory;
+pub mod pyright;
 #[cfg(feature = "sindexer")]
 pub mod sindexer;
 
@@ -81,7 +82,11 @@ impl ToolRegistry {
             let names: Vec<String> = tool.tools().iter().map(|t| t.name.clone()).collect();
             if names.iter().any(|n| n == name) {
                 let result = tool.call(name, arguments).await;
-                info!(tool_name = name, success = result.is_ok(), "tool call completed");
+                info!(
+                    tool_name = name,
+                    success = result.is_ok(),
+                    "tool call completed"
+                );
                 return result;
             }
         }

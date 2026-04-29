@@ -126,13 +126,8 @@ pub async fn handle_messages(
 
     let mut request = request;
 
-    // Force non-streaming if configured (helps avoid SSE frame parsing limits)
-    // Remember original stream flag so we can pseudo-stream the response back
+    // Remember original stream flag; per-provider override is applied inside the tier loop
     let client_wants_stream = request.stream.unwrap_or(false);
-    if config.router().force_non_streaming && client_wants_stream {
-        info!("Forcing non-streaming mode (forceNonStreaming=true), will pseudo-stream response");
-        request.stream = Some(false);
-    }
 
     let mut ordered = state.ewma_tracker.sort_tiers_with_config(&tiers, config);
     let mut pinned_prefix_len = 0_usize;
@@ -175,7 +170,9 @@ pub async fn handle_messages(
             // Prepend search provider as first tier
             ordered.insert(0, (search_provider.clone(), "search".to_string()));
             #[allow(unused_assignments)]
-            { pinned_prefix_len = pinned_prefix_len.saturating_add(1); }
+            {
+                pinned_prefix_len = pinned_prefix_len.saturating_add(1);
+            }
             tracing::info!("Web search enabled, prepending {}", search_provider);
         }
     }
@@ -239,6 +236,19 @@ pub async fn handle_messages(
             request.system.as_ref(),
             tool_values.as_deref(),
         );
+
+        // Per-provider streaming decision: allow_streaming bypasses forceNonStreaming
+        let provider_allows_streaming = config
+            .resolve_provider(tier)
+            .map(|p| p.allow_streaming)
+            .unwrap_or(false);
+        let forced_non_streaming =
+            config.router().force_non_streaming && !provider_allows_streaming;
+        if client_wants_stream && forced_non_streaming {
+            request.stream = Some(false);
+        } else {
+            request.stream = Some(client_wants_stream);
+        }
 
         let retry_config = config.get_tier_retry(tier_name);
         let max_retries = retry_config.max_retries;
@@ -313,9 +323,9 @@ pub async fn handle_messages(
                         tier_name, total_duration, attempt_duration
                     );
 
-                    // If client wanted streaming but we forced non-streaming,
+                    // If client wanted streaming but we forced non-streaming for this provider,
                     // wrap the JSON response as pseudo-SSE so Claude CLI can parse it.
-                    if client_wants_stream && config.router().force_non_streaming {
+                    if client_wants_stream && forced_non_streaming {
                         return streaming::wrap_json_response_as_sse(response).await;
                     }
 

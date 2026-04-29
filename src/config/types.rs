@@ -241,6 +241,12 @@ pub struct Provider {
     /// as informational warnings without actually rejecting at quota zero.
     #[serde(default = "default_honor_ratelimit_headers")]
     pub honor_ratelimit_headers: bool,
+
+    /// When true, this provider streams natively even when the global
+    /// `forceNonStreaming` is enabled.  Useful for providers where
+    /// non-streaming mode causes excessive latency (e.g. Gemini).
+    #[serde(default)]
+    pub allow_streaming: bool,
 }
 
 fn default_honor_ratelimit_headers() -> bool {

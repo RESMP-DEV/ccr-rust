@@ -5,7 +5,9 @@ async fn start_daemon(port: u16) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         ccr_rust::mcp::daemon::run(ccr_rust::mcp::daemon::DaemonArgs {
             port,
+            host: "127.0.0.1".to_string(),
             memory_dir: None,
+            pyright_root: None,
         })
         .await
         .ok();
@@ -44,7 +46,10 @@ async fn test_initialize_and_tools_list() {
     )
     .await;
 
-    assert_eq!(init_resp["result"]["serverInfo"]["name"], "ccr-rust-mcp-daemon");
+    assert_eq!(
+        init_resp["result"]["serverInfo"]["name"],
+        "ccr-rust-mcp-daemon"
+    );
 
     let list_resp = mcp_post(
         port,
@@ -57,17 +62,28 @@ async fn test_initialize_and_tools_list() {
     )
     .await;
 
-    let tools = list_resp["result"]["tools"].as_array().expect("tools array");
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools array");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
 
     // context7 tools are always present (no API key needed)
-    assert!(names.contains(&"resolve-library-id"), "missing context7 resolve");
+    assert!(
+        names.contains(&"resolve-library-id"),
+        "missing context7 resolve"
+    );
     assert!(names.contains(&"query-docs"), "missing context7 query");
 
     // memory tools are always present
-    assert!(names.contains(&"create_entities"), "missing memory create_entities");
+    assert!(
+        names.contains(&"create_entities"),
+        "missing memory create_entities"
+    );
     assert!(names.contains(&"read_graph"), "missing memory read_graph");
-    assert!(names.contains(&"search_nodes"), "missing memory search_nodes");
+    assert!(
+        names.contains(&"search_nodes"),
+        "missing memory search_nodes"
+    );
 }
 
 #[tokio::test]
@@ -101,7 +117,8 @@ async fn test_memory_crud() {
                 }
             }
         }),
-    ).await;
+    )
+    .await;
 
     assert!(create_resp["result"]["content"].is_array());
     assert!(!create_resp["result"]["isError"].as_bool().unwrap_or(true));
@@ -113,7 +130,8 @@ async fn test_memory_crud() {
             "jsonrpc": "2.0", "id": "r1", "method": "tools/call",
             "params": { "name": "read_graph", "arguments": {} }
         }),
-    ).await;
+    )
+    .await;
 
     let content_text = read_resp["result"]["content"][0]["text"].as_str().unwrap();
     let graph: Value = serde_json::from_str(content_text).unwrap();
@@ -126,9 +144,12 @@ async fn test_memory_crud() {
             "jsonrpc": "2.0", "id": "s1", "method": "tools/call",
             "params": { "name": "search_nodes", "arguments": { "query": "Rust" } }
         }),
-    ).await;
+    )
+    .await;
 
-    let search_text = search_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let search_text = search_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     let search_result: Value = serde_json::from_str(search_text).unwrap();
     assert!(!search_result["entities"].as_array().unwrap().is_empty());
 }

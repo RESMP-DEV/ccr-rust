@@ -17,6 +17,7 @@ use crate::mcp::protocol::JsonRpcMessage;
 use crate::mcp::tools::context7::Context7Tool;
 use crate::mcp::tools::exa::ExaTool;
 use crate::mcp::tools::memory::MemoryTool;
+use crate::mcp::tools::pyright::PyrightTool;
 use crate::mcp::tools::ToolRegistry;
 
 struct DaemonState {
@@ -25,7 +26,9 @@ struct DaemonState {
 
 pub struct DaemonArgs {
     pub port: u16,
+    pub host: String,
     pub memory_dir: Option<PathBuf>,
+    pub pyright_root: Option<PathBuf>,
 }
 
 pub async fn run(args: DaemonArgs) -> Result<()> {
@@ -61,6 +64,15 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         tools.push(Box::new(SindexerTool::new()));
     }
 
+    if let Some(ref pyright_root) = args.pyright_root {
+        tracing::info!(root = %pyright_root.display(), "pyright tool enabled");
+        tools.push(Box::new(PyrightTool::new(
+            pyright_root.clone(),
+            PathBuf::from("/tmp/ccr-pyright-workspaces"),
+            3,
+        )));
+    }
+
     let state = Arc::new(DaemonState {
         registry: ToolRegistry::new(tools),
     });
@@ -70,15 +82,14 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         .route("/health", get(handle_health))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
+    let host: std::net::IpAddr = args.host.parse().context("invalid host address")?;
+    let addr = SocketAddr::from((host, args.port));
     tracing::info!("mcp-daemon listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("failed to bind")?;
-    axum::serve(listener, app)
-        .await
-        .context("server error")?;
+    axum::serve(listener, app).await.context("server error")?;
 
     Ok(())
 }
@@ -135,11 +146,7 @@ fn mcp_response(
     _accept: &str,
 ) -> (StatusCode, [(&'static str, &'static str); 1], String) {
     let body = serde_json::to_string(&msg).unwrap_or_default();
-    (
-        StatusCode::OK,
-        [("content-type", "application/json")],
-        body,
-    )
+    (StatusCode::OK, [("content-type", "application/json")], body)
 }
 
 async fn dispatch(

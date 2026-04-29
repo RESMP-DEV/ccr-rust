@@ -334,12 +334,7 @@ pub async fn handle_chat_completions(
                 .into_response();
         }
     };
-    // Override stream if forceNonStreaming is enabled
-    let stream_requested = if state.config.router().force_non_streaming {
-        false
-    } else {
-        internal_request.stream.unwrap_or(false)
-    };
+    let stream_requested = internal_request.stream.unwrap_or(false);
     let mut anthropic_request = internal_request_to_anthropic_request(internal_request);
     anthropic_request.openai_passthrough_body = Some(passthrough_body);
     let response = handle_messages(State(state), headers, Json(anthropic_request)).await;

@@ -135,9 +135,17 @@ enum Commands {
         #[arg(short, long, default_value = "3457")]
         port: u16,
 
+        /// Listen address
+        #[arg(long, default_value = "127.0.0.1", env = "CCR_MCP_DAEMON_HOST")]
+        host: String,
+
         /// Directory for memory graph persistence
         #[arg(long, env = "CCR_MCP_MEMORY_DIR")]
         memory_dir: Option<String>,
+
+        /// Project root for Pyright type-checking
+        #[arg(long, env = "PYRIGHT_PROJECT_ROOT")]
+        pyright_root: Option<String>,
     },
     /// List and analyze debug captures.
     Captures {
@@ -548,10 +556,17 @@ async fn main() -> Result<()> {
             })
             .await?;
         }
-        Some(Commands::McpDaemon { port, memory_dir }) => {
+        Some(Commands::McpDaemon {
+            port,
+            host,
+            memory_dir,
+            pyright_root,
+        }) => {
             ccr_rust::mcp::daemon::run(ccr_rust::mcp::daemon::DaemonArgs {
                 port,
+                host,
                 memory_dir: memory_dir.map(std::path::PathBuf::from),
+                pyright_root: pyright_root.map(std::path::PathBuf::from),
             })
             .await?;
         }

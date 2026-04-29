@@ -486,7 +486,10 @@ async fn convert_openai_json_response_to_responses(response: Response) -> Respon
                     axum::http::HeaderValue::from_static("text/event-stream"),
                 );
                 parts.status = StatusCode::OK;
-                return Response::from_parts(parts, Body::from(convert_sse_payload_to_responses(&payload)));
+                return Response::from_parts(
+                    parts,
+                    Body::from(convert_sse_payload_to_responses(&payload)),
+                );
             }
             return Response::from_parts(parts, Body::from(body_bytes));
         }
@@ -780,7 +783,8 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
 
             if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                 for tool_call in tool_calls {
-                    let index = tool_call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let index =
+                        tool_call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                     let entry = tools.entry(index).or_default();
 
                     if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
@@ -829,8 +833,12 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         }
 
         // Anthropic event fallback path (when OpenAI conversion did not happen upstream)
-        let event_type = event_type
-            .or_else(|| chunk.get("type").and_then(|v| v.as_str()).map(str::to_string));
+        let event_type = event_type.or_else(|| {
+            chunk
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
         match event_type.as_deref() {
             Some("content_block_delta") => {
                 if !message_item_added {
@@ -1021,15 +1029,10 @@ pub async fn handle_responses(
         }
     };
 
-    // Override stream if forceNonStreaming is enabled
-    let stream_requested = if state.config.router().force_non_streaming {
-        false
-    } else {
-        request_body
-            .get("stream")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
-    };
+    let stream_requested = request_body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     let openai_chat_request = match responses_request_to_openai_chat_request(&request_body) {
         Ok(request) => request,

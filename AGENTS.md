@@ -81,3 +81,7 @@ Watch out for these recurring mistakes:
 ## File Growth Policy
 
 This repo enforces a SLOC ratchet. Split files when they accumulate multiple independent concerns, and prefer clear module boundaries over one giant orchestration file.
+
+## Change log expectations
+
+Update `CHANGELOG.md` when a change affects routing behavior, protocol support, operator workflow, validation posture, or dependency shape. For upstream or sync-heavy work, summarize the effect in plain language rather than copying commit logs.
