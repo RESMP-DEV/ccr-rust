@@ -242,6 +242,8 @@ pub struct PreRequestAuditEntry {
     pub message_tokens: u64,
     /// Estimated tokens from the system prompt.
     pub system_tokens: u64,
+    /// Estimated tokens from tool definitions.
+    pub tool_tokens: u64,
     /// Sum of all component token estimates.
     pub total_tokens: u64,
 }
@@ -560,6 +562,7 @@ pub fn record_pre_request_tokens(
         tier: tier.to_string(),
         message_tokens: msg_tokens,
         system_tokens: sys_tokens,
+        tool_tokens: tool_tokens,
         total_tokens: total,
     };
 
@@ -725,7 +728,7 @@ pub fn verify_token_usage(tier: &str, local_estimate: u64, upstream_input: u64) 
 
 #[cfg(test)]
 mod tests {
-    use super::key_matches_persistence_prefix;
+    use super::{key_matches_persistence_prefix, record_pre_request_tokens, AUDIT_LOG};
 
     #[test]
     fn key_prefix_match_accepts_prefix_root_and_namespace() {
@@ -749,5 +752,95 @@ mod tests {
             "another-prefix:counter:ccr_requests_total",
             "ccr-rust:persistence:v1"
         ));
+    }
+
+    #[test]
+    fn token_audit_records_tool_tokens() {
+        use serde_json::json;
+
+        let body_str = serde_json::to_string(&json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "system": "You are a helpful assistant with calculator and search tools.",
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "calculator",
+                        "description": "Perform arithmetic",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "description": "Search the web",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+
+        let messages = body["messages"].as_array().unwrap().clone();
+        let system = Some(&body["system"]);
+        let tools = Some(body["tools"].as_array().unwrap().as_slice());
+
+        let total = record_pre_request_tokens("test_tier", &messages, system, tools);
+
+        // Read the most recent audit entry from the ring buffer.
+        let guard = AUDIT_LOG.read();
+        let log = guard.as_ref().expect("audit log should exist");
+        let entry = log.back().expect("audit log should have at least one entry");
+
+        assert_eq!(entry.tier, "test_tier");
+        assert!(entry.message_tokens > 0, "message_tokens should be > 0");
+        assert!(entry.system_tokens > 0, "system_tokens should be > 0");
+        assert!(entry.tool_tokens > 0, "tool_tokens should be > 0");
+        assert_eq!(
+            entry.total_tokens,
+            entry.message_tokens + entry.system_tokens + entry.tool_tokens,
+            "total should equal sum of components"
+        );
+        assert_eq!(
+            entry.total_tokens, total,
+            "returned total should match audit entry total"
+        );
+    }
+
+    #[test]
+    fn token_audit_includes_tool_tokens() {
+        // Focused coverage: verify PreRequestAuditEntry serializes with tool_tokens field.
+        use super::PreRequestAuditEntry;
+
+        let entry = PreRequestAuditEntry {
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            tier: "test_tier".to_string(),
+            message_tokens: 10,
+            system_tokens: 20,
+            tool_tokens: 30,
+            total_tokens: 60,
+        };
+
+        let json = serde_json::to_string(&entry).expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
+
+        // Verify all fields are present including tool_tokens
+        assert!(parsed.get("timestamp").is_some(), "timestamp should be in JSON");
+        assert!(parsed.get("tier").is_some(), "tier should be in JSON");
+        assert!(parsed.get("message_tokens").is_some(), "message_tokens should be in JSON");
+        assert!(parsed.get("system_tokens").is_some(), "system_tokens should be in JSON");
+        assert!(parsed.get("tool_tokens").is_some(), "tool_tokens should be in JSON");
+        assert!(parsed.get("total_tokens").is_some(), "total_tokens should be in JSON");
+
+        // Verify the tool_tokens value
+        assert_eq!(parsed["tool_tokens"].as_u64(), Some(30), "tool_tokens value should be 30");
+        assert_eq!(parsed["message_tokens"].as_u64(), Some(10), "message_tokens should be 10");
+        assert_eq!(parsed["system_tokens"].as_u64(), Some(20), "system_tokens should be 20");
+        assert_eq!(parsed["total_tokens"].as_u64(), Some(60), "total_tokens should be 60");
     }
 }
