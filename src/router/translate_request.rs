@@ -158,9 +158,11 @@ pub(super) fn translate_request_anthropic_to_openai(
 ) -> OpenAIRequest {
     debug!(model, message_count = anthropic_req.messages.len(), "translating Anthropic request to OpenAI format");
     let mut messages: Vec<OpenAIMessage> = Vec::new();
-    let is_reasoning_model = model.to_lowercase().contains("reasoner")
-        || model.to_lowercase().contains("r1")
-        || model.to_lowercase().contains("thinking");
+    let model_lower = model.to_lowercase();
+    let is_reasoning_model = model_lower.contains("reasoner")
+        || model_lower.contains("r1")
+        || model_lower.contains("thinking");
+    let is_deepseek = model_lower.contains("deepseek");
 
     // Handle system prompt: Anthropic has it as a top-level field,
     // OpenAI expects it as the first message with role "system"
@@ -342,6 +344,11 @@ pub(super) fn translate_request_anthropic_to_openai(
         tools: convert_anthropic_tools_to_openai(&anthropic_req.tools),
         reasoning_effort: if is_reasoning_model {
             Some("high".to_string())
+        } else {
+            None
+        },
+        thinking: if is_deepseek && !is_reasoning_model {
+            Some(serde_json::json!({"type": "disabled"}))
         } else {
             None
         },
