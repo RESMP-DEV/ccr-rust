@@ -275,6 +275,8 @@ pub async fn handle_messages(
                 tier,
                 tier_name,
                 local_estimate,
+                stream_first_event_timeout: retry_config.stream_first_event_timeout(),
+                stream_idle_timeout: retry_config.stream_idle_timeout(),
                 ratelimit_tracker: state.ratelimit_tracker.clone(),
                 debug_capture: state.debug_capture.clone(),
                 openai_passthrough_body: request.openai_passthrough_body.as_ref(),

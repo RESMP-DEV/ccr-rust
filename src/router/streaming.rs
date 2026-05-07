@@ -8,7 +8,7 @@ use super::translate_response::{
     create_stream_stop_events, translate_stream_chunk_to_anthropic, StreamTranslationState,
 };
 use super::types::*;
-use crate::metrics::{record_usage, verify_token_usage};
+use crate::metrics::{record_failure, record_usage, verify_token_usage};
 use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
 use crate::transformer::TransformerChain;
 
@@ -23,6 +23,27 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::metrics::{
     increment_active_streams, record_stream_backpressure, record_throughput, record_ttft,
 };
+
+async fn send_stream_timeout_error(
+    tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+    tier_name: &str,
+    idle_timeout: std::time::Duration,
+) {
+    let message = format!(
+        "CCR stream idle timeout on {} after {}ms",
+        tier_name,
+        idle_timeout.as_millis()
+    );
+    let payload = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "timeout_error",
+            "message": message
+        }
+    });
+    let sse_data = format!("event: error\ndata: {}\n\n", payload);
+    let _ = tx.send(Ok(Bytes::from(sse_data))).await;
+}
 
 /// A boxed byte stream that both streaming handlers accept.
 pub type BoxByteStream =
@@ -52,17 +73,39 @@ pub async fn stream_response_translated(
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
         let stream_start = verify_ctx.as_ref().map(|ctx| ctx.stream_start);
+        let tier_name = verify_ctx
+            .as_ref()
+            .map(|ctx| ctx.tier_name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let idle_timeout = verify_ctx
+            .as_ref()
+            .map(|ctx| ctx.stream_idle_timeout)
+            .unwrap_or_else(|| std::time::Duration::from_secs(120));
+        let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_token_time: Option<std::time::Instant> = None;
+        let mut ended_with_timeout = false;
 
         loop {
             tokio::select! {
+                _ = tokio::time::sleep_until(idle_deadline) => {
+                    warn!(
+                        tier = %tier_name,
+                        idle_timeout_ms = idle_timeout.as_millis(),
+                        "CCR stream idle timeout"
+                    );
+                    record_failure(&tier_name, "stream_idle_timeout");
+                    send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
+                    ended_with_timeout = true;
+                    break;
+                }
                 chunk = stream.next() => {
                     let Some(chunk) = chunk else {
                         break;
                     };
                     match chunk {
                         Ok(bytes) => {
+                            let mut forwarded = false;
                             for frame in decoder.push(&bytes) {
                                 let json_str = frame.data.trim();
                                 if json_str == "[DONE]" || json_str.is_empty() {
@@ -101,6 +144,7 @@ pub async fn stream_response_translated(
                                         if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
                                             break;
                                         }
+                                        forwarded = true;
                                     }
 
                                     if let Some(choice) = chunk.choices.first() {
@@ -142,7 +186,11 @@ pub async fn stream_response_translated(
                                     if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
                                         break;
                                     }
+                                    forwarded = true;
                                 }
+                            }
+                            if forwarded {
+                                idle_deadline = tokio::time::Instant::now() + idle_timeout;
                             }
                         }
                         Err(e) => {
@@ -158,6 +206,11 @@ pub async fn stream_response_translated(
                     break;
                 }
             }
+        }
+
+        if ended_with_timeout {
+            increment_active_streams(-1);
+            return;
         }
 
         // Send final stop events
@@ -208,10 +261,8 @@ pub async fn stream_response_translated(
             }
         }
 
-        let stop_events = create_stream_stop_events(
-            usage.clone(),
-            translation_state.finish_reason.as_deref(),
-        );
+        let stop_events =
+            create_stream_stop_events(usage.clone(), translation_state.finish_reason.as_deref());
         for event in stop_events {
             let event_json = serde_json::to_string(&event).unwrap_or_default();
             let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
@@ -294,17 +345,32 @@ pub async fn stream_anthropic_response_with_tracking(
         let mut accumulated_content_len: usize = 0;
         // TTFT/throughput timing
         let stream_start = verify_ctx.stream_start;
+        let idle_timeout = verify_ctx.stream_idle_timeout;
+        let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_token_time: Option<std::time::Instant> = None;
+        let mut ended_with_timeout = false;
 
         loop {
             tokio::select! {
+                _ = tokio::time::sleep_until(idle_deadline) => {
+                    warn!(
+                        tier = %tier_name,
+                        idle_timeout_ms = idle_timeout.as_millis(),
+                        "CCR stream idle timeout"
+                    );
+                    record_failure(&tier_name, "stream_idle_timeout");
+                    send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
+                    ended_with_timeout = true;
+                    break;
+                }
                 chunk = stream.next() => {
                     let Some(chunk) = chunk else {
                         break;
                     };
                     match chunk {
                         Ok(bytes) => {
+                            let mut forwarded = false;
                             for frame in decoder.push(&bytes) {
                                 let json_str = frame.data.trim();
                                 if json_str == "[DONE]" || json_str.is_empty() {
@@ -380,6 +446,10 @@ pub async fn stream_anthropic_response_with_tracking(
                                 if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
                                     break;
                                 }
+                                forwarded = true;
+                            }
+                            if forwarded {
+                                idle_deadline = tokio::time::Instant::now() + idle_timeout;
                             }
                         }
                         Err(e) => {
@@ -393,6 +463,11 @@ pub async fn stream_anthropic_response_with_tracking(
                     break;
                 }
             }
+        }
+
+        if ended_with_timeout {
+            increment_active_streams(-1);
+            return;
         }
 
         // Estimate tokens if provider returned zeros (some Anthropic-compatible APIs don't report usage)

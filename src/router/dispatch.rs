@@ -2,6 +2,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{trace, warn};
 
 use super::streaming::{
@@ -16,7 +17,7 @@ use crate::metrics::{
     record_rate_limit_backoff, record_rate_limit_hit, record_usage, verify_token_usage,
 };
 use crate::ratelimit::RateLimitTracker;
-use crate::sse::StreamVerifyCtx;
+use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
 use futures::StreamExt;
@@ -33,24 +34,86 @@ use futures::StreamExt;
 /// Accumulates bytes in a loop (within the timeout window) to handle TCP
 /// fragmentation — a single `resp.chunk()` may not contain a complete SSE
 /// frame or JSON object.
+const MAX_STREAM_PEEK_BYTES: usize = 1024 * 1024;
+
+fn embedded_stream_error(payload: &str) -> Option<(String, String)> {
+    let trimmed = payload.trim();
+    let json_candidate = if trimmed.starts_with('{') {
+        Some(trimmed.to_string())
+    } else {
+        trimmed
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .filter(|d| d.starts_with('{'))
+            .map(|d| d.to_string())
+    };
+
+    let candidate = json_candidate?;
+    let json = serde_json::from_str::<serde_json::Value>(&candidate).ok()?;
+    if json.get("error").is_none() {
+        return None;
+    }
+
+    let msg = json["error"]["message"]
+        .as_str()
+        .unwrap_or("Unknown error in stream body")
+        .to_string();
+    let code = json["error"]["code"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    Some((code, msg))
+}
+
 async fn check_stream_for_embedded_error(
     mut resp: reqwest::Response,
     tier_name: &str,
+    first_event_timeout: Duration,
 ) -> Result<BoxByteStream, TryRequestError> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+    let deadline = tokio::time::Instant::now() + first_event_timeout;
     let mut buf = Vec::new();
+    let mut decoder = SseFrameDecoder::new();
 
     loop {
         match tokio::time::timeout_at(deadline, resp.chunk()).await {
             Ok(Ok(Some(bytes))) => {
                 buf.extend_from_slice(&bytes);
+                if buf.len() > MAX_STREAM_PEEK_BYTES {
+                    return Err(TryRequestError::Other(anyhow::anyhow!(
+                        "CCR stream first event peek exceeded {} bytes on {}",
+                        MAX_STREAM_PEEK_BYTES,
+                        tier_name
+                    )));
+                }
                 let text = String::from_utf8_lossy(&buf);
                 let trimmed = text.trim();
-                // Raw JSON that closes its top-level object, or a complete
-                // SSE frame (terminated by `\n\n`) — we have enough to check.
-                let have_complete_payload = (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                    || text.contains("\n\n");
-                if have_complete_payload {
+
+                if trimmed.starts_with('{') && trimmed.ends_with('}') {
+                    break;
+                }
+
+                let mut saw_data_frame = false;
+                for frame in decoder.push(&bytes) {
+                    let data = frame.data.trim();
+                    if data.is_empty() {
+                        continue;
+                    }
+                    saw_data_frame = true;
+                    if let Some((code, msg)) = embedded_stream_error(data) {
+                        warn!(
+                            tier = tier_name,
+                            error_code = code,
+                            "Provider returned error in 200 stream body: {}",
+                            msg
+                        );
+                        return Err(TryRequestError::Other(anyhow::anyhow!(
+                            "Provider error in 200 stream (code {}): {}",
+                            code,
+                            msg
+                        )));
+                    }
+                }
+                if saw_data_frame {
                     break;
                 }
             }
@@ -62,48 +125,28 @@ async fn check_stream_for_embedded_error(
             }
             Ok(Err(e)) => return Err(TryRequestError::Other(e.into())),
             Err(_timeout) => {
-                if buf.is_empty() {
-                    trace!(tier = tier_name, "Stream first-chunk timeout, skipping error peek");
-                    return Ok(Box::pin(resp.bytes_stream()));
-                }
-                break;
+                return Err(TryRequestError::Other(anyhow::anyhow!(
+                    "CCR stream first event timeout on {} after {}ms",
+                    tier_name,
+                    first_event_timeout.as_millis()
+                )));
             }
         }
     }
 
     let text = String::from_utf8_lossy(&buf);
-    let trimmed = text.trim();
-
-    let json_candidate = if trimmed.starts_with('{') {
-        Some(trimmed.to_string())
-    } else {
-        trimmed
-            .lines()
-            .find_map(|line| line.strip_prefix("data: "))
-            .filter(|d| d.starts_with('{'))
-            .map(|d| d.to_string())
-    };
-
-    if let Some(ref candidate) = json_candidate {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(candidate) {
-            if json.get("error").is_some() {
-                let msg = json["error"]["message"]
-                    .as_str()
-                    .unwrap_or("Unknown error in stream body");
-                let code = json["error"]["code"].as_str().unwrap_or("unknown");
-                warn!(
-                    tier = tier_name,
-                    error_code = code,
-                    "Provider returned error in 200 stream body: {}",
-                    msg
-                );
-                return Err(TryRequestError::Other(anyhow::anyhow!(
-                    "Provider error in 200 stream (code {}): {}",
-                    code,
-                    msg
-                )));
-            }
-        }
+    if let Some((code, msg)) = embedded_stream_error(&text) {
+        warn!(
+            tier = tier_name,
+            error_code = code,
+            "Provider returned error in 200 stream body: {}",
+            msg
+        );
+        return Err(TryRequestError::Other(anyhow::anyhow!(
+            "Provider error in 200 stream (code {}): {}",
+            code,
+            msg
+        )));
     }
 
     let peeked = bytes::Bytes::from(buf);
@@ -173,6 +216,8 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) tier: &'a str,
     pub(super) tier_name: &'a str,
     pub(super) local_estimate: u64,
+    pub(super) stream_first_event_timeout: Duration,
+    pub(super) stream_idle_timeout: Duration,
     pub(super) ratelimit_tracker: Arc<RateLimitTracker>,
     pub(super) debug_capture: Option<Arc<DebugCapture>>,
     /// Original OpenAI request body for passthrough to OpenAI-compatible backends.
@@ -187,6 +232,8 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
         tier,
         tier_name,
         local_estimate,
+        stream_first_event_timeout,
+        stream_idle_timeout,
         ratelimit_tracker,
         debug_capture,
         openai_passthrough_body,
@@ -230,6 +277,8 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     model_name,
                     tier_name,
                     local_estimate,
+                    stream_first_event_timeout,
+                    stream_idle_timeout,
                     ratelimit_tracker,
                     chain,
                     debug_capture,
@@ -247,6 +296,8 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     model_name,
                     tier_name,
                     local_estimate,
+                    stream_first_event_timeout,
+                    stream_idle_timeout,
                     ratelimit_tracker,
                     chain,
                     debug_capture,
@@ -263,6 +314,8 @@ pub(super) struct TryRequestProtocolArgs<'a> {
     pub(super) model_name: &'a str,
     pub(super) tier_name: &'a str,
     pub(super) local_estimate: u64,
+    pub(super) stream_first_event_timeout: Duration,
+    pub(super) stream_idle_timeout: Duration,
     pub(super) ratelimit_tracker: Arc<RateLimitTracker>,
     pub(super) chain: TransformerChain,
     pub(super) debug_capture: Option<Arc<DebugCapture>>,
@@ -302,7 +355,6 @@ pub(super) fn insert_ccr_tier_header(response: &mut Response, tier_name: &str) {
             .unwrap_or(axum::http::HeaderValue::from_static("unknown")),
     );
 }
-
 
 pub(super) fn build_openai_headers(
     provider: &crate::config::Provider,
@@ -421,6 +473,8 @@ pub(super) async fn try_request_via_openai_protocol(
         model_name,
         tier_name,
         local_estimate,
+        stream_first_event_timeout,
+        stream_idle_timeout,
         ratelimit_tracker,
         chain,
         debug_capture,
@@ -541,7 +595,8 @@ pub(super) async fn try_request_via_openai_protocol(
         let rate_limit_info = extract_rate_limit_headers(&resp);
 
         // Peek at first chunk to detect errors embedded in 200 streams.
-        let byte_stream = check_stream_for_embedded_error(resp, tier_name).await?;
+        let byte_stream =
+            check_stream_for_embedded_error(resp, tier_name, stream_first_event_timeout).await?;
 
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
@@ -549,17 +604,16 @@ pub(super) async fn try_request_via_openai_protocol(
             ratelimit_tracker: Some(ratelimit_tracker.clone()),
             rate_limit_info: Some(rate_limit_info),
             stream_start: std::time::Instant::now(),
+            stream_idle_timeout,
         };
-        Ok(
-            stream_response_translated(
-                byte_stream,
-                config.sse_buffer_size(),
-                Some(ctx),
-                model_name,
-                chain,
-            )
-            .await,
+        Ok(stream_response_translated(
+            byte_stream,
+            config.sse_buffer_size(),
+            Some(ctx),
+            model_name,
+            chain,
         )
+        .await)
     } else {
         // Extract rate limit headers for non-streaming.
         let rate_limit_info = extract_rate_limit_headers(&resp);
@@ -641,6 +695,8 @@ pub(super) async fn try_request_via_anthropic_protocol(
         model_name,
         tier_name,
         local_estimate,
+        stream_first_event_timeout,
+        stream_idle_timeout,
         ratelimit_tracker,
         chain,
         debug_capture,
@@ -761,7 +817,8 @@ pub(super) async fn try_request_via_anthropic_protocol(
         let rate_limit_info = extract_rate_limit_headers(&resp);
 
         // Peek at first chunk to detect errors embedded in 200 streams.
-        let byte_stream = check_stream_for_embedded_error(resp, tier_name).await?;
+        let byte_stream =
+            check_stream_for_embedded_error(resp, tier_name, stream_first_event_timeout).await?;
 
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
@@ -769,11 +826,16 @@ pub(super) async fn try_request_via_anthropic_protocol(
             ratelimit_tracker: Some(ratelimit_tracker.clone()),
             rate_limit_info: Some(rate_limit_info),
             stream_start: std::time::Instant::now(),
+            stream_idle_timeout,
         };
 
-        let mut response =
-            stream_anthropic_response_with_tracking(byte_stream, config.sse_buffer_size(), ctx, chain)
-                .await;
+        let mut response = stream_anthropic_response_with_tracking(
+            byte_stream,
+            config.sse_buffer_size(),
+            ctx,
+            chain,
+        )
+        .await;
         insert_ccr_tier_header(&mut response, tier_name);
         Ok(response)
     } else {

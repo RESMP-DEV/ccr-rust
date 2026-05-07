@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use crate::ratelimit::RateLimitTracker;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Context for token verification on streaming responses.
 pub struct StreamVerifyCtx {
@@ -12,6 +12,8 @@ pub struct StreamVerifyCtx {
     /// Instant when the upstream HTTP response headers were received.
     /// Used to measure TTFT (time from response start to first content token).
     pub stream_start: Instant,
+    /// Maximum idle time between useful SSE frames before the stream is failed.
+    pub stream_idle_timeout: Duration,
 }
 
 /// Parsed SSE frame with `event` and combined multi-line `data`.

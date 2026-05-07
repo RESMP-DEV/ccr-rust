@@ -10,6 +10,7 @@ use axum::http::{Request, StatusCode};
 use axum::routing::post;
 use axum::Router;
 use serde_json::json;
+use std::time::{Duration, Instant};
 use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -42,6 +43,54 @@ fn skip_if_localhost_bind_unavailable(test_name: &str) -> bool {
     }
     eprintln!("Skipping {test_name}: cannot bind localhost sockets");
     true
+}
+
+async fn spawn_upstream(app: Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn slow_first_event_response() -> axum::response::Response {
+    let stream = futures::stream::once(async {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        Ok::<_, std::io::Error>(bytes::Bytes::from(
+            "data: {\"id\":\"slow\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}\n\n",
+        ))
+    });
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+async fn idle_after_first_event_response() -> axum::response::Response {
+    let stream = futures::stream::unfold(0, |state| async move {
+        match state {
+            0 => Some((
+                Ok::<_, std::io::Error>(bytes::Bytes::from(
+                    "data: {\"id\":\"idle\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+                )),
+                1,
+            )),
+            1 => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                Some((Ok(bytes::Bytes::from("data: [DONE]\n\n")), 2))
+            }
+            _ => None,
+        }
+    });
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(stream))
+        .unwrap()
 }
 
 /// Z.AI returns a quota exhaustion error as an SSE frame inside an HTTP 200
@@ -307,4 +356,157 @@ async fn valid_200_response_not_treated_as_error() {
         resp_json.get("content").is_some(),
         "Valid response should contain translated content"
     );
+}
+
+#[tokio::test]
+async fn first_event_timeout_cascades_to_next_tier() {
+    if skip_if_localhost_bind_unavailable("first_event_timeout_cascades_to_next_tier") {
+        return;
+    }
+
+    let slow_url =
+        spawn_upstream(Router::new().route("/chat/completions", post(slow_first_event_response)))
+            .await;
+    let fast_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-fast",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "m1",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "fast path"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        })))
+        .expect(1)
+        .mount(&fast_server)
+        .await;
+
+    let config = json!({
+        "Providers": [
+            { "name": "slow", "api_base_url": slow_url, "api_key": "k", "models": ["m0"] },
+            { "name": "fast", "api_base_url": fast_server.uri(), "api_key": "k", "models": ["m1"] }
+        ],
+        "Router": {
+            "default": "slow,m0",
+            "tiers": ["slow,m0", "fast,m1"],
+            "tierRetries": {
+                "slow": {
+                    "max_retries": 0,
+                    "stream_first_event_timeout_ms": 50,
+                    "stream_idle_timeout_ms": 1000
+                },
+                "fast": { "max_retries": 0 }
+            }
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let cfg = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(cfg);
+
+    let body = json!({
+        "model": "slow,m0",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 100,
+        "stream": true
+    });
+
+    let started = Instant::now();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "first-event timeout should cascade well before the outer request timeout"
+    );
+}
+
+#[tokio::test]
+async fn stream_idle_timeout_emits_error_event() {
+    if skip_if_localhost_bind_unavailable("stream_idle_timeout_emits_error_event") {
+        return;
+    }
+
+    let upstream_url = spawn_upstream(
+        Router::new().route("/chat/completions", post(idle_after_first_event_response)),
+    )
+    .await;
+
+    let config = json!({
+        "Providers": [
+            { "name": "idle", "api_base_url": upstream_url, "api_key": "k", "models": ["m0"] }
+        ],
+        "Router": {
+            "default": "idle,m0",
+            "tierRetries": {
+                "idle": {
+                    "max_retries": 0,
+                    "stream_first_event_timeout_ms": 1000,
+                    "stream_idle_timeout_ms": 50
+                }
+            }
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let cfg = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(cfg);
+
+    let body = json!({
+        "model": "idle,m0",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 100,
+        "stream": true
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = tokio::time::timeout(
+        Duration::from_secs(2),
+        axum::body::to_bytes(resp.into_body(), usize::MAX),
+    )
+    .await
+    .expect("stream should terminate on CCR idle timeout")
+    .unwrap();
+    let body_text = String::from_utf8_lossy(&body_bytes);
+
+    assert!(body_text.contains("hello"));
+    assert!(body_text.contains("timeout_error"));
+    assert!(body_text.contains("CCR stream idle timeout on idle after 50ms"));
 }

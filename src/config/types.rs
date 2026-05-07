@@ -493,6 +493,20 @@ pub struct TierRetryConfig {
     /// Maximum backoff delay in milliseconds.
     #[serde(default = "default_max_backoff_ms")]
     pub max_backoff_ms: u64,
+
+    /// Maximum time to wait for the first useful SSE frame after upstream headers arrive.
+    #[serde(
+        default = "default_stream_first_event_timeout_ms",
+        alias = "streamFirstEventTimeoutMs"
+    )]
+    pub stream_first_event_timeout_ms: u64,
+
+    /// Maximum idle time between useful SSE frames once streaming has started.
+    #[serde(
+        default = "default_stream_idle_timeout_ms",
+        alias = "streamIdleTimeoutMs"
+    )]
+    pub stream_idle_timeout_ms: u64,
 }
 
 /// Request batching configuration.
@@ -514,6 +528,8 @@ impl Default for TierRetryConfig {
             base_backoff_ms: default_base_backoff_ms(),
             backoff_multiplier: default_backoff_multiplier(),
             max_backoff_ms: default_max_backoff_ms(),
+            stream_first_event_timeout_ms: default_stream_first_event_timeout_ms(),
+            stream_idle_timeout_ms: default_stream_idle_timeout_ms(),
         }
     }
 }
@@ -581,6 +597,14 @@ impl TierRetryConfig {
 
         std::time::Duration::from_millis(clamped_ms.max(min_backoff) as u64)
     }
+
+    pub fn stream_first_event_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.stream_first_event_timeout_ms)
+    }
+
+    pub fn stream_idle_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.stream_idle_timeout_ms)
+    }
 }
 
 fn default_max_retries() -> usize {
@@ -597,6 +621,14 @@ fn default_backoff_multiplier() -> f64 {
 
 fn default_max_backoff_ms() -> u64 {
     10000
+}
+
+fn default_stream_first_event_timeout_ms() -> u64 {
+    120000
+}
+
+fn default_stream_idle_timeout_ms() -> u64 {
+    120000
 }
 
 fn default_batching_max_requests() -> usize {
@@ -703,6 +735,8 @@ mod backoff_tests {
             base_backoff_ms: 100,
             backoff_multiplier: 2.0,
             max_backoff_ms: 500,
+            stream_first_event_timeout_ms: default_stream_first_event_timeout_ms(),
+            stream_idle_timeout_ms: default_stream_idle_timeout_ms(),
         };
         // Even with slow tier scaling, should clamp to max
         let duration = config.backoff_duration_with_ewma(2, Some(5.0));

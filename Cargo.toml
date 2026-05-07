@@ -23,7 +23,6 @@ dirs = "6"
 env_logger = "0.11"
 flate2 = "1.0"
 futures = "0.3"
-gp-routing = { path = "../gp-routing", optional = true }
 sindexer = { path = "../rust_sindexer", default-features = false, optional = true }
 hex = "0.4"
 humantime = "2"
@@ -68,7 +67,7 @@ harness = false
 [features]
 default = ["dashboard", "sindexer"]
 dashboard = ["reqwest/blocking"]
-gp = ["dep:gp-routing"]
+gp = []
 sindexer = ["dep:sindexer"]
 
 [profile.release]

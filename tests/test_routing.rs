@@ -24,6 +24,7 @@ fn backoff_duration_exponential_growth() {
         base_backoff_ms: 100,
         backoff_multiplier: 2.0,
         max_backoff_ms: 10_000,
+        ..Default::default()
     };
 
     assert_eq!(cfg.backoff_duration(0), Duration::from_millis(100));
@@ -40,6 +41,7 @@ fn backoff_duration_clamps_at_max() {
         base_backoff_ms: 500,
         backoff_multiplier: 3.0,
         max_backoff_ms: 5_000,
+        ..Default::default()
     };
 
     // attempt 0: 500ms, attempt 1: 1500ms, attempt 2: 4500ms, attempt 3: 13500 -> clamped to 5000
@@ -57,6 +59,7 @@ fn backoff_duration_multiplier_one_is_constant() {
         base_backoff_ms: 250,
         backoff_multiplier: 1.0,
         max_backoff_ms: 10_000,
+        ..Default::default()
     };
 
     for attempt in 0..5 {
@@ -76,6 +79,7 @@ fn backoff_duration_zero_base_is_zero() {
         base_backoff_ms: 0,
         backoff_multiplier: 2.0,
         max_backoff_ms: 10_000,
+        ..Default::default()
     };
 
     for attempt in 0..3 {
@@ -90,6 +94,7 @@ fn backoff_duration_large_attempt_saturates_at_max() {
         base_backoff_ms: 1,
         backoff_multiplier: 10.0,
         max_backoff_ms: 30_000,
+        ..Default::default()
     };
 
     // 1 * 10^20 is astronomically large; must clamp to 30s
@@ -103,6 +108,7 @@ fn backoff_duration_fractional_multiplier() {
         base_backoff_ms: 1000,
         backoff_multiplier: 1.5,
         max_backoff_ms: 100_000,
+        ..Default::default()
     };
 
     // attempt 0: 1000, attempt 1: 1500, attempt 2: 2250, attempt 3: 3375
@@ -711,6 +717,7 @@ fn backoff_duration_max_smaller_than_base() {
         base_backoff_ms: 5000,
         backoff_multiplier: 2.0,
         max_backoff_ms: 1000,
+        ..Default::default()
     };
 
     assert_eq!(cfg.backoff_duration(0), Duration::from_millis(1000));
@@ -725,6 +732,7 @@ fn backoff_duration_multiplier_less_than_one_decays() {
         base_backoff_ms: 1000,
         backoff_multiplier: 0.5,
         max_backoff_ms: 10_000,
+        ..Default::default()
     };
 
     assert_eq!(cfg.backoff_duration(0), Duration::from_millis(1000));
@@ -744,6 +752,7 @@ fn tier_retry_config_roundtrip_serde() {
         base_backoff_ms: 250,
         backoff_multiplier: 1.8,
         max_backoff_ms: 15_000,
+        ..Default::default()
     };
 
     let json = serde_json::to_string(&original).unwrap();
@@ -785,6 +794,7 @@ async fn adaptive_backoff_applies_configured_delays() {
             base_backoff_ms: 50,
             backoff_multiplier: 1.5,
             max_backoff_ms: 10000,
+            ..Default::default()
         },
     );
 
@@ -854,6 +864,7 @@ async fn adaptive_backoff_clamps_to_max() {
             base_backoff_ms: 200,
             backoff_multiplier: 10.0,
             max_backoff_ms: 500,
+            ..Default::default()
         },
     );
 
@@ -1025,6 +1036,7 @@ async fn adaptive_backoff_zero_base_no_delay() {
             base_backoff_ms: 0,
             backoff_multiplier: 2.0,
             max_backoff_ms: 10000,
+            ..Default::default()
         },
     );
 
@@ -1085,6 +1097,7 @@ async fn adaptive_backoff_constant_multiplier() {
             base_backoff_ms: 100,
             backoff_multiplier: 1.0,
             max_backoff_ms: 10000,
+            ..Default::default()
         },
     );
 
@@ -1144,6 +1157,7 @@ async fn adaptive_backoff_fractional_multiplier() {
             base_backoff_ms: 100,
             backoff_multiplier: 0.5,
             max_backoff_ms: 10000,
+            ..Default::default()
         },
     );
 

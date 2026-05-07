@@ -363,7 +363,6 @@ dependencies = [
  "env_logger",
  "flate2",
  "futures",
- "gp-routing",
  "hex",
  "http-body-util",
  "humantime",
@@ -1163,10 +1162,6 @@ dependencies = [
  "regex-automata",
  "regex-syntax",
 ]
-
-[[package]]
-name = "gp-routing"
-version = "0.1.0"
 
 [[package]]
 name = "h2"
