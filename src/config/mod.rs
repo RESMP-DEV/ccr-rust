@@ -419,11 +419,13 @@ mod tests {
                 "api_key": "mk-xxx",
                 "models": ["model-v1"],
                 "protocol": "anthropic",
-                "anthropic_version": "2023-06-01"
+                "anthropic_version": "2023-06-01",
+                "auth_header": "authorization"
             }"#,
         );
         assert_eq!(p.protocol, ProviderProtocol::Anthropic);
         assert_eq!(p.anthropic_version.as_deref(), Some("2023-06-01"));
+        assert_eq!(p.auth_header.as_deref(), Some("authorization"));
     }
 
     #[test]

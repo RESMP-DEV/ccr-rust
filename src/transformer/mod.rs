@@ -253,6 +253,7 @@ impl TransformerRegistry {
         registry.register("reasoning", Arc::new(ReasoningTransformer));
         registry.register("enhancetool", Arc::new(EnhanceToolTransformer));
         registry.register("thinktag", Arc::new(ThinkTagTransformer));
+        registry.register("longcat-thinking", Arc::new(LongCatThinkingTransformer));
         registry.register("glm", Arc::new(GlmTransformer::default()));
         registry.register("kimi", Arc::new(KimiTransformer));
         registry.register("toolcompress", Arc::new(ToolCompressTransformer::default()));
@@ -509,6 +510,50 @@ mod tests {
             "Should strip think content"
         );
         assert!(text.contains("Before") && text.contains("After"));
+    }
+
+    #[test]
+    fn longcat_thinking_converts_thinking_only_response_to_text() {
+        let transformer = LongCatThinkingTransformer;
+        let response = serde_json::json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "LongCat-Flash-Thinking-2601",
+            "content": [
+                {"type": "thinking", "thinking": "Need a final answer."}
+            ],
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 3, "output_tokens": 5}
+        });
+
+        let result = transformer.transform_response(response).unwrap();
+
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][0]["text"], "Need a final answer.");
+        assert!(result["content"][0].get("signature").is_none());
+    }
+
+    #[test]
+    fn longcat_thinking_drops_unsigned_thinking_when_tool_use_exists() {
+        let transformer = LongCatThinkingTransformer;
+        let response = serde_json::json!({
+            "content": [
+                {"type": "thinking", "thinking": "I should call a tool."},
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "Bash",
+                    "input": {"command": "pwd"}
+                }
+            ]
+        });
+
+        let result = transformer.transform_response(response).unwrap();
+        let blocks = result["content"].as_array().unwrap();
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "tool_use");
     }
 
     #[test]

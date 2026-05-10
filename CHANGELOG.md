@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **LongCat Thinking response normalization** — Added a `longcat-thinking`
+  transformer and changed native Anthropic response dispatch to apply response
+  transformers before strict deserialization. This lets CCR-Rust normalize
+  LongCat's unsigned `thinking` blocks before OpenAI-compatible clients require
+  a `choices[]` response shape.
+- **Anthropic Bearer auth provider option** — Added provider-level
+  `auth_header = "authorization"` support so Anthropic-compatible upstreams
+  that require `Authorization: Bearer` can route through the native Anthropic
+  dispatch path without a custom transformer.
 - **Centralized Pyright type-checking via MCP daemon** — New `type_check` native tool runs
   Pyright on the hub, eliminating per-worker Pyright/Pylance instances. Workers send file paths
   and optional content overlays; the hub creates ephemeral workspaces, runs `pyright --outputjson`,

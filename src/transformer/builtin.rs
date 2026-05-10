@@ -4,8 +4,8 @@
 //! These transformers handle format conversions between various LLM API formats
 //! (Anthropic ↔ OpenAI), token limits, reasoning tags, and tool metadata.
 
-use super::uuid_nopanic;
 use super::Transformer;
+use super::uuid_nopanic;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
@@ -450,6 +450,63 @@ impl Transformer for ThinkTagTransformer {
                 }
             }
         }
+        Ok(response)
+    }
+}
+
+/// LongCat thinking response normalizer.
+///
+/// LongCat's thinking model returns Anthropic-style `thinking` content blocks
+/// without Anthropic's signed `signature` field. CCR-Rust cannot forward those
+/// as real thinking blocks to Anthropic clients, and the OpenAI compatibility
+/// layer cannot deserialize them before converting to `choices[]`. Preserve
+/// normal text/tool output and only turn thinking into text when it is the only
+/// useful content returned by the model.
+#[derive(Debug, Clone)]
+pub struct LongCatThinkingTransformer;
+
+impl Transformer for LongCatThinkingTransformer {
+    fn name(&self) -> &str {
+        "longcat-thinking"
+    }
+
+    fn transform_response(&self, mut response: Value) -> Result<Value> {
+        let Some(content_array) = response.get_mut("content").and_then(|c| c.as_array_mut()) else {
+            return Ok(response);
+        };
+
+        let has_non_thinking = content_array.iter().any(|block| {
+            block.get("type").and_then(|block_type| block_type.as_str()) != Some("thinking")
+        });
+        let original_blocks = std::mem::take(content_array);
+        let mut normalized_blocks = Vec::with_capacity(original_blocks.len());
+
+        for block in original_blocks {
+            let is_unsigned_thinking = block.get("type").and_then(|block_type| block_type.as_str())
+                == Some("thinking")
+                && block.get("signature").is_none();
+
+            if !is_unsigned_thinking {
+                normalized_blocks.push(block);
+                continue;
+            }
+
+            if has_non_thinking {
+                continue;
+            }
+
+            if let Some(thinking) = block.get("thinking").and_then(|value| value.as_str()) {
+                let text = thinking.trim();
+                if !text.is_empty() {
+                    normalized_blocks.push(serde_json::json!({
+                        "type": "text",
+                        "text": text
+                    }));
+                }
+            }
+        }
+
+        *content_array = normalized_blocks;
         Ok(response)
     }
 }

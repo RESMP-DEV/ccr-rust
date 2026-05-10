@@ -220,6 +220,13 @@ pub struct Provider {
     #[serde(default)]
     pub anthropic_version: Option<String>,
 
+    /// Authentication header style for `protocol=anthropic`.
+    ///
+    /// Defaults to `x-api-key`, matching Anthropic. Set to `authorization`
+    /// for Anthropic-compatible providers that require `Authorization: Bearer`.
+    #[serde(default)]
+    pub auth_header: Option<String>,
+
     #[serde(default)]
     pub transformer: Option<ProviderTransformer>,
 

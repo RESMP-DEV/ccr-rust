@@ -10,7 +10,7 @@ use super::{
     OutputCompressTransformer, ThinkTagTransformer, ToolCompressTransformer,
 };
 use crate::config::TransformerEntry;
-use crate::transformer::{Transformer, TransformerChain};
+use crate::transformer::{LongCatThinkingTransformer, Transformer, TransformerChain};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
@@ -47,6 +47,10 @@ impl TransformerRegistry {
         }
         // Tier 7: DeepSeek Reasoner
         registry.register("deepseek", |_opts| Box::new(DeepSeekTransformer));
+        // LongCat thinking emits unsigned thinking blocks; normalize them.
+        registry.register("longcat-thinking", |_opts| {
+            Box::new(LongCatThinkingTransformer)
+        });
 
         // Format conversion transformers
         registry.register("anthropic", |_opts| Box::new(AnthropicToOpenaiTransformer));
@@ -110,7 +114,10 @@ impl TransformerRegistry {
             if let Some(transformer) = self.build(entry) {
                 chain = chain.with_transformer(std::sync::Arc::from(transformer));
             } else {
-                warn!(transformer = entry.name(), "skipping unregistered transformer");
+                warn!(
+                    transformer = entry.name(),
+                    "skipping unregistered transformer"
+                );
             }
         }
         info!(chain_len = chain.len(), "transformer chain built");
@@ -147,12 +154,13 @@ mod tests {
     fn registry_new_registers_provider_transformers() {
         let registry = TransformerRegistry::new();
         assert!(!registry.is_empty());
-        assert_eq!(registry.len(), 11);
+        assert_eq!(registry.len(), 12);
         assert!(registry.has("zai"));
         assert!(registry.has("minimax"));
         assert!(registry.has("moonshot"));
         assert!(registry.has("kimi"));
         assert!(registry.has("deepseek"));
+        assert!(registry.has("longcat-thinking"));
         assert!(registry.has("anthropic"));
         assert!(registry.has("openai-to-anthropic"));
         assert!(registry.has("maxtoken"));

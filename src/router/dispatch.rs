@@ -6,7 +6,7 @@ use std::time::Duration;
 use tracing::{trace, warn};
 
 use super::streaming::{
-    stream_anthropic_response_with_tracking, stream_response_translated, BoxByteStream,
+    BoxByteStream, stream_anthropic_response_with_tracking, stream_response_translated,
 };
 use super::translate_request::translate_request_anthropic_to_openai;
 use super::translate_response::{build_transformer_chain, translate_response_openai_to_anthropic};
@@ -419,15 +419,42 @@ pub(super) fn build_anthropic_headers(
     provider: &crate::config::Provider,
 ) -> Result<reqwest::header::HeaderMap, TryRequestError> {
     let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "x-api-key",
-        provider
-            .api_key
-            .parse()
-            .map_err(|e: reqwest::header::InvalidHeaderValue| {
-                TryRequestError::Other(anyhow::anyhow!("{}", e))
-            })?,
-    );
+    match provider
+        .auth_header
+        .as_deref()
+        .unwrap_or("x-api-key")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "x-api-key" => {
+            headers.insert(
+                "x-api-key",
+                provider
+                    .api_key
+                    .parse()
+                    .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                        TryRequestError::Other(anyhow::anyhow!("{}", e))
+                    })?,
+            );
+        }
+        "authorization" | "bearer" | "authorization-bearer" => {
+            headers.insert(
+                "Authorization",
+                format!("Bearer {}", provider.api_key).parse().map_err(
+                    |e: reqwest::header::InvalidHeaderValue| {
+                        TryRequestError::Other(anyhow::anyhow!("{}", e))
+                    },
+                )?,
+            );
+        }
+        other => {
+            return Err(TryRequestError::Other(anyhow::anyhow!(
+                "Unsupported Anthropic auth_header '{}'",
+                other
+            )));
+        }
+    }
     headers.insert(
         "anthropic-version",
         provider
@@ -863,7 +890,25 @@ pub(super) async fn try_request_via_anthropic_protocol(
             }
         }
 
-        if let Ok(anthropic_resp) = serde_json::from_slice::<AnthropicResponse>(&body) {
+        let transformed_response_value = match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(response_value) if !chain.is_empty() => Some(
+                chain
+                    .apply_response(response_value)
+                    .map_err(TryRequestError::Other)?,
+            ),
+            Ok(response_value) => Some(response_value),
+            Err(_) => None,
+        };
+
+        if let Some(response_value) = transformed_response_value {
+            let anthropic_resp = match serde_json::from_value::<AnthropicResponse>(response_value) {
+                Ok(response) => response,
+                Err(_) => {
+                    let mut response = (status, body).into_response();
+                    insert_ccr_tier_header(&mut response, tier_name);
+                    return Ok(response);
+                }
+            };
             // Estimate tokens when provider returns zeros (common for some Anthropic-compatible APIs)
             let mut input_tokens = anthropic_resp.usage.input_tokens;
             let mut output_tokens = anthropic_resp.usage.output_tokens;
@@ -903,19 +948,8 @@ pub(super) async fn try_request_via_anthropic_protocol(
             record_usage(tier_name, input_tokens, output_tokens, 0, 0);
             verify_token_usage(tier_name, local_estimate, input_tokens);
 
-            let final_resp = if chain.is_empty() {
-                anthropic_resp
-            } else {
-                let resp_value = serde_json::to_value(&anthropic_resp)
-                    .map_err(|e| TryRequestError::Other(e.into()))?;
-                let transformed = chain
-                    .apply_response(resp_value)
-                    .map_err(TryRequestError::Other)?;
-                serde_json::from_value::<AnthropicResponse>(transformed).unwrap_or(anthropic_resp)
-            };
-
-            let response_body =
-                serde_json::to_vec(&final_resp).map_err(|e| TryRequestError::Other(e.into()))?;
+            let response_body = serde_json::to_vec(&anthropic_resp)
+                .map_err(|e| TryRequestError::Other(e.into()))?;
             let mut response = (StatusCode::OK, response_body).into_response();
             insert_ccr_tier_header(&mut response, tier_name);
             return Ok(response);
@@ -924,5 +958,41 @@ pub(super) async fn try_request_via_anthropic_protocol(
         let mut response = (status, body).into_response();
         insert_ccr_tier_header(&mut response, tier_name);
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Provider;
+
+    fn anthropic_provider(auth_header: Option<&str>) -> Provider {
+        let mut value = serde_json::json!({
+            "name": "test-anthropic",
+            "api_base_url": "https://api.example.test/anthropic/v1",
+            "api_key": "ak-test",
+            "models": ["model-v1"],
+            "protocol": "anthropic"
+        });
+        if let Some(header) = auth_header {
+            value["auth_header"] = serde_json::Value::String(header.to_string());
+        }
+        serde_json::from_value(value).expect("provider config should parse")
+    }
+
+    #[test]
+    fn anthropic_headers_default_to_x_api_key() {
+        let headers = build_anthropic_headers(&anthropic_provider(None)).unwrap();
+
+        assert_eq!(headers.get("x-api-key").unwrap(), "ak-test");
+        assert!(headers.get("authorization").is_none());
+    }
+
+    #[test]
+    fn anthropic_headers_can_use_bearer_authorization() {
+        let headers = build_anthropic_headers(&anthropic_provider(Some("authorization"))).unwrap();
+
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer ak-test");
+        assert!(headers.get("x-api-key").is_none());
     }
 }
