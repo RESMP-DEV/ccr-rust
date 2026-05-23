@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--pyright-root` flag for MCP daemon** — Sets the project root for Pyright workspace
   preparation. Gated: tool only registers when the flag or `PYRIGHT_PROJECT_ROOT` env var is set.
 
+### Fixed
+
+- **Codex Responses token limit routing** — `/v1/responses` requests now map
+  `max_output_tokens` to OpenAI chat-compatible `max_completion_tokens` instead
+  of legacy `max_tokens`, matching newer OpenAI reasoning model requirements.
+
 ## [1.3.0] - 2026-04-09
 
 ### Changed

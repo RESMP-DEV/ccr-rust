@@ -1027,6 +1027,24 @@ mod tests {
         assert_eq!(messages[0]["role"], "system");
     }
 
+    #[test]
+    fn test_responses_request_uses_max_completion_tokens() {
+        let request = serde_json::json!({
+            "model": "codex,gpt-5.5",
+            "stream": false,
+            "max_output_tokens": 128,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello"}]
+            }]
+        });
+
+        let openai = responses_request_to_openai_chat_request(&request).unwrap();
+        assert_eq!(openai["max_completion_tokens"], 128);
+        assert!(openai.get("max_tokens").is_none());
+    }
+
     /// Verify that the OpenAI passthrough path is taken for Codex→OpenAI routes:
     /// when `openai_passthrough_body` is populated on `AnthropicRequest`, the
     /// `handle_chat_completions` flow preserves it and threads it through to

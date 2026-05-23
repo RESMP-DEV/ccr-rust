@@ -453,7 +453,12 @@ pub(super) fn responses_request_to_openai_chat_request(
         request["top_p"] = top_p;
     }
     if let Some(max_tokens) = body.get("max_output_tokens").cloned() {
-        request["max_tokens"] = max_tokens;
+        // The OpenAI Responses API names this field `max_output_tokens`,
+        // while newer OpenAI chat/reasoning models reject legacy `max_tokens`.
+        // The downstream Anthropic translation path also understands
+        // `max_completion_tokens`, so this preserves Codex compatibility
+        // without breaking Anthropic-protocol providers.
+        request["max_completion_tokens"] = max_tokens;
     }
 
     Ok(request)
