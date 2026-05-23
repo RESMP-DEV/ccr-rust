@@ -36,10 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Security dependency refresh** — Pinned `openssl` to `0.10.79`, `rand`
+- **Security dependency refresh** — Pinned `openssl` to `0.10.80`, `rand`
   to `0.8.6`, and upgraded `ratatui` to `0.30.0` so the router lockfile can
   resolve away from the current Dependabot advisories affecting `openssl`,
-  `rand`, and transitive `lru` usage.
+  `rand`, and transitive `lru` usage, including the follow-up AES-KW-PAD
+  `CipherCtxRef::cipher_update_inplace` advisory.
 
 - **Codex Responses token limit routing** — `/v1/responses` requests now map
   `max_output_tokens` to OpenAI chat-compatible `max_completion_tokens` instead
