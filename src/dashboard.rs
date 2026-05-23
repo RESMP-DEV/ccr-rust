@@ -292,7 +292,9 @@ fn run_loop<B: Backend>(
             last_tick = Instant::now();
         }
 
-        terminal.draw(|f| ui(f, &host, port, &ui_state, &session_info))?;
+        terminal
+            .draw(|f| ui(f, &host, port, &ui_state, &session_info))
+            .map_err(|err| anyhow::anyhow!("terminal draw failed: {err}"))?;
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -318,7 +320,7 @@ fn ui(f: &mut ratatui::Frame, host: &str, port: u16, state: &UiState, session_in
             Constraint::Percentage(30),
             Constraint::Min(0),
         ])
-        .split(f.size());
+        .split(f.area());
 
     // Render the header widget with global stats from fetched data
     render_header(f, main_chunks[0], host, port, &state.global_stats);
