@@ -562,7 +562,7 @@ pub fn record_pre_request_tokens(
         tier: tier.to_string(),
         message_tokens: msg_tokens,
         system_tokens: sys_tokens,
-        tool_tokens: tool_tokens,
+        tool_tokens,
         total_tokens: total,
     };
 

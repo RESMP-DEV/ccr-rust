@@ -22,6 +22,12 @@ impl SindexerTool {
     }
 }
 
+impl Default for SindexerTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl NativeTool for SindexerTool {
     fn tools(&self) -> Vec<McpTool> {

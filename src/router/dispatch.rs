@@ -50,9 +50,7 @@ fn embedded_stream_error(payload: &str) -> Option<(String, String)> {
 
     let candidate = json_candidate?;
     let json = serde_json::from_str::<serde_json::Value>(&candidate).ok()?;
-    if json.get("error").is_none() {
-        return None;
-    }
+    json.get("error")?;
 
     let msg = json["error"]["message"]
         .as_str()
@@ -119,7 +117,10 @@ async fn check_stream_for_embedded_error(
             }
             Ok(Ok(None)) => {
                 if buf.is_empty() {
-                    return Ok(Box::pin(futures::stream::empty()));
+                    let empty: BoxByteStream = Box::pin(
+                        futures::stream::empty::<Result<bytes::Bytes, reqwest::Error>>(),
+                    );
+                    return Ok(empty);
                 }
                 break;
             }
@@ -152,7 +153,8 @@ async fn check_stream_for_embedded_error(
     let peeked = bytes::Bytes::from(buf);
     let rest = resp.bytes_stream();
     let first = futures::stream::once(async move { Ok(peeked) });
-    Ok(Box::pin(first.chain(rest)))
+    let stream: BoxByteStream = Box::pin(first.chain(rest));
+    Ok(stream)
 }
 
 /// Check a non-streaming response body for an embedded error in a 200.
