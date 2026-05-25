@@ -68,9 +68,7 @@
                 ]
             },
             "tier_name": "ccr-qwen"
-        },
-
-        
+        }
     ],
     "Router": {
         "default": "wafer,Qwen3.5-397B-A17B",
