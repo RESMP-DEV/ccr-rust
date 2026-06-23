@@ -18,23 +18,13 @@ use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
 use std::sync::{Arc, LazyLock, Mutex};
-use tracing::trace;
+use tracing::{trace, warn};
 
 const THINK_START_TAG: &str = "<think>";
 const THINK_END_TAG: &str = "</think>";
 
 static THINK_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)<think>(.*?)</think>").unwrap());
-
-/// Models that support the `reasoning_effort` parameter
-const REASONING_EFFORT_MODELS: &[&str] = &["glm-5.2", "glm-5.1", "glm-5-turbo"];
-
-/// Check if a model supports reasoning_effort parameter
-fn supports_reasoning_effort(model: &str) -> bool {
-    REASONING_EFFORT_MODELS
-        .iter()
-        .any(|m| model.eq_ignore_ascii_case(m) || model.starts_with(&format!("{m}-")))
-}
 
 #[derive(Debug, Default)]
 struct StreamState {
@@ -146,14 +136,6 @@ impl GlmTransformer {
         let Some(obj) = parent.as_object_mut() else {
             return;
         };
-
-        // Modern GLM-5.2+ API returns native reasoning_content field.
-        // Preserve both content and reasoning_content as-is.
-        if obj.contains_key("reasoning_content") {
-            trace!("Modern GLM API detected - preserving content and reasoning_content");
-            return;
-        }
-
         let Some(content_val) = obj.get("content").cloned() else {
             return;
         };
@@ -215,35 +197,6 @@ impl GlmTransformer {
 impl Transformer for GlmTransformer {
     fn name(&self) -> &str {
         "glm"
-    }
-
-    fn transform_request(&self, mut request: Value) -> Result<Value> {
-        let Some(obj) = request.as_object_mut() else {
-            return Ok(request);
-        };
-
-        // Clone model name to avoid borrow issues during mutation
-        let model = obj
-            .get("model")
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        // Inject reasoning_effort for supported models if not already set
-        if supports_reasoning_effort(&model) && !obj.contains_key("reasoning_effort") {
-            // Default to "medium" effort for balanced performance
-            obj.insert("reasoning_effort".to_string(), Value::String("medium".to_string()));
-            trace!("Injected reasoning_effort=medium for model {}", model);
-        }
-
-        // Strip Anthropic-specific passthrough fields
-        obj.remove("metadata");
-        obj.remove("anthropic-beta");
-        obj.remove("anthropic-version");
-        obj.remove("anthropic_version");
-
-        trace!("GLM request transformed for model {}", model);
-        Ok(request)
     }
 
     fn transform_response(&self, mut response: Value) -> Result<Value> {
@@ -400,49 +353,5 @@ Then, I recall the answer from my knowledge base.</think>";
         let delta_3 = &transformed_3["choices"][0]["delta"];
         assert_eq!(delta_3["content"], " after");
         assert_eq!(delta_3["reasoning_content"], "ing");
-    }
-
-    #[test]
-    fn preserves_modern_glm_native_reasoning_content() {
-        let transformer = GlmTransformer::default();
-        // Modern GLM-5.2 returns native reasoning_content without think tags
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "content": "2 + 2 = 4",
-                    "reasoning_content": "First, I need to understand the question.\nThen, I calculate the result.",
-                    "role": "assistant"
-                }
-            }]
-        });
-
-        let transformed = transformer.transform_response(response).unwrap();
-        let message = &transformed["choices"][0]["message"];
-        // Both fields should be preserved as-is
-        assert_eq!(message["content"], "2 + 2 = 4");
-        assert_eq!(
-            message["reasoning_content"],
-            "First, I need to understand the question.\nThen, I calculate the result."
-        );
-    }
-
-    #[test]
-    fn preserves_modern_glm_with_only_reasoning_content() {
-        let transformer = GlmTransformer::default();
-        // Edge case: response with reasoning_content but empty content
-        let response = json!({
-            "choices": [{
-                "message": {
-                    "content": "",
-                    "reasoning_content": "This is the reasoning.",
-                    "role": "assistant"
-                }
-            }]
-        });
-
-        let transformed = transformer.transform_response(response).unwrap();
-        let message = &transformed["choices"][0]["message"];
-        assert_eq!(message["content"], "");
-        assert_eq!(message["reasoning_content"], "This is the reasoning.");
     }
 }

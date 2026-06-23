@@ -280,6 +280,10 @@ pub struct AnthropicResponse {
     pub content: Vec<AnthropicContentBlock>,
     pub usage: AnthropicUsage,
     pub stop_reason: Option<String>,
+    /// Optional reasoning_content from non-Anthropic providers (e.g. GLM-5.2, DeepSeek)
+    /// Serialized back to OpenAI format instead of thinking blocks
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

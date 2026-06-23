@@ -8,7 +8,7 @@ The easiest way to think about it:
 - CCR-Rust decides which provider/model should handle the request,
 - and you keep the same workflow even when you need to switch away from Claude.
 
-For many people, the main use case is simple: **when your Claude plan runs out, keep using Claude Code with a GLM-5.1/MiniMax 2.7 instead of changing tools.**
+For many people, the main use case is simple: **when your Claude plan runs out, keep using Claude Code with a GLM-5.2/MiniMax M3 instead of changing tools.**
 
 ## Features
 
@@ -105,29 +105,32 @@ CCR-Rust reads `~/.claude-code-router/config.json`. Supports `${ENV_VAR}` substi
 {
   "Providers": [
     {
-      "name": "deepseek",
-      "api_base_url": "https://api.deepseek.com",
-      "api_key": "${DEEPSEEK_API_KEY}",
-      "models": ["deepseek-chat", "deepseek-reasoner"]
+      "name": "zai",
+      "api_base_url": "https://api.z.ai/api/coding/paas/v4",
+      "api_key": "${ZAI_API_KEY}",
+      "models": ["glm-5.2", "glm-5.1", "glm-5-turbo"],
+      "transformer": {
+        "use": ["anthropic", "glm"]
+      },
+      "tier_name": "ccr-glm"
     },
     {
-      "name": "openrouter",
-      "api_base_url": "https://openrouter.ai/api/v1",
-      "api_key": "${OPENROUTER_API_KEY}",
-      "models": [
-        "inclusionai/ling-2.6-flash:free",
-        "minimax/minimax-m2.5:free"
-      ],
+      "name": "minimax",
+      "api_base_url": "https://api.minimax.io/anthropic/v1",
+      "api_key": "${MINIMAX_API_KEY}",
+      "models": ["MiniMax-M3", "MiniMax-M2.7"],
       "transformer": {
-        "use": ["anthropic", "openrouter"]
-      }
+        "use": ["minimax"]
+      },
+      "protocol": "anthropic",
+      "tier_name": "ccr-mm"
     }
   ],
   "Router": {
-    "default": "deepseek,deepseek-chat",
+    "default": "zai,glm-5.2",
     "tiers": [
-      "deepseek,deepseek-chat",
-      "openrouter,inclusionai/ling-2.6-flash:free"
+      "zai,glm-5.2",
+      "minimax,MiniMax-M3"
     ]
   },
   "PORT": 3456,

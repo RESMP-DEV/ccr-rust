@@ -15,6 +15,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Z.AI GLM-5.2 with reasoning_effort** — Added GLM-5.2 model with configurable
+  `reasoning_effort` parameter (`low`, `medium`, `high`). The `glm` transformer now
+  injects `reasoning_effort=medium` by default for GLM-5.2/5.1/5-turbo models, enabling
+  control over reasoning depth while maintaining backward compatibility with legacy
+  `` tag extraction.
+
+- **MiniMax M3 with adaptive thinking** — Added MiniMax-M3 model with native Anthropic-style
+  `thinking` blocks support. The `minimax` transformer now distinguishes between M3 models
+  (using `thinking: {type: "adaptive"}`) and M2.x models (using `reasoning_split: true`),
+  with proper handling of structured `reasoning_content` arrays from the OpenAI-compatible endpoint.
+
+- **MiniMax highspeed variants** — Added MiniMax-M2.7-highspeed and MiniMax-M2.5-highspeed models
+  for faster inference while maintaining the same performance characteristics.
+
+- **Provider request transformations** — Both `glm` and `minimax` transformers now include
+  `transform_request` methods that strip Anthropic-specific passthrough fields (`metadata`,
+  `anthropic-beta`, `anthropic-version`) to ensure clean upstream requests.
+
+### Changed
+
+- **Default coding model** — Changed default routing from `glm-5.1` to `glm-5.2` for improved
+  reasoning and coding performance with configurable reasoning effort.
+
+- **Z.AI model lineup** — Updated Z.AI models to `glm-5.2`, `glm-5.1`, `glm-5-turbo`, `glm-4.7`
+  (added `glm-5.2` at the front of the tier ordering).
+
+- **MiniMax model lineup** — Updated MiniMax models to `MiniMax-M3`, `MiniMax-M2.7`,
+  `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed` (added M3 and highspeed
+  variants to the tier ordering).
+
+### Fixed
+
+- **MiniMax structured reasoning handling** — The `minimax` transformer now correctly extracts
+  and normalizes reasoning content from MiniMax-M3's structured `reasoning_content` array
+  format (returned by the OpenAI-compatible endpoint) into plain text for consistent handling.
+
+- **GLM reasoning_content preservation** — The `glm` transformer now preserves modern Z.AI
+  responses that already include `reasoning_content` in the OpenAI format, merging legacy
+  `` tag extractions with modern API responses when both are present.
+
+### Added
+
 - **LongCat Thinking response normalization** — Added a `longcat-thinking`
   transformer and changed native Anthropic response dispatch to apply response
   transformers before strict deserialization. This lets CCR-Rust normalize

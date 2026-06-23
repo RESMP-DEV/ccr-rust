@@ -12,6 +12,7 @@ Task-oriented index for all CCR-Rust documentation.
 
 ## Client Integrations
 
+- [Z.AI and MiniMax Setup](zai_minimax_setup.md) — modern GLM-5.2 and MiniMax-M3 providers
 - [Claude Code fallback how-to](claude_code_setup.md) — step-by-step guide for keeping Claude Code useful after Claude usage limits kick in
 - [Codex](codex_setup.md) — Codex CLI routing
 - [OpenAI SDK](openai_sdk_setup.md) — Python/JavaScript OpenAI client setup

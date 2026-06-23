@@ -98,7 +98,9 @@ pub(super) fn anthropic_response_to_internal(
             output_tokens: response.usage.output_tokens,
             input_tokens_details: None,
         }),
-        extra_data: None,
+        extra_data: response.reasoning_content.map(|rc| {
+            serde_json::json!({ "reasoning_content": rc })
+        }),
     }
 }
 

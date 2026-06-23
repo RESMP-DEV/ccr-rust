@@ -393,6 +393,18 @@ impl Frontend for CodexFrontend {
             message["reasoning_content"] = Value::String(reasoning_content);
         }
 
+        // Also check for reasoning_content in extra_data (from non-Anthropic providers)
+        // This takes precedence over locally accumulated reasoning_content
+        if let Some(extra) = &response.extra_data {
+            if let Some(obj) = extra.as_object() {
+                if let Some(rc) = obj.get("reasoning_content").and_then(|v| v.as_str()) {
+                    if !rc.is_empty() {
+                        message["reasoning_content"] = Value::String(rc.to_string());
+                    }
+                }
+            }
+        }
+
         // Add tool_calls if present
         if !tool_calls.is_empty() {
             message["tool_calls"] = Value::Array(tool_calls);

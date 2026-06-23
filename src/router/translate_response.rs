@@ -19,15 +19,21 @@ pub(super) fn translate_response_openai_to_anthropic(
         openai_resp.model.clone()
     };
 
+    // Extract reasoning_content from the first choice for preservation
+    let reasoning_content = openai_resp.choices.first().and_then(|choice| {
+        choice.message.reasoning_content.clone()
+    });
+
     let content = if let Some(choice) = openai_resp.choices.first() {
         let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
 
-        // Skip reasoning content from OpenAI-compatible providers.
-        // Non-Anthropic models don't provide thinking signatures, and
+        // Skip creating thinking blocks from reasoning_content for OpenAI-compatible
+        // providers. Non-Anthropic models don't provide thinking signatures, and
         // emitting a thinking block with an empty signature causes
         // downstream Anthropic SDK clients to fail with
         // "reasoning part 0 not found".
-        // Reasoning is still available via the OpenAI response path.
+        // Instead, reasoning_content is preserved in the response and serialized
+        // back to OpenAI format.
 
         // Main content
         if let Some(content_value) = &choice.message.content {
@@ -121,6 +127,7 @@ pub(super) fn translate_response_openai_to_anthropic(
                 other => other.to_string(),
             })
         }),
+        reasoning_content,
     }
 }
 

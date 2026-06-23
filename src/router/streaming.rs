@@ -748,6 +748,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 20,
             },
+            reasoning_content: None,
         };
 
         let events = emit_anthropic_sse_events(&resp);
@@ -800,6 +801,7 @@ mod tests {
                 input_tokens: 50,
                 output_tokens: 30,
             },
+            reasoning_content: None,
         };
 
         let events = emit_anthropic_sse_events(&resp);
@@ -845,6 +847,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 40,
             },
+            reasoning_content: None,
         };
 
         let events = emit_anthropic_sse_events(&resp);

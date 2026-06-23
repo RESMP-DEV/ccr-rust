@@ -268,6 +268,27 @@ With defaults (100ms base, 2.0 multiplier, 10000ms max):
 {
   "Providers": [
     {
+      "name": "zai",
+      "api_base_url": "https://api.z.ai/api/coding/paas/v4",
+      "api_key": "${ZAI_API_KEY}",
+      "models": ["glm-5.2", "glm-5.1", "glm-5-turbo"],
+      "transformer": {
+        "use": ["anthropic", "glm"]
+      },
+      "tier_name": "ccr-glm"
+    },
+    {
+      "name": "minimax",
+      "api_base_url": "https://api.minimax.io/anthropic/v1",
+      "api_key": "${MINIMAX_API_KEY}",
+      "models": ["MiniMax-M3", "MiniMax-M2.7"],
+      "transformer": {
+        "use": ["minimax"]
+      },
+      "protocol": "anthropic",
+      "tier_name": "ccr-mm"
+    },
+    {
       "name": "deepseek",
       "api_base_url": "https://api.deepseek.com/chat/completions",
       "api_key": "${DEEPSEEK_API_KEY}",
@@ -283,26 +304,25 @@ With defaults (100ms base, 2.0 multiplier, 10000ms max):
       "api_key": "${GEMINI_API_KEY}",
       "models": ["gemini-3-flash-preview"],
       "transformer": { "use": ["anthropic"] }
-    },
-    {
-      "name": "openrouter",
-      "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
-      "api_key": "${OPENROUTER_API_KEY}",
-      "models": ["anthropic/claude-3.5-sonnet"],
-      "transformer": { "use": ["openrouter"] }
     }
   ],
   "Router": {
-    "default": "deepseek,deepseek-chat",
-    "think": "deepseek,deepseek-reasoner",
+    "default": "zai,glm-5.2",
+    "think": "zai,glm-5.2",
+    "tiers": [
+      "zai,glm-5.2",
+      "minimax,MiniMax-M3",
+      "deepseek,deepseek-chat"
+    ],
     "tierRetries": {
       "tier-0": { "max_retries": 3, "base_backoff_ms": 100 },
       "tier-1": { "max_retries": 2, "base_backoff_ms": 200 }
     }
   },
   "Presets": {
-    "coding": { "route": "deepseek,deepseek-chat" },
-    "reasoning": { "route": "deepseek,deepseek-reasoner" },
+    "coding": { "route": "zai,glm-5.2" },
+    "reasoning": { "route": "zai,glm-5.2" },
+    "fast": { "route": "minimax,MiniMax-M2.7-highspeed" },
     "documentation": { "route": "gemini,gemini-3-flash-preview" }
   },
   "PORT": 3456,

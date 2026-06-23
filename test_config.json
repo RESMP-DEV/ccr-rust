@@ -1,0 +1,40 @@
+{
+  "PORT": 3456,
+  "HOST": "127.0.0.1",
+  "LOG": true,
+  "LOG_LEVEL": "info",
+  "API_TIMEOUT_MS": 120000,
+  "Providers": [
+    {
+      "name": "zai",
+      "api_base_url": "https://api.z.ai/api/coding/paas/v4",
+      "api_key": "${ZAI_API_KEY}",
+      "models": ["glm-5.2", "glm-5.1"],
+      "transformer": {
+        "use": ["anthropic", "glm"]
+      },
+      "tier_name": "ccr-glm"
+    },
+    {
+      "name": "minimax",
+      "api_base_url": "https://api.minimax.io/anthropic/v1",
+      "api_key": "${MINIMAX_API_KEY}",
+      "models": ["MiniMax-M3", "MiniMax-M2.7"],
+      "transformer": {
+        "use": ["minimax"]
+      },
+      "protocol": "anthropic",
+      "tier_name": "ccr-mm"
+    }
+  ],
+  "Router": {
+    "default": "zai,glm-5.2",
+    "tiers": [
+      "zai,glm-5.2",
+      "minimax,MiniMax-M3"
+    ]
+  },
+  "DebugCapture": {
+    "enabled": false
+  }
+}
