@@ -113,13 +113,12 @@
         "redis_prefix": "ccr-rust:persistence:v1"
     },
     "DebugCapture": {
-        "enabled": true,
-        "providers": [
-            "minimax"
-        ],
+        "enabled": false,
+        "providers": [],
         "output_dir": "~/.ccr-rust/captures",
-        "max_files": 1000,
-        "capture_success": true,
+        "max_files": 100,
+        "include_headers": false,
+        "capture_success": false,
         "max_body_size": 1048576
     }
 }

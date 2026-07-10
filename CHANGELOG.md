@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Uncertainty-respecting cost ordering** — Cheaper routes are promoted only
   inside the GP posterior quality credible set, avoiding an arbitrary scalar
   exchange rate between predicted quality and dollars.
+- **CLI-only debug capture access** — Removed the unauthenticated capture HTTP
+  routes. Private captures can now be inspected only from the local
+  `ccr-rust captures` command.
 
 - **Default coding model** — Changed default routing from `glm-5.1` to `glm-5.2` for improved
   reasoning and coding performance with configurable reasoning effort.
@@ -63,6 +66,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variants to the tier ordering).
 
 ### Fixed
+
+- **Private bounded debug capture** — Raw provider capture remains explicitly
+  disabled when configuration is absent, defaults to error-only capture when
+  enabled, enforces `0700` directories and `0600` files on Unix, creates files
+  without overwriting existing paths, and applies retention after every write
+  only to current CCR-owned files. Zero or excessive retention limits are now
+  converted to bounded values without deleting legacy captures or unrelated
+  files. Body limits are clamped to 2 MiB without splitting UTF-8; optional
+  headers are bounded and redact common credential names; HTTP failures, rate
+  limits, and provider errors embedded in success responses retain failure
+  semantics. Listing and statistics ignore symlinks and legacy files and are
+  capped at 100 captures, 4 MiB per file, and 16 MiB per pass.
 
 - **GP configuration validation** — Reject invalid KPLS dimensions during
   startup validation and before fitting so bad configuration cannot trigger
