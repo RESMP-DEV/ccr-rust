@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **GP configuration validation** — Reject invalid KPLS dimensions during
+  startup validation and before fitting so bad configuration cannot trigger
+  repeated failed refits.
+
 - **MiniMax structured reasoning handling** — The `minimax` transformer now correctly extracts
   and normalizes reasoning content from MiniMax-M3's structured `reasoning_content` array
   format (returned by the OpenAI-compatible endpoint) into plain text for consistent handling.

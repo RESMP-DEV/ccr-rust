@@ -33,6 +33,8 @@ struct PersistedState {
 pub enum GpFitError {
     /// Not enough observations are available to train the GP.
     InsufficientData { have: usize, need: usize },
+    /// The surrogate configuration cannot produce a valid model.
+    InvalidConfig(String),
     /// Fitting failed inside `egobox-gp` or `linfa`.
     FitFailed(String),
 }
@@ -43,6 +45,7 @@ impl Display for GpFitError {
             Self::InsufficientData { have, need } => {
                 write!(f, "insufficient data for GP fit: have {have}, need {need}")
             }
+            Self::InvalidConfig(message) => write!(f, "invalid GP configuration: {message}"),
             Self::FitFailed(message) => write!(f, "GP fit failed: {message}"),
         }
     }
@@ -187,6 +190,14 @@ impl GpSurrogate {
 
     /// Fit a GP model from the observation buffer.
     pub fn fit(&self, buffer: &ObservationBuffer) -> Result<(), GpFitError> {
+        if let Some(kpls_dim) = self.config.kpls_dim {
+            if kpls_dim == 0 || kpls_dim > self.config.input_dim {
+                return Err(GpFitError::InvalidConfig(format!(
+                    "kpls_dim must be between 1 and {}; got {kpls_dim}",
+                    self.config.input_dim
+                )));
+            }
+        }
         let (x, y) = buffer.as_training_data();
         let have = y.len();
         if have < self.config.min_observations {

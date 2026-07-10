@@ -471,7 +471,25 @@ fn ensure_gp_build_support(config: &Config) -> anyhow::Result<()> {
         );
     }
 
+    #[cfg(feature = "gp")]
+    if config.router().gp_routing.enabled {
+        validate_gp_runtime_config(&config.router().gp_routing)?;
+    }
+
     let _ = config;
+    Ok(())
+}
+
+#[cfg(feature = "gp")]
+fn validate_gp_runtime_config(config: &config::GpRoutingRuntimeConfig) -> anyhow::Result<()> {
+    if let Some(kpls_dim) = config.kpls_dim {
+        let feature_dim = gp_routing::features::FEATURE_DIM;
+        if kpls_dim == 0 || kpls_dim > feature_dim {
+            anyhow::bail!(
+                "Router.gpRouting.kplsDim must be between 1 and {feature_dim}; got {kpls_dim}"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -683,5 +701,27 @@ async fn debug_capture_stats(State(state): State<AppState>) -> impl axum::respon
         None => axum::Json(serde_json::json!({
             "error": "Debug capture not enabled"
         })),
+    }
+}
+
+#[cfg(all(test, feature = "gp"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gp_runtime_validation_rejects_invalid_kpls_dimensions() {
+        for kpls_dim in [0, gp_routing::features::FEATURE_DIM + 1] {
+            let config = config::GpRoutingRuntimeConfig {
+                kpls_dim: Some(kpls_dim),
+                ..Default::default()
+            };
+            assert!(validate_gp_runtime_config(&config).is_err());
+        }
+
+        let config = config::GpRoutingRuntimeConfig {
+            kpls_dim: Some(gp_routing::features::FEATURE_DIM),
+            ..Default::default()
+        };
+        assert!(validate_gp_runtime_config(&config).is_ok());
     }
 }

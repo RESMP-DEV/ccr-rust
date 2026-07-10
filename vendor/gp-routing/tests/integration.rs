@@ -3,7 +3,7 @@
 use approx::assert_abs_diff_eq;
 use gp_routing::features::{DEP_COUNT_INDEX, HOUR_COS_INDEX, HOUR_SIN_INDEX};
 use gp_routing::{
-    rank_backends, AcquisitionStrategy, FeatureVector, GpRoutingConfig, GpSurrogate,
+    rank_backends, AcquisitionStrategy, FeatureVector, GpFitError, GpRoutingConfig, GpSurrogate,
     ObservationBuffer, FEATURE_DIM,
 };
 
@@ -146,6 +146,24 @@ fn test_surrogate_unfitted_prior() {
 
     assert_abs_diff_eq!(mean, 0.42, epsilon = 1e-6);
     assert_abs_diff_eq!(variance, 0.19, epsilon = 1e-6);
+}
+
+#[test]
+fn test_surrogate_rejects_invalid_kpls_dimensions_before_fitting() {
+    for invalid in [0, FEATURE_DIM + 1] {
+        let config = GpRoutingConfig::builder()
+            .min_observations(1)
+            .kpls_dim(Some(invalid))
+            .build();
+        let surrogate = GpSurrogate::new(config);
+        let mut buffer = ObservationBuffer::new(2);
+        buffer.push(make_features(0, 0), 0.5);
+
+        assert!(matches!(
+            surrogate.fit(&buffer),
+            Err(GpFitError::InvalidConfig(_))
+        ));
+    }
 }
 
 #[test]
