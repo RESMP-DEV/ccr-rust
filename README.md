@@ -97,6 +97,34 @@ That means you can keep using Claude Code as your interface even when the actual
 | `/health`              | GET    | Health check                |
 | `/metrics`             | GET    | Prometheus metrics          |
 
+### Native MCP daemon
+
+The separate native MCP daemon requires bearer authentication on both `/health`
+and `/mcp`. Prefer the environment variable so the token is not exposed in the
+process argument list:
+
+```bash
+export CCR_MCP_AUTH_TOKEN="replace-with-a-private-random-token"
+ccr-rust mcp-daemon
+
+curl -H "Authorization: Bearer ${CCR_MCP_AUTH_TOKEN}" \
+  http://127.0.0.1:3457/health
+```
+
+`--auth-token` supplies the same value explicitly. To enable the Pyright MCP
+tool, configure both the project and its dedicated private workspace root:
+
+```bash
+ccr-rust mcp-daemon \
+  --pyright-root /path/to/project \
+  --pyright-workspace-dir ~/.cache/ccr-rust/pyright-workspaces
+```
+
+The equivalent environment variables are `PYRIGHT_PROJECT_ROOT` and
+`CCR_MCP_PYRIGHT_WORKSPACE_DIR`. CCR-Rust enforces mode `0700` on the workspace
+root and each request directory and removes stale CCR-owned request directories
+when the daemon starts.
+
 ## Configuration
 
 CCR-Rust reads `~/.claude-code-router/config.json`. Supports `${ENV_VAR}` substitution.

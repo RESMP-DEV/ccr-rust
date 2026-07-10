@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 
+use super::pyright_workspace::PrivateWorkspaceRoot;
 use super::{NativeTool, ToolResult};
 use crate::mcp::protocol::McpTool;
 
@@ -18,7 +18,7 @@ const PYRIGHT_TIMEOUT_SECS: u64 = 60;
 
 pub struct PyrightTool {
     project_root: PathBuf,
-    scratch_dir: PathBuf,
+    workspaces: PrivateWorkspaceRoot,
     semaphore: Arc<Semaphore>,
 }
 
@@ -87,13 +87,17 @@ struct PyrightPosition {
 }
 
 impl PyrightTool {
-    pub fn new(project_root: PathBuf, scratch_dir: PathBuf, max_concurrent: usize) -> Self {
-        std::fs::create_dir_all(&scratch_dir).ok();
-        Self {
+    pub fn new(
+        project_root: PathBuf,
+        workspace_dir: PathBuf,
+        max_concurrent: usize,
+    ) -> Result<Self> {
+        let workspaces = PrivateWorkspaceRoot::prepare(workspace_dir)?;
+        Ok(Self {
             project_root,
-            scratch_dir,
+            workspaces,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
-        }
+        })
     }
 
     async fn type_check(&self, args: Value) -> Result<ToolResult> {
@@ -129,8 +133,7 @@ impl PyrightTool {
 
         let _permit = self.semaphore.acquire().await.context("semaphore closed")?;
 
-        let ws_path = self.scratch_dir.join(Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&ws_path).context("failed to create temp workspace")?;
+        let ws_path = self.workspaces.create_request_directory()?;
 
         let result = self.run_in_workspace(&ws_path, &files).await;
 
@@ -328,6 +331,7 @@ impl PyrightTool {
                 .arg("--outputjson")
                 .arg("--project")
                 .arg(ws_path)
+                .env_remove("CCR_MCP_AUTH_TOKEN")
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .output(),
@@ -465,7 +469,13 @@ mod tests {
             }
         }"#;
 
-        let tool = PyrightTool::new(PathBuf::from("/project"), PathBuf::from("/tmp/scratch"), 1);
+        let scratch = tempfile::tempdir().unwrap();
+        let tool = PyrightTool::new(
+            PathBuf::from("/project"),
+            scratch.path().join("workspaces"),
+            1,
+        )
+        .unwrap();
         let diagnostics = tool.parse_output(raw, Path::new("/tmp/ws"));
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].file, "alphaheng/worker/agent.py");
@@ -481,7 +491,13 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let tool = PyrightTool::new(PathBuf::from("/project"), PathBuf::from("/tmp/scratch"), 1);
+        let scratch = tempfile::tempdir().unwrap();
+        let tool = PyrightTool::new(
+            PathBuf::from("/project"),
+            scratch.path().join("workspaces"),
+            1,
+        )
+        .unwrap();
         let result = rt.block_on(tool.type_check(json!({
             "files": [{ "path": "/etc/passwd" }]
         })));
@@ -495,7 +511,13 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let tool = PyrightTool::new(PathBuf::from("/project"), PathBuf::from("/tmp/scratch"), 1);
+        let scratch = tempfile::tempdir().unwrap();
+        let tool = PyrightTool::new(
+            PathBuf::from("/project"),
+            scratch.path().join("workspaces"),
+            1,
+        )
+        .unwrap();
         let result = rt.block_on(tool.type_check(json!({
             "files": [{ "path": "../../etc/passwd" }]
         })));
@@ -506,6 +528,7 @@ mod tests {
     #[test]
     fn prepare_workspace_preserves_sibling_modules_for_nested_overlay() {
         let project = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
 
         std::fs::create_dir(project.path().join("pkg")).unwrap();
@@ -523,9 +546,10 @@ mod tests {
 
         let tool = PyrightTool::new(
             project.path().to_path_buf(),
-            tempfile::tempdir().unwrap().path().to_path_buf(),
+            scratch.path().join("workspaces"),
             1,
-        );
+        )
+        .unwrap();
         tool.prepare_workspace(
             ws.path(),
             &[FileInput {
