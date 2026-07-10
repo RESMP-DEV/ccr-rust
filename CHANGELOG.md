@@ -66,7 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **GP configuration validation** — Reject invalid KPLS dimensions during
   startup validation and before fitting so bad configuration cannot trigger
-  repeated failed refits.
+  repeated failed refits, and cap public backend-ranking inputs to the fixed
+  32-slot feature capacity.
 
 - **MiniMax structured reasoning handling** — The `minimax` transformer now correctly extracts
   and normalizes reasoning content from MiniMax-M3's structured `reasoning_content` array

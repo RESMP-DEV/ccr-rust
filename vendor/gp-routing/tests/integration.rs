@@ -6,6 +6,7 @@ use gp_routing::{
     rank_backends, AcquisitionStrategy, FeatureVector, GpFitError, GpRoutingConfig, GpSurrogate,
     ObservationBuffer, FEATURE_DIM,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn make_features(backend_idx: usize, sample: usize) -> FeatureVector {
     FeatureVector::builder()
@@ -105,6 +106,21 @@ fn test_backend_capacity_covers_all_thirty_two_slots() {
 }
 
 #[test]
+fn test_backend_counts_are_bounded_to_feature_capacity() {
+    let config = GpRoutingConfig::builder().n_backends(usize::MAX).build();
+    assert_eq!(config.n_backends, gp_routing::features::BACKEND_SLOTS);
+
+    let surrogate = GpSurrogate::new(config);
+    let ranked = rank_backends(
+        &surrogate,
+        &make_features(0, 0),
+        usize::MAX,
+        AcquisitionStrategy::Greedy,
+    );
+    assert_eq!(ranked.len(), gp_routing::features::BACKEND_SLOTS);
+}
+
+#[test]
 fn test_ring_buffer_fifo() {
     let mut buffer = ObservationBuffer::new(5);
     for i in 0..10 {
@@ -182,6 +198,50 @@ fn test_surrogate_fit_and_predict() {
 }
 
 #[test]
+fn test_batch_predictions_match_single_predictions() {
+    let surrogate = train_two_backend_surrogate();
+    let features = vec![make_features(0, 210), make_features(1, 211)];
+    let batch = surrogate.predict_batch(&features);
+
+    for (feature, (batch_mean, batch_variance)) in features.iter().zip(batch) {
+        let (single_mean, single_variance) = surrogate.predict(feature);
+        assert_abs_diff_eq!(batch_mean, single_mean, epsilon = 1e-5);
+        assert_abs_diff_eq!(batch_variance, single_variance, epsilon = 1e-5);
+    }
+}
+
+#[test]
+fn test_fitted_surrogate_persistence_round_trip() {
+    let surrogate = train_two_backend_surrogate();
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after Unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "gp-routing-test-{}-{suffix}.json",
+        std::process::id()
+    ));
+    surrogate.save(&path).expect("save fitted surrogate");
+
+    let loaded = GpSurrogate::new(
+        GpRoutingConfig::builder()
+            .buffer_capacity(128)
+            .min_observations(20)
+            .n_backends(2)
+            .build(),
+    );
+    loaded.load(&path).expect("load fitted surrogate");
+    std::fs::remove_file(&path).expect("remove persisted test model");
+
+    for feature in [make_features(0, 220), make_features(1, 221)] {
+        let before = surrogate.predict(&feature);
+        let after = loaded.predict(&feature);
+        assert_abs_diff_eq!(before.0, after.0, epsilon = 1e-5);
+        assert_abs_diff_eq!(before.1, after.1, epsilon = 1e-5);
+    }
+}
+
+#[test]
 fn test_rank_backends_ordering() {
     let surrogate = train_two_backend_surrogate();
     let base_features = make_features(0, 500);
@@ -190,6 +250,23 @@ fn test_rank_backends_ordering() {
     assert_eq!(ranked.len(), 2);
     assert_eq!(ranked[0].0, 0);
     assert!(ranked[0].1 >= ranked[1].1);
+}
+
+#[test]
+fn test_thompson_ranking_is_complete_and_finite() {
+    let surrogate = train_two_backend_surrogate();
+    let ranked = rank_backends(
+        &surrogate,
+        &make_features(0, 510),
+        2,
+        AcquisitionStrategy::Thompson,
+    );
+
+    assert_eq!(ranked.len(), 2);
+    let mut indices = ranked.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+    indices.sort_unstable();
+    assert_eq!(indices, vec![0, 1]);
+    assert!(ranked.iter().all(|(_, score)| score.is_finite()));
 }
 
 #[test]

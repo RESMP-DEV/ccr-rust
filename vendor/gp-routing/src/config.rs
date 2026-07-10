@@ -1,6 +1,6 @@
 // Modified for CCR-Rust: derive the input dimension from the expanded local
 // feature layout instead of the upstream 22-dimensional prototype constant.
-use crate::features::FEATURE_DIM;
+use crate::features::{BACKEND_SLOTS, FEATURE_DIM};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -126,7 +126,7 @@ impl GpRoutingConfigBuilder {
 
     #[must_use]
     pub fn n_backends(mut self, n_backends: usize) -> Self {
-        self.config.n_backends = n_backends;
+        self.config.n_backends = n_backends.min(BACKEND_SLOTS);
         self
     }
 

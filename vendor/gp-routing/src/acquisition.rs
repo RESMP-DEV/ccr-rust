@@ -1,5 +1,5 @@
 // Modified for CCR-Rust: rustfmt normalization only; behavior is unchanged.
-use crate::features::FeatureVector;
+use crate::features::{FeatureVector, BACKEND_SLOTS};
 use crate::surrogate::GpSurrogate;
 use rand::Rng;
 use std::cmp::Ordering;
@@ -47,6 +47,7 @@ pub fn rank_backends(
     n_backends: usize,
     strategy: AcquisitionStrategy,
 ) -> Vec<(usize, f32)> {
+    let n_backends = n_backends.min(BACKEND_SLOTS);
     debug!(n_backends, ?strategy, "ranking backends");
     if n_backends == 0 {
         return Vec::new();
