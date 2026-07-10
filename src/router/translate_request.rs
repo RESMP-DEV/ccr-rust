@@ -156,7 +156,11 @@ pub(super) fn translate_request_anthropic_to_openai(
     anthropic_req: &AnthropicRequest,
     model: &str,
 ) -> OpenAIRequest {
-    debug!(model, message_count = anthropic_req.messages.len(), "translating Anthropic request to OpenAI format");
+    debug!(
+        model,
+        message_count = anthropic_req.messages.len(),
+        "translating Anthropic request to OpenAI format"
+    );
     let mut messages: Vec<OpenAIMessage> = Vec::new();
     let model_lower = model.to_lowercase();
     let is_reasoning_model = model_lower.contains("reasoner")

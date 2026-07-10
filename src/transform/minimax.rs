@@ -45,9 +45,7 @@ fn is_m3_model(model: &str) -> bool {
 
 /// Check if a model is an M2.x model (reasoning_split format)
 fn is_m2_model(model: &str) -> bool {
-    M2_MODELS
-        .iter()
-        .any(|m| model.eq_ignore_ascii_case(m))
+    M2_MODELS.iter().any(|m| model.eq_ignore_ascii_case(m))
 }
 
 #[derive(Debug, Clone)]
@@ -145,10 +143,10 @@ impl Transformer for MinimaxTransformer {
                         let combined_thinking = thinking_text.join("\n\n");
                         content_array.insert(
                             0,
-            serde_json::json!({
-                "type": "text",
-                "text": format!("[Thinking]\n{}", combined_thinking)
-            }),
+                            serde_json::json!({
+                                "type": "text",
+                                "text": format!("[Thinking]\n{}", combined_thinking)
+                            }),
                         );
                     }
                 }

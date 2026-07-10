@@ -4,8 +4,8 @@
 //! These transformers handle format conversions between various LLM API formats
 //! (Anthropic ↔ OpenAI), token limits, reasoning tags, and tool metadata.
 
-use super::Transformer;
 use super::uuid_nopanic;
+use super::Transformer;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;

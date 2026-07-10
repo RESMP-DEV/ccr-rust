@@ -232,7 +232,10 @@ impl Transformer for GlmTransformer {
         // Inject reasoning_effort for supported models if not already set
         if supports_reasoning_effort(&model) && !obj.contains_key("reasoning_effort") {
             // Default to "medium" effort for balanced performance
-            obj.insert("reasoning_effort".to_string(), Value::String("medium".to_string()));
+            obj.insert(
+                "reasoning_effort".to_string(),
+                Value::String("medium".to_string()),
+            );
             trace!("Injected reasoning_effort=medium for model {}", model);
         }
 

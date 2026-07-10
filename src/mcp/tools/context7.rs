@@ -27,9 +27,10 @@ impl NativeTool for Context7Tool {
         vec![
             McpTool {
                 name: "resolve-library-id".to_string(),
-                description: "Resolves a package/product name to a Context7-compatible library ID. \
+                description:
+                    "Resolves a package/product name to a Context7-compatible library ID. \
                     Call this before query-docs to obtain a valid library ID."
-                    .to_string(),
+                        .to_string(),
                 inputSchema: json!({
                     "type": "object",
                     "properties": {

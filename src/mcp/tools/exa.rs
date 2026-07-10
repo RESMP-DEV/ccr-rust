@@ -167,7 +167,11 @@ impl ExaTool {
             )));
         }
 
-        info!(url_count = urls.len(), response_len = text.len(), "exa fetch succeeded");
+        info!(
+            url_count = urls.len(),
+            response_len = text.len(),
+            "exa fetch succeeded"
+        );
         Ok(ToolResult::text(text))
     }
 }
