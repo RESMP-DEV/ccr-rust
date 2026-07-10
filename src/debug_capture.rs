@@ -12,28 +12,32 @@
 //!     "enabled": true,
 //!     "providers": ["minimax"],
 //!     "output_dir": "~/.ccr-rust/captures",
-//!     "max_files": 1000,
+//!     "max_files": 100,
 //!     "include_headers": false
 //!   }
 //! }
 //! ```
 //!
 //! Captured files are stored as JSON with timestamped filenames:
-//! `{provider}_{timestamp}_{request_id}.json`
+//! `ccr_capture_v1_{provider}_{tier}_{timestamp}_{request_id}.json`
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 /// Global request counter for unique IDs.
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+const CAPTURE_FILE_PREFIX: &str = "ccr_capture_v1_";
+const DEFAULT_MAX_FILES: usize = 100;
+const HARD_MAX_FILES: usize = 1000;
+const MAX_CAPTURE_FILE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Configuration for debug capture.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +55,8 @@ pub struct DebugCaptureConfig {
     #[serde(default = "default_output_dir")]
     pub output_dir: String,
 
-    /// Maximum number of capture files to keep (oldest are deleted).
+    /// Maximum number of CCR-owned capture files to keep (oldest are deleted).
+    /// Values outside the supported bounded range are replaced or clamped.
     #[serde(default = "default_max_files")]
     pub max_files: usize,
 
@@ -63,7 +68,7 @@ pub struct DebugCaptureConfig {
     #[serde(default = "default_capture_success")]
     pub capture_success: bool,
 
-    /// Maximum response body size to capture (bytes). 0 = unlimited.
+    /// Maximum response body size to capture (bytes).
     #[serde(default = "default_max_body_size")]
     pub max_body_size: usize,
 }
@@ -87,11 +92,11 @@ fn default_output_dir() -> String {
 }
 
 fn default_max_files() -> usize {
-    1000
+    DEFAULT_MAX_FILES
 }
 
 fn default_capture_success() -> bool {
-    true
+    false
 }
 
 fn default_max_body_size() -> usize {
@@ -166,17 +171,33 @@ pub struct DebugCapture {
     config: DebugCaptureConfig,
     output_path: PathBuf,
     provider_filter: HashSet<String>,
-    file_count: Arc<RwLock<usize>>,
+    retention_lock: Mutex<()>,
 }
 
 impl DebugCapture {
     /// Create a new debug capture manager.
-    pub fn new(config: DebugCaptureConfig) -> Result<Self> {
+    pub fn new(mut config: DebugCaptureConfig) -> Result<Self> {
+        if config.max_files == 0 {
+            warn!(
+                default = DEFAULT_MAX_FILES,
+                "Debug capture max_files must be bounded; using the default"
+            );
+            config.max_files = DEFAULT_MAX_FILES;
+        } else if config.max_files > HARD_MAX_FILES {
+            warn!(
+                requested = config.max_files,
+                maximum = HARD_MAX_FILES,
+                "Debug capture max_files exceeds the hard limit; clamping"
+            );
+            config.max_files = HARD_MAX_FILES;
+        }
+
         let output_path = expand_tilde(&config.output_dir);
 
-        // Create output directory if it doesn't exist
+        // Capture is opt-in. Merely parsing or constructing the default
+        // configuration must not create a directory on disk.
         if config.enabled {
-            fs::create_dir_all(&output_path)?;
+            ensure_private_directory(&output_path)?;
             info!(
                 "Debug capture enabled: {} (providers: {:?})",
                 output_path.display(),
@@ -195,7 +216,7 @@ impl DebugCapture {
             config,
             output_path,
             provider_filter,
-            file_count: Arc::new(RwLock::new(0)),
+            retention_lock: Mutex::new(()),
         })
     }
 
@@ -243,18 +264,54 @@ impl DebugCapture {
 
         // Generate filename
         let filename = format!(
-            "{}_{}_{}_{}.json",
-            interaction.provider,
-            interaction.tier_name,
-            chrono::Utc::now().format("%Y%m%d_%H%M%S"),
+            "{}{}_{}_{}_{}.json",
+            CAPTURE_FILE_PREFIX,
+            sanitize_filename_segment(&interaction.provider),
+            sanitize_filename_segment(&interaction.tier_name),
+            chrono::Utc::now().format("%Y%m%d_%H%M%S_%f"),
             interaction.request_id
         );
         let filepath = self.output_path.join(&filename);
 
-        // Serialize and write
+        // Serialize and create a new private file without following or
+        // replacing an existing path. The hard byte cap complements bounded
+        // file retention so capture cannot grow without limit.
         let json = serde_json::to_string_pretty(&interaction)?;
-        let mut file = File::create(&filepath)?;
-        file.write_all(json.as_bytes())?;
+        if json.len() > MAX_CAPTURE_FILE_BYTES {
+            bail!(
+                "debug capture exceeds the {} byte file limit",
+                MAX_CAPTURE_FILE_BYTES
+            );
+        }
+        let write_result = (|| -> Result<()> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&filepath)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&filepath);
+            return Err(error);
+        }
+
+        // Manage file rotation
+        if let Err(error) = self.rotate_files().await {
+            // Never make a failed retention pass increase disk usage.
+            let _ = fs::remove_file(&filepath);
+            return Err(error);
+        }
 
         info!(
             "Captured {} interaction: {} ({}ms, status={})",
@@ -264,31 +321,19 @@ impl DebugCapture {
             interaction.response_status
         );
 
-        // Manage file rotation
-        self.rotate_files().await?;
-
         Ok(())
     }
 
-    /// Rotate old capture files if we exceed max_files.
-    /// max_files = 0 means unlimited (no rotation).
+    /// Rotate old CCR-owned capture files if we exceed max_files.
+    ///
+    /// Legacy JSON files, task captures, symlinks, and other unrelated files
+    /// are deliberately ignored so enabling the new policy cannot erase an
+    /// existing corpus.
     async fn rotate_files(&self) -> Result<()> {
-        // 0 means unlimited — never delete
-        if self.config.max_files == 0 {
-            return Ok(());
-        }
-
-        let mut count = self.file_count.write().await;
-
-        // Only check periodically (every 100 captures)
-        *count += 1;
-        if *count % 100 != 0 {
-            return Ok(());
-        }
-
+        let _guard = self.retention_lock.lock().await;
         let entries: Vec<_> = fs::read_dir(&self.output_path)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .filter(is_managed_capture_file)
             .collect();
 
         if entries.len() <= self.config.max_files {
@@ -306,20 +351,37 @@ impl DebugCapture {
             })
             .collect();
 
-        files_with_time.sort_by_key(|entry| entry.1);
+        files_with_time
+            .sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
 
         // Delete oldest files
         let to_delete = files_with_time.len() - self.config.max_files;
-        for (path, _) in files_with_time.into_iter().take(to_delete) {
-            if let Err(e) = fs::remove_file(&path) {
-                warn!(
-                    "Failed to remove old capture file {}: {}",
-                    path.display(),
-                    e
-                );
-            } else {
-                debug!("Rotated capture file: {}", path.display());
+        let mut deleted = 0;
+        let mut last_error = None;
+        for (path, _) in files_with_time {
+            if deleted >= to_delete {
+                break;
             }
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    deleted += 1;
+                    debug!("Rotated capture file: {}", path.display());
+                }
+                Err(error) => {
+                    warn!(
+                        "Failed to remove old capture file {}: {}",
+                        path.display(),
+                        error
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+        if deleted < to_delete {
+            let detail = last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "no removable CCR-owned files".to_string());
+            bail!("debug capture retention could not enforce its limit: {detail}")
         }
 
         Ok(())
@@ -335,16 +397,7 @@ impl DebugCapture {
 
         let mut entries: Vec<_> = fs::read_dir(&self.output_path)?
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                let path = e.path();
-                let is_json = path.extension().is_some_and(|ext| ext == "json");
-                let matches_provider = provider.is_none_or(|p| {
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .is_some_and(|name| name.starts_with(&format!("{}_", p)))
-                });
-                is_json && matches_provider
-            })
+            .filter(is_managed_capture_file)
             .collect();
 
         // Sort by modification time (newest first)
@@ -359,10 +412,14 @@ impl DebugCapture {
                 )
         });
 
-        for entry in entries.into_iter().take(limit) {
-            match fs::read_to_string(entry.path()) {
-                Ok(content) => {
-                    if let Ok(capture) = serde_json::from_str::<CapturedInteraction>(&content) {
+        let bounded_limit = limit.min(HARD_MAX_FILES);
+        for entry in entries {
+            if captures.len() >= bounded_limit {
+                break;
+            }
+            match read_managed_capture(&entry.path()) {
+                Ok(capture) => {
+                    if provider.is_none_or(|expected| capture.provider == expected) {
                         captures.push(capture);
                     }
                 }
@@ -383,27 +440,25 @@ impl DebugCapture {
     pub fn get_stats(&self) -> Result<CaptureStats> {
         let mut stats = CaptureStats::default();
 
-        for entry in fs::read_dir(&self.output_path)?.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "json") {
+        for entry in fs::read_dir(&self.output_path)?
+            .filter_map(|entry| entry.ok())
+            .filter(is_managed_capture_file)
+            .take(HARD_MAX_FILES)
+        {
+            if let Ok(capture) = read_managed_capture(&entry.path()) {
                 stats.total_captures += 1;
+                *stats
+                    .by_provider
+                    .entry(capture.provider.clone())
+                    .or_insert(0) += 1;
 
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(capture) = serde_json::from_str::<CapturedInteraction>(&content) {
-                        *stats
-                            .by_provider
-                            .entry(capture.provider.clone())
-                            .or_insert(0) += 1;
-
-                        if capture.success {
-                            stats.success_count += 1;
-                        } else {
-                            stats.error_count += 1;
-                        }
-
-                        stats.total_latency_ms += capture.latency_ms;
-                    }
+                if capture.success {
+                    stats.success_count += 1;
+                } else {
+                    stats.error_count += 1;
                 }
+
+                stats.total_latency_ms += capture.latency_ms;
             }
         }
 
@@ -434,6 +489,86 @@ fn expand_tilde(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+fn ensure_private_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("debug capture directory must not be a symlink")
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            bail!("debug capture path exists but is not a directory")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("debug capture path is not a private directory")
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+
+    Ok(())
+}
+
+fn sanitize_filename_segment(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .take(64)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn is_managed_capture_file(entry: &fs::DirEntry) -> bool {
+    let Ok(file_type) = entry.file_type() else {
+        return false;
+    };
+    if !file_type.is_file() {
+        return false;
+    }
+    entry
+        .file_name()
+        .to_str()
+        .is_some_and(|name| name.starts_with(CAPTURE_FILE_PREFIX) && name.ends_with(".json"))
+}
+
+fn read_managed_capture(path: &Path) -> Result<CapturedInteraction> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        bail!("debug capture entry is not a regular file")
+    }
+
+    let mut file = fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(MAX_CAPTURE_FILE_BYTES)
+            .min(MAX_CAPTURE_FILE_BYTES),
+    );
+    Read::take(&mut file, (MAX_CAPTURE_FILE_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CAPTURE_FILE_BYTES {
+        bail!("debug capture exceeds the read limit")
+    }
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 /// Builder for captured interactions.
@@ -571,6 +706,13 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn interaction(request_id: u64) -> CapturedInteraction {
+        CaptureBuilder::new(request_id, "minimax", "ccr-mm")
+            .model("MiniMax-M2.5")
+            .request_body(serde_json::json!({"request": request_id}))
+            .complete(500, r#"{"error": "test"}"#, None, Some("test".to_string()))
+    }
+
     #[test]
     fn test_capture_builder() {
         let capture = CaptureBuilder::new(1, "minimax", "ccr-mm")
@@ -674,5 +816,135 @@ mod tests {
 
         let capture_mgr = DebugCapture::new(config).unwrap();
         assert!(!capture_mgr.should_capture("minimax"));
+    }
+
+    #[test]
+    fn test_capture_is_disabled_when_configuration_is_absent() {
+        let config: DebugCaptureConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.enabled);
+        assert!(!config.capture_success);
+
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("not-created");
+        let manager = DebugCapture::new(DebugCaptureConfig {
+            output_dir: output.to_string_lossy().to_string(),
+            ..config
+        })
+        .unwrap();
+
+        assert!(!manager.should_capture("minimax"));
+        assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_capture_directory_and_file_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("captures");
+        fs::create_dir(&output).unwrap();
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manager = DebugCapture::new(DebugCaptureConfig {
+            enabled: true,
+            output_dir: output.to_string_lossy().to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        manager.record(interaction(11)).await.unwrap();
+
+        assert_eq!(
+            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let capture_path = fs::read_dir(&output)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(is_managed_capture_file)
+            .unwrap()
+            .path();
+        assert_eq!(
+            fs::metadata(capture_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retention_is_immediate_bounded_and_preserves_legacy_files() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("captures");
+        fs::create_dir(&output).unwrap();
+        let legacy = output.join("legacy_capture.json");
+        fs::write(&legacy, "legacy").unwrap();
+
+        #[cfg(unix)]
+        let legacy_symlink = {
+            use std::os::unix::fs::symlink;
+            let path = output.join("ccr_capture_v1_legacy_symlink.json");
+            symlink(&legacy, &path).unwrap();
+            Some(path)
+        };
+
+        let manager = DebugCapture::new(DebugCaptureConfig {
+            enabled: true,
+            output_dir: output.to_string_lossy().to_string(),
+            max_files: 2,
+            ..Default::default()
+        })
+        .unwrap();
+
+        for request_id in 1..=3 {
+            manager.record(interaction(request_id)).await.unwrap();
+        }
+
+        let managed_count = fs::read_dir(&output)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(is_managed_capture_file)
+            .count();
+        assert_eq!(managed_count, 2);
+        assert_eq!(manager.list_captures(None, usize::MAX).unwrap().len(), 2);
+        assert_eq!(manager.get_stats().unwrap().total_captures, 2);
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "legacy");
+        #[cfg(unix)]
+        assert!(legacy_symlink.unwrap().symlink_metadata().is_ok());
+    }
+
+    #[test]
+    fn test_unbounded_retention_value_is_replaced() {
+        let manager = DebugCapture::new(DebugCaptureConfig {
+            max_files: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(manager.config.max_files, DEFAULT_MAX_FILES);
+
+        let manager = DebugCapture::new(DebugCaptureConfig {
+            max_files: HARD_MAX_FILES + 1,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(manager.config.max_files, HARD_MAX_FILES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_capture_directory_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let linked = dir.path().join("linked");
+        fs::create_dir(&actual).unwrap();
+        symlink(&actual, &linked).unwrap();
+
+        let result = DebugCapture::new(DebugCaptureConfig {
+            enabled: true,
+            output_dir: linked.to_string_lossy().to_string(),
+            ..Default::default()
+        });
+
+        assert!(result.is_err());
     }
 }

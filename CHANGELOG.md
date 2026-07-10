@@ -64,6 +64,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Private bounded debug capture** — Raw provider capture remains explicitly
+  disabled when configuration is absent, defaults to error-only capture when
+  enabled, enforces `0700` directories and `0600` files on Unix, creates files
+  without overwriting existing paths, and applies retention after every write
+  only to current CCR-owned files. Zero or excessive retention limits are now
+  converted to bounded values without deleting legacy captures or unrelated
+  files. Listing and statistics ignore symlinks and legacy files and enforce
+  hard per-file and result-count limits.
+
 - **GP configuration validation** — Reject invalid KPLS dimensions during
   startup validation and before fitting so bad configuration cannot trigger
   repeated failed refits, and cap public backend-ranking inputs to the fixed

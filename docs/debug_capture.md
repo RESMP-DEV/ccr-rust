@@ -1,6 +1,6 @@
 # Debug Capture
 
-Debug capture records raw request/response data from provider interactions, enabling debugging of provider-specific issues like response drift, malformed outputs, or unexpected behavior.
+Debug capture records raw request/response data from provider interactions, enabling debugging of provider-specific issues like response drift, malformed outputs, or unexpected behavior. It is explicitly disabled by default because request and response bodies can contain sensitive user data. Enable it only for a bounded debugging session.
 
 ## Overview
 
@@ -23,8 +23,8 @@ Add the `DebugCapture` section to your `config.json`:
     "enabled": true,
     "providers": ["minimax"],
     "output_dir": "~/.ccr-rust/captures",
-    "max_files": 1000,
-    "capture_success": true,
+    "max_files": 100,
+    "capture_success": false,
     "max_body_size": 1048576
   }
 }
@@ -37,10 +37,17 @@ Add the `DebugCapture` section to your `config.json`:
 | `enabled` | bool | `false` | Enable/disable capture globally |
 | `providers` | string[] | `[]` | Provider names to capture. Empty = capture all |
 | `output_dir` | string | `~/.ccr-rust/captures` | Output directory (supports `~` expansion) |
-| `max_files` | int | `1000` | Maximum capture files before rotation |
-| `capture_success` | bool | `true` | Capture successful responses (not just errors) |
-| `max_body_size` | int | `1048576` | Max response body size in bytes (0 = unlimited) |
-| `include_headers` | bool | `false` | Include HTTP headers in capture |
+| `max_files` | int | `100` | Maximum CCR-owned capture files before rotation (hard maximum: 1000) |
+| `capture_success` | bool | `false` | Capture successful responses (not just errors) |
+| `max_body_size` | int | `1048576` | Max response body size in bytes; every serialized capture also has a hard 4 MiB file cap |
+| `include_headers` | bool | `false` | Include HTTP headers in capture; leave disabled when headers may contain credentials |
+
+On Unix, CCR-Rust enforces mode `0700` on the capture directory and mode
+`0600` on every new capture file. Retention runs after every write and removes
+only files created with the current `ccr_capture_v1_` prefix. Legacy captures,
+task captures, symlinks, and unrelated JSON files are left untouched.
+Capture listing and statistics likewise inspect only current-format regular
+files, cap each file read at 4 MiB, and return at most 1000 entries.
 
 ### Provider Names
 
@@ -225,28 +232,31 @@ curl -s "http://localhost:3456/debug/capture/list?limit=100" | \
 
 ## File Rotation
 
-CCR-Rust automatically rotates capture files when `max_files` is exceeded:
+CCR-Rust automatically rotates its own current-format capture files as soon as
+`max_files` is exceeded. `max_files=0` is not an unlimited mode; it is replaced
+with the bounded default of 100 files.
 
-1. Rotation check runs every 100 captures
+1. Rotation runs after every successful capture write
 2. Files are sorted by modification time
-3. Oldest files are deleted until under the limit
+3. Oldest current-format regular files are deleted until under the limit
+4. If the limit cannot be enforced, the newly written capture is removed
 
 To manually clean up captures:
 
 ```bash
-# Remove all captures
-rm -rf ~/.ccr-rust/captures/*
+# Remove all current-format CCR captures (preserves legacy and task files)
+find ~/.ccr-rust/captures -type f -name 'ccr_capture_v1_*.json' -delete
 
-# Remove captures older than 7 days
-find ~/.ccr-rust/captures -mtime +7 -name "*.json" -delete
+# Remove current-format CCR captures older than 7 days
+find ~/.ccr-rust/captures -type f -mtime +7 -name 'ccr_capture_v1_*.json' -delete
 ```
 
 ## Performance Impact
 
-Debug capture has minimal overhead:
-- Captures are written asynchronously
-- File I/O doesn't block request processing
-- Memory usage is bounded by `max_body_size`
+Debug capture adds bounded disk I/O to captured requests:
+- Capture work runs only after an explicit opt-in
+- Each file is synchronously persisted before the request finishes
+- Serialized files and retained file counts have hard bounds
 
 For high-throughput scenarios, consider:
 - Limiting to specific providers
