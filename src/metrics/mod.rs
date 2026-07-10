@@ -60,6 +60,13 @@ lazy_static! {
     )
     .unwrap();
 
+    static ref COST_USD_TOTAL: CounterVec = register_counter_vec!(
+        "ccr_cost_usd_total",
+        "Total estimated USD cost per tier (priced tiers only)",
+        &["tier"]
+    )
+    .unwrap();
+
     static ref ACTIVE_STREAMS: Gauge = register_gauge!(
         "ccr_active_streams",
         "Current number of active SSE streams"
@@ -204,6 +211,7 @@ const METRIC_INPUT_TOKENS_TOTAL: &str = "ccr_input_tokens_total";
 const METRIC_OUTPUT_TOKENS_TOTAL: &str = "ccr_output_tokens_total";
 const METRIC_CACHE_READ_TOKENS_TOTAL: &str = "ccr_cache_read_tokens_total";
 const METRIC_CACHE_CREATION_TOKENS_TOTAL: &str = "ccr_cache_creation_tokens_total";
+const METRIC_COST_USD_TOTAL: &str = "ccr_cost_usd_total";
 const METRIC_PRE_REQUEST_TOKENS_TOTAL: &str = "ccr_pre_request_tokens_total";
 const METRIC_PRE_REQUEST_TOKENS: &str = "ccr_pre_request_tokens";
 const METRIC_RATE_LIMIT_HITS_TOTAL: &str = "ccr_rate_limit_hits_total";
@@ -641,6 +649,18 @@ pub fn record_usage(
     }
 }
 
+/// Record estimated USD cost for one completed request against its tier.
+///
+/// Callers resolve the model's pricing at request time (where the tier and
+/// model are both known) and pass the estimated dollar cost here. Non-finite
+/// or non-positive values are ignored so an unpriced tier contributes nothing.
+pub fn record_cost(tier: &str, cost_usd: f64) {
+    if cost_usd.is_finite() && cost_usd > 0.0 {
+        COST_USD_TOTAL.with_label_values(&[tier]).inc_by(cost_usd);
+        persist_counter_inc(METRIC_COST_USD_TOTAL, &[("tier", tier)], cost_usd);
+    }
+}
+
 /// Compare local token estimate against upstream-reported input tokens.
 ///
 /// Computes absolute and percentage drift, updates Prometheus gauges, and fires
@@ -795,7 +815,9 @@ mod tests {
         // Read the most recent audit entry from the ring buffer.
         let guard = AUDIT_LOG.read();
         let log = guard.as_ref().expect("audit log should exist");
-        let entry = log.back().expect("audit log should have at least one entry");
+        let entry = log
+            .back()
+            .expect("audit log should have at least one entry");
 
         assert_eq!(entry.tier, "test_tier");
         assert!(entry.message_tokens > 0, "message_tokens should be > 0");
@@ -830,17 +852,48 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
 
         // Verify all fields are present including tool_tokens
-        assert!(parsed.get("timestamp").is_some(), "timestamp should be in JSON");
+        assert!(
+            parsed.get("timestamp").is_some(),
+            "timestamp should be in JSON"
+        );
         assert!(parsed.get("tier").is_some(), "tier should be in JSON");
-        assert!(parsed.get("message_tokens").is_some(), "message_tokens should be in JSON");
-        assert!(parsed.get("system_tokens").is_some(), "system_tokens should be in JSON");
-        assert!(parsed.get("tool_tokens").is_some(), "tool_tokens should be in JSON");
-        assert!(parsed.get("total_tokens").is_some(), "total_tokens should be in JSON");
+        assert!(
+            parsed.get("message_tokens").is_some(),
+            "message_tokens should be in JSON"
+        );
+        assert!(
+            parsed.get("system_tokens").is_some(),
+            "system_tokens should be in JSON"
+        );
+        assert!(
+            parsed.get("tool_tokens").is_some(),
+            "tool_tokens should be in JSON"
+        );
+        assert!(
+            parsed.get("total_tokens").is_some(),
+            "total_tokens should be in JSON"
+        );
 
         // Verify the tool_tokens value
-        assert_eq!(parsed["tool_tokens"].as_u64(), Some(30), "tool_tokens value should be 30");
-        assert_eq!(parsed["message_tokens"].as_u64(), Some(10), "message_tokens should be 10");
-        assert_eq!(parsed["system_tokens"].as_u64(), Some(20), "system_tokens should be 20");
-        assert_eq!(parsed["total_tokens"].as_u64(), Some(60), "total_tokens should be 60");
+        assert_eq!(
+            parsed["tool_tokens"].as_u64(),
+            Some(30),
+            "tool_tokens value should be 30"
+        );
+        assert_eq!(
+            parsed["message_tokens"].as_u64(),
+            Some(10),
+            "message_tokens should be 10"
+        );
+        assert_eq!(
+            parsed["system_tokens"].as_u64(),
+            Some(20),
+            "system_tokens should be 20"
+        );
+        assert_eq!(
+            parsed["total_tokens"].as_u64(),
+            Some(60),
+            "total_tokens should be 60"
+        );
     }
 }

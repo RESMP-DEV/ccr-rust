@@ -8,7 +8,7 @@ use super::translate_response::{
     create_stream_stop_events, translate_stream_chunk_to_anthropic, StreamTranslationState,
 };
 use super::types::*;
-use crate::metrics::{record_failure, record_usage, verify_token_usage};
+use crate::metrics::{record_cost, record_failure, record_usage, verify_token_usage};
 use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
 use crate::transformer::TransformerChain;
 
@@ -280,6 +280,11 @@ pub async fn stream_response_translated(
                     0,
                 );
                 verify_token_usage(&ctx.tier_name, ctx.local_estimate, usage.input_tokens);
+                if let Some(cost) = ctx.pricing.and_then(|p| {
+                    p.estimate_request_cost_usd(usage.input_tokens, usage.output_tokens)
+                }) {
+                    record_cost(&ctx.tier_name, cost);
+                }
             }
 
             // Record TTFT and throughput metrics
@@ -336,6 +341,7 @@ pub async fn stream_anthropic_response_with_tracking(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(buffer_size);
     let tier_name = verify_ctx.tier_name.clone();
     let local_estimate = verify_ctx.local_estimate;
+    let pricing = verify_ctx.pricing;
 
     tokio::spawn(async move {
         let mut stream = byte_stream;
@@ -498,6 +504,11 @@ pub async fn stream_anthropic_response_with_tracking(
         // Record usage
         record_usage(&tier_name, final_input_tokens, final_output_tokens, 0, 0);
         verify_token_usage(&tier_name, local_estimate, final_input_tokens);
+        if let Some(cost) = pricing
+            .and_then(|p| p.estimate_request_cost_usd(final_input_tokens, final_output_tokens))
+        {
+            record_cost(&tier_name, cost);
+        }
 
         // Record TTFT and throughput metrics
         let ttft_secs = first_token_time

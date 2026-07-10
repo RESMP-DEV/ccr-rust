@@ -8,22 +8,23 @@
 use axum::response::IntoResponse;
 use axum::Json;
 use prometheus::core::Collector;
-use tracing::debug;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
+use tracing::debug;
 
 use crate::routing::EwmaTracker;
 
 use super::{
     get_hist_offset, get_throughput_state, merge_histogram_offsets, PreRequestAuditEntry,
     ThroughputSample, ACTIVE_REQUESTS, ACTIVE_STREAMS, AUDIT_LOG, CACHE_CREATION_TOKENS_TOTAL,
-    CACHE_READ_TOKENS_TOTAL, FAILURES_TOTAL, FRONTEND_REQUESTS_TOTAL, FRONTEND_REQUEST_LATENCY,
-    INPUT_TOKENS_TOTAL, METRIC_FRONTEND_REQUEST_DURATION_SECONDS, METRIC_OUTPUT_TOKENS_PER_SECOND,
-    METRIC_REQUEST_DURATION_SECONDS, METRIC_TTFT_SECONDS, OUTPUT_TOKENS_PER_SECOND,
-    OUTPUT_TOKENS_TOTAL, REQUESTS_TOTAL, REQUEST_DURATION, TOKEN_DRIFT_STATE, TOTAL_FAILURES,
-    TOTAL_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_REQUESTS, TTFT_SECONDS,
+    CACHE_READ_TOKENS_TOTAL, COST_USD_TOTAL, FAILURES_TOTAL, FRONTEND_REQUESTS_TOTAL,
+    FRONTEND_REQUEST_LATENCY, INPUT_TOKENS_TOTAL, METRIC_FRONTEND_REQUEST_DURATION_SECONDS,
+    METRIC_OUTPUT_TOKENS_PER_SECOND, METRIC_REQUEST_DURATION_SECONDS, METRIC_TTFT_SECONDS,
+    OUTPUT_TOKENS_PER_SECOND, OUTPUT_TOKENS_TOTAL, REQUESTS_TOTAL, REQUEST_DURATION,
+    TOKEN_DRIFT_STATE, TOTAL_FAILURES, TOTAL_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_REQUESTS,
+    TTFT_SECONDS,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -93,6 +94,10 @@ pub struct UsageSummary {
     pub total_failures: u64,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    /// Estimated USD cost summed across priced tiers. Unpriced tiers (no
+    /// configured `model_pricing`) contribute nothing, so this is a lower
+    /// bound when some providers lack pricing.
+    pub total_cost_usd: f64,
     pub active_streams: f64,
     pub active_requests: f64,
     pub tiers: Vec<TierUsage>,
@@ -107,6 +112,7 @@ pub struct TierUsage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    pub cost_usd: f64,
     pub avg_duration_seconds: f64,
 }
 
@@ -130,6 +136,7 @@ pub async fn usage_handler() -> impl IntoResponse {
                         output_tokens: 0,
                         cache_read_tokens: 0,
                         cache_creation_tokens: 0,
+                        cost_usd: 0.0,
                         avg_duration_seconds: 0.0,
                     });
                     entry.requests = m.get_counter().value() as u64;
@@ -157,6 +164,7 @@ pub async fn usage_handler() -> impl IntoResponse {
                     output_tokens: 0,
                     cache_read_tokens: 0,
                     cache_creation_tokens: 0,
+                    cost_usd: 0.0,
                     avg_duration_seconds: 0.0,
                 });
                 entry.failures += m.get_counter().value() as u64;
@@ -226,6 +234,21 @@ pub async fn usage_handler() -> impl IntoResponse {
         }
     }
 
+    // Collect per-tier estimated USD cost.
+    let cost_metrics: Vec<prometheus::proto::MetricFamily> = COST_USD_TOTAL.collect();
+    for mf in &cost_metrics {
+        for m in mf.get_metric() {
+            for label in m.get_label() {
+                if label.name() == "tier" {
+                    let tier = label.value().to_string();
+                    if let Some(entry) = tiers.get_mut(&tier) {
+                        entry.cost_usd = m.get_counter().value();
+                    }
+                }
+            }
+        }
+    }
+
     // Collect avg durations (live histogram + persisted offset histogram)
     let mut duration_processed_tiers: HashSet<String> = HashSet::new();
     let dur_metrics: Vec<prometheus::proto::MetricFamily> = REQUEST_DURATION.collect();
@@ -271,11 +294,16 @@ pub async fn usage_handler() -> impl IntoResponse {
     let mut tier_list: Vec<TierUsage> = tiers.into_values().collect();
     tier_list.sort_by(|a, b| a.tier.cmp(&b.tier));
 
+    // `+ 0.0` normalizes a `-0.0` sum (which serializes as an ugly "-0.0")
+    // back to positive zero when no priced traffic has accrued.
+    let total_cost_usd: f64 = tier_list.iter().map(|t| t.cost_usd).sum::<f64>() + 0.0;
+
     let summary = UsageSummary {
         total_requests: TOTAL_REQUESTS.load(Ordering::Relaxed),
         total_failures: TOTAL_FAILURES.load(Ordering::Relaxed),
         total_input_tokens: TOTAL_INPUT_TOKENS.load(Ordering::Relaxed),
         total_output_tokens: TOTAL_OUTPUT_TOKENS.load(Ordering::Relaxed),
+        total_cost_usd,
         active_streams: ACTIVE_STREAMS.get(),
         active_requests: ACTIVE_REQUESTS.get(),
         tiers: tier_list,

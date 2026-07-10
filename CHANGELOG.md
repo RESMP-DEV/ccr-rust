@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cost reporting on `/v1/usage`** — The usage summary now returns
+  `total_cost_usd` and a per-tier `cost_usd`, computed at request time from the
+  provider's resolved model pricing (`pricing_for_model`) as each response is
+  recorded. A new `ccr_cost_usd_total` counter is tracked per tier and persisted
+  and restored alongside the token counters, so cost survives restarts. Unpriced
+  tiers contribute nothing, making the total a lower bound when some providers
+  lack pricing.
 - **Self-contained GP routing** — Vendored the Apache-2.0 `gp-routing` crate at
   its pinned upstream commit so public builds no longer require access to a
   private repository.

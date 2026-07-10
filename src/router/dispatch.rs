@@ -14,7 +14,7 @@ use super::types::*;
 use crate::config::{Config, ProviderProtocol};
 use crate::debug_capture::{CaptureBuilder, DebugCapture};
 use crate::metrics::{
-    record_rate_limit_backoff, record_rate_limit_hit, record_usage, verify_token_usage,
+    record_cost, record_rate_limit_backoff, record_rate_limit_hit, record_usage, verify_token_usage,
 };
 use crate::ratelimit::RateLimitTracker;
 use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
@@ -729,6 +729,7 @@ pub(super) async fn try_request_via_openai_protocol(
             rate_limit_info: Some(rate_limit_info),
             stream_start: std::time::Instant::now(),
             stream_idle_timeout,
+            pricing: provider.pricing_for_model(model_name).copied(),
         };
         Ok(stream_response_translated(
             byte_stream,
@@ -793,6 +794,11 @@ pub(super) async fn try_request_via_openai_protocol(
                     0,
                 );
                 verify_token_usage(tier_name, local_estimate, usage.prompt_tokens);
+                if let Some(cost) = provider.pricing_for_model(model_name).and_then(|p| {
+                    p.estimate_request_cost_usd(usage.prompt_tokens, usage.completion_tokens)
+                }) {
+                    record_cost(tier_name, cost);
+                }
             }
 
             // Translate to Anthropic format.
@@ -1017,6 +1023,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
             rate_limit_info: Some(rate_limit_info),
             stream_start: std::time::Instant::now(),
             stream_idle_timeout,
+            pricing: provider.pricing_for_model(model_name).copied(),
         };
 
         let mut response = stream_anthropic_response_with_tracking(
@@ -1126,6 +1133,12 @@ pub(super) async fn try_request_via_anthropic_protocol(
 
             record_usage(tier_name, input_tokens, output_tokens, 0, 0);
             verify_token_usage(tier_name, local_estimate, input_tokens);
+            if let Some(cost) = provider
+                .pricing_for_model(model_name)
+                .and_then(|p| p.estimate_request_cost_usd(input_tokens, output_tokens))
+            {
+                record_cost(tier_name, cost);
+            }
 
             let response_body = serde_json::to_vec(&anthropic_resp)
                 .map_err(|e| TryRequestError::Other(e.into()))?;
