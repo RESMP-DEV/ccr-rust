@@ -14,6 +14,10 @@ pub struct StreamVerifyCtx {
     pub stream_start: Instant,
     /// Maximum idle time between useful SSE frames before the stream is failed.
     pub stream_idle_timeout: Duration,
+    /// Resolved token pricing for this request's model, when the provider
+    /// declares one. Used to attribute estimated dollar cost per streamed
+    /// response; ``None`` leaves the tier's cost unpriced.
+    pub pricing: Option<crate::config::ModelPricing>,
 }
 
 /// Parsed SSE frame with `event` and combined multi-line `data`.
