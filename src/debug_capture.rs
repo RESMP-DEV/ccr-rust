@@ -306,7 +306,7 @@ impl DebugCapture {
             })
             .collect();
 
-        files_with_time.sort_by(|a, b| a.1.cmp(&b.1));
+        files_with_time.sort_by_key(|entry| entry.1);
 
         // Delete oldest files
         let to_delete = files_with_time.len() - self.config.max_files;

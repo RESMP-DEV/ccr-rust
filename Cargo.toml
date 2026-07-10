@@ -23,7 +23,8 @@ dirs = "6"
 env_logger = "0.11"
 flate2 = "1.0"
 futures = "0.3"
-sindexer = { path = "../rust_sindexer", default-features = false, optional = true }
+gp-routing = { path = "vendor/gp-routing", optional = true }
+sindexer = { git = "https://github.com/RESMP-DEV/rust_sindexer.git", rev = "b7c8d998732b8325b59aa2ca9fbde643c898da78", default-features = false, optional = true }
 hex = "0.4"
 humantime = "2"
 jsonschema = "0.29"
@@ -66,9 +67,9 @@ name = "concurrent_streams"
 harness = false
 
 [features]
-default = ["dashboard", "sindexer"]
+default = ["dashboard", "gp", "sindexer"]
 dashboard = ["reqwest/blocking"]
-gp = []
+gp = ["dep:gp-routing"]
 sindexer = ["dep:sindexer"]
 
 [profile.release]

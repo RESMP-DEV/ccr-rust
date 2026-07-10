@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use chrono::Timelike;
 use gp_routing::features::BACKEND_SLOTS;
-use gp_routing::{thompson_sample, ucb_score, FeatureVector, GpRoutingConfig, GpSurrogate, ObservationBuffer};
+use gp_routing::{
+    thompson_sample, ucb_score, FeatureVector, GpRoutingConfig, GpSurrogate, ObservationBuffer,
+};
 use parking_lot::Mutex;
 use rand::Rng;
 use std::cmp::Ordering as CmpOrdering;
@@ -24,11 +26,20 @@ pub struct GpRequestRouter {
 pub struct GpRoutingPlan {
     pub ordered: Vec<(String, String)>,
     request_features: RequestFeatureContext,
+    tier_costs: HashMap<String, TierCostEstimate>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TierCostEstimate {
+    usd: Option<f64>,
+    relative: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
 struct RequestFeatureContext {
     prompt_chars: usize,
+    estimated_input_tokens: u64,
+    max_output_tokens: u64,
     request_class: u8,
     has_system_prompt: bool,
     message_count: usize,
@@ -40,8 +51,11 @@ struct RequestFeatureContext {
 
 impl RequestFeatureContext {
     fn from_request(request: &AnthropicRequest, active_streams: usize, max_streams: usize) -> Self {
+        let prompt_chars = prompt_chars(request);
         Self {
-            prompt_chars: prompt_chars(request),
+            prompt_chars,
+            estimated_input_tokens: estimate_input_tokens(prompt_chars),
+            max_output_tokens: request.max_tokens.map_or(0, u64::from),
             request_class: classify_request(request),
             has_system_prompt: request.system.is_some(),
             message_count: request.messages.len(),
@@ -51,6 +65,17 @@ impl RequestFeatureContext {
             hour_of_day: chrono::Local::now().hour(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct ScoredCandidate {
+    canonical_index: usize,
+    entry: (String, String),
+    acquisition_score: f32,
+    mean: f32,
+    variance: f32,
+    estimated_cost_usd: Option<f64>,
+    credible: bool,
 }
 
 impl GpRequestRouter {
@@ -75,10 +100,10 @@ impl GpRequestRouter {
             .build();
 
         if canonical_tiers.len() > BACKEND_SLOTS {
-            info!(
+            warn!(
                 configured_tiers = canonical_tiers.len(),
                 gp_slots = BACKEND_SLOTS,
-                "gp-routing will learn only the first configured backend slots"
+                "configured tiers exceed the bounded GP feature capacity; tail tiers remain in fallback order"
             );
         }
 
@@ -100,11 +125,14 @@ impl GpRequestRouter {
         max_streams: usize,
         pinned_prefix_len: usize,
     ) -> GpRoutingPlan {
-        let request_features = RequestFeatureContext::from_request(request, active_streams, max_streams);
+        let request_features =
+            RequestFeatureContext::from_request(request, active_streams, max_streams);
+        let tier_costs = estimate_tier_costs(ordered, &request_features, config);
         if !self.surrogate.is_fitted() {
             return GpRoutingPlan {
                 ordered: ordered.to_vec(),
                 request_features,
+                tier_costs,
             };
         }
 
@@ -122,6 +150,7 @@ impl GpRequestRouter {
             return GpRoutingPlan {
                 ordered: ordered.to_vec(),
                 request_features,
+                tier_costs,
             };
         }
 
@@ -142,33 +171,42 @@ impl GpRequestRouter {
             .enumerate()
             .filter_map(|(candidate_idx, pos)| {
                 let entry = ordered.get(*pos)?.clone();
-                let features = self.build_features(&request_features, &entry.0, 0, config)?;
+                let tier_cost = tier_costs.get(&entry.0).copied().unwrap_or_default();
+                let features =
+                    self.build_features(&request_features, &entry.0, 0, tier_cost.relative)?;
                 let (mean, variance) = self.surrogate.predict(&features);
                 let score = self.score_candidate(mean, variance, candidate_idx, epsilon_pick);
-                Some((candidate_idx, entry, score, mean, variance))
+                Some(ScoredCandidate {
+                    canonical_index: candidate_idx,
+                    entry,
+                    acquisition_score: score,
+                    mean,
+                    variance,
+                    estimated_cost_usd: tier_cost.usd,
+                    credible: false,
+                })
             })
             .collect::<Vec<_>>();
 
-        scored.sort_by(|left, right| {
-            right
-                .2
-                .partial_cmp(&left.2)
-                .unwrap_or(CmpOrdering::Equal)
-                .then_with(|| left.0.cmp(&right.0))
-        });
+        credible_set_cost_order(&mut scored, self.runtime_config.ucb_kappa);
 
         let mut reranked = ordered.to_vec();
-        for (pos, (_, entry, _, _, _)) in candidate_positions.iter().zip(scored.iter()) {
-            reranked[*pos] = entry.clone();
+        for (pos, candidate) in candidate_positions.iter().zip(scored.iter()) {
+            reranked[*pos] = candidate.entry.clone();
         }
 
         if reranked != ordered {
             let scored_log = scored
                 .iter()
-                .map(|(_, (_, tier_name), score, mean, variance)| {
+                .map(|candidate| {
                     format!(
-                        "{}(score={:.3}, mean={:.3}, var={:.3})",
-                        tier_name, score, mean, variance
+                        "{}(score={:.3}, mean={:.3}, var={:.3}, cost={:?}, credible={})",
+                        candidate.entry.1,
+                        candidate.acquisition_score,
+                        candidate.mean,
+                        candidate.variance,
+                        candidate.estimated_cost_usd,
+                        candidate.credible,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -184,6 +222,7 @@ impl GpRequestRouter {
         GpRoutingPlan {
             ordered: reranked,
             request_features,
+            tier_costs,
         }
     }
 
@@ -193,9 +232,12 @@ impl GpRequestRouter {
         tier: &str,
         attempt: usize,
         duration_secs: Option<f64>,
-        config: &Config,
+        _config: &Config,
     ) {
-        let Some(features) = self.build_features(&plan.request_features, tier, attempt, config) else {
+        let relative_cost = plan.tier_costs.get(tier).and_then(|cost| cost.relative);
+        let Some(features) =
+            self.build_features(&plan.request_features, tier, attempt, relative_cost)
+        else {
             return;
         };
 
@@ -231,13 +273,15 @@ impl GpRequestRouter {
         request_features: &RequestFeatureContext,
         tier: &str,
         attempt: usize,
-        config: &Config,
+        relative_cost: Option<f32>,
     ) -> Option<FeatureVector> {
         let backend_index = *self.backend_indices.get(tier)?;
-        let total_capacity = normalize_capacity(request_features.max_streams, request_features.active_streams);
+        let total_capacity = normalize_capacity(
+            request_features.max_streams,
+            request_features.active_streams,
+        );
         let clamped_active = request_features.active_streams.min(total_capacity);
         let idle_capacity = total_capacity.saturating_sub(clamped_active);
-        let cost_tier = is_paid_tier(config, tier);
 
         Some(
             FeatureVector::builder()
@@ -254,7 +298,7 @@ impl GpRequestRouter {
                 .in_flight_ratio(clamped_active, total_capacity)
                 .hour_of_day(request_features.hour_of_day)
                 .loop_count(request_features.tool_count)
-                .cost_tier(cost_tier)
+                .relative_cost(relative_cost)
                 .build(),
         )
     }
@@ -299,8 +343,14 @@ fn prompt_chars(request: &AnthropicRequest) -> usize {
 
 fn classify_request(request: &AnthropicRequest) -> u8 {
     let streaming = request.stream.unwrap_or(false);
-    let tool_heavy = request.tools.as_ref().is_some_and(|tools| !tools.is_empty())
-        || request.messages.iter().any(|message| message.role == "tool");
+    let tool_heavy = request
+        .tools
+        .as_ref()
+        .is_some_and(|tools| !tools.is_empty())
+        || request
+            .messages
+            .iter()
+            .any(|message| message.role == "tool");
 
     match (streaming, tool_heavy) {
         (false, false) => 0,
@@ -318,15 +368,121 @@ fn normalize_capacity(max_streams: usize, active_streams: usize) -> usize {
     }
 }
 
-fn is_paid_tier(config: &Config, tier: &str) -> bool {
-    config.resolve_provider(tier).is_none_or(|provider| {
-        let name = provider.name.to_ascii_lowercase();
-        let url = provider.api_base_url.to_ascii_lowercase();
-        !(name.contains("ollama")
-            || name.contains("local")
-            || url.contains("localhost")
-            || url.contains("127.0.0.1"))
-    })
+/// Approximate input tokens before dispatch. This matches the existing CCR
+/// fallback convention of four UTF-8 bytes per token and is used only for
+/// relative cost ranking; authoritative usage still comes from the provider.
+fn estimate_input_tokens(prompt_chars: usize) -> u64 {
+    (prompt_chars.saturating_add(3) / 4) as u64
+}
+
+fn estimate_tier_costs(
+    ordered: &[(String, String)],
+    request: &RequestFeatureContext,
+    config: &Config,
+) -> HashMap<String, TierCostEstimate> {
+    let absolute = ordered
+        .iter()
+        .map(|(tier, _)| {
+            let usd = tier
+                .split_once(',')
+                .and_then(|(_, model)| {
+                    config
+                        .resolve_provider(tier)
+                        .and_then(|provider| provider.pricing_for_model(model))
+                })
+                .and_then(|pricing| {
+                    pricing.estimate_request_cost_usd(
+                        request.estimated_input_tokens,
+                        request.max_output_tokens,
+                    )
+                });
+            (tier.clone(), usd)
+        })
+        .collect::<Vec<_>>();
+
+    let max_cost = absolute
+        .iter()
+        .filter_map(|(_, cost)| *cost)
+        .fold(0.0_f64, f64::max);
+
+    absolute
+        .into_iter()
+        .map(|(tier, usd)| {
+            let relative = usd.map(|cost| {
+                if max_cost > 0.0 {
+                    (cost / max_cost).clamp(0.0, 1.0) as f32
+                } else {
+                    0.0
+                }
+            });
+            (tier, TierCostEstimate { usd, relative })
+        })
+        .collect()
+}
+
+/// Apply a quality-credible-set then cost-lexicographic ordering.
+///
+/// The best posterior lower confidence bound defines the quality bar. Any
+/// candidate whose upper confidence bound overlaps that bar remains credible;
+/// only within that statistically indistinguishable set do we prefer lower
+/// estimated cost. This avoids an arbitrary scalar exchange rate between model
+/// quality and dollars. If any credible candidate is unpriced, the entire set
+/// retains acquisition ordering so missing metadata never masquerades as free.
+fn credible_set_cost_order(candidates: &mut [ScoredCandidate], kappa: f32) {
+    if candidates.is_empty() {
+        return;
+    }
+
+    let confidence = kappa.max(0.0);
+    let best_lower_bound = candidates
+        .iter()
+        .map(|candidate| candidate.mean - confidence * candidate.variance.max(0.0).sqrt())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    for candidate in candidates.iter_mut() {
+        let upper_bound = candidate.mean + confidence * candidate.variance.max(0.0).sqrt();
+        candidate.credible = upper_bound >= best_lower_bound;
+    }
+
+    let credible_count = candidates
+        .iter()
+        .filter(|candidate| candidate.credible)
+        .count();
+    let cost_comparable = credible_count > 1
+        && candidates
+            .iter()
+            .filter(|candidate| candidate.credible)
+            .all(|candidate| candidate.estimated_cost_usd.is_some());
+
+    candidates.sort_by(|left, right| {
+        right
+            .credible
+            .cmp(&left.credible)
+            .then_with(|| {
+                if left.credible && right.credible && cost_comparable {
+                    left.estimated_cost_usd
+                        .expect("cost-comparable candidates are priced")
+                        .partial_cmp(
+                            &right
+                                .estimated_cost_usd
+                                .expect("cost-comparable candidates are priced"),
+                        )
+                        .unwrap_or(CmpOrdering::Equal)
+                } else {
+                    right
+                        .acquisition_score
+                        .partial_cmp(&left.acquisition_score)
+                        .unwrap_or(CmpOrdering::Equal)
+                }
+            })
+            .then_with(|| {
+                right
+                    .acquisition_score
+                    .partial_cmp(&left.acquisition_score)
+                    .unwrap_or(CmpOrdering::Equal)
+            })
+            .then_with(|| left.canonical_index.cmp(&right.canonical_index))
+    });
 }
 
 fn outcome_score(duration_secs: Option<f64>) -> f32 {
@@ -358,8 +514,11 @@ mod tests {
             }
         });
         let temp = tempfile::NamedTempFile::new().expect("temp config file");
-        fs::write(temp.path(), serde_json::to_vec(&raw).expect("serialize config"))
-            .expect("write config file");
+        fs::write(
+            temp.path(),
+            serde_json::to_vec(&raw).expect("serialize config"),
+        )
+        .expect("write config file");
         Config::from_file(temp.path().to_str().expect("config path"))
             .expect("load Config from file")
     }
@@ -401,5 +560,146 @@ mod tests {
         assert_eq!(outcome_score(None), 0.0);
         assert_eq!(outcome_score(Some(-1.0)), 0.0);
         assert!(outcome_score(Some(0.5)) > outcome_score(Some(3.0)));
+    }
+
+    #[test]
+    fn pricing_math_uses_input_and_output_rates() {
+        let pricing = crate::config::ModelPricing {
+            input_per_million_tokens: 1.5,
+            output_per_million_tokens: 6.0,
+        };
+
+        let cost = pricing
+            .estimate_request_cost_usd(2_000, 500)
+            .expect("valid pricing");
+        assert!((cost - 0.006).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn gp_encoder_covers_thirty_two_candidates_and_leaves_tail_in_fallback() {
+        let tiers = (0..33)
+            .map(|idx| format!("mock,m{idx}"))
+            .collect::<Vec<_>>();
+        let router = GpRequestRouter::new(GpRoutingRuntimeConfig::default(), &tiers);
+
+        assert_eq!(router.backend_indices.len(), 32);
+        assert_eq!(router.model_config.n_backends, 32);
+        let request_features = RequestFeatureContext::from_request(&sample_request(), 0, 16);
+        let features = router
+            .build_features(&request_features, "mock,m31", 0, Some(0.5))
+            .expect("last bounded backend has a feature slot");
+        let tail_index = gp_routing::features::BACKEND_START + 31;
+        assert_eq!(features.as_array()[tail_index], 1.0);
+        assert!(router
+            .build_features(&request_features, "mock,m32", 0, Some(0.5))
+            .is_none());
+    }
+
+    #[test]
+    fn relative_costs_are_continuous_per_request() {
+        let raw = json!({
+            "Providers": [{
+                "name": "mock",
+                "api_base_url": "https://example.test/v1",
+                "api_key": "x",
+                "models": ["cheap", "expensive"],
+                "pricing": {
+                    "input_per_million_tokens": 1.0,
+                    "output_per_million_tokens": 2.0
+                },
+                "model_pricing": {
+                    "expensive": {
+                        "input_per_million_tokens": 10.0,
+                        "output_per_million_tokens": 20.0
+                    }
+                }
+            }],
+            "Router": {
+                "default": "mock,cheap",
+                "tiers": ["mock,cheap", "mock,expensive"]
+            }
+        });
+        let temp = tempfile::NamedTempFile::new().expect("temp config file");
+        fs::write(
+            temp.path(),
+            serde_json::to_vec(&raw).expect("serialize config"),
+        )
+        .expect("write config file");
+        let config =
+            Config::from_file(temp.path().to_str().expect("config path")).expect("load config");
+        let ordered = vec![
+            ("mock,cheap".to_string(), "cheap".to_string()),
+            ("mock,expensive".to_string(), "expensive".to_string()),
+        ];
+        let request = RequestFeatureContext::from_request(&sample_request(), 0, 16);
+        let costs = estimate_tier_costs(&ordered, &request, &config);
+
+        assert!((costs["mock,cheap"].relative.expect("priced") - 0.1).abs() < 1e-6);
+        assert_eq!(costs["mock,expensive"].relative, Some(1.0));
+        assert!(costs["mock,cheap"].usd < costs["mock,expensive"].usd);
+    }
+
+    #[test]
+    fn cost_orders_candidates_only_inside_quality_credible_set() {
+        let mut candidates = vec![
+            ScoredCandidate {
+                canonical_index: 0,
+                entry: ("mock,expensive".to_string(), "expensive".to_string()),
+                acquisition_score: 0.81,
+                mean: 0.70,
+                variance: 0.04,
+                estimated_cost_usd: Some(0.10),
+                credible: false,
+            },
+            ScoredCandidate {
+                canonical_index: 1,
+                entry: ("mock,cheap".to_string(), "cheap".to_string()),
+                acquisition_score: 0.79,
+                mean: 0.69,
+                variance: 0.04,
+                estimated_cost_usd: Some(0.001),
+                credible: false,
+            },
+        ];
+
+        credible_set_cost_order(&mut candidates, 2.0);
+        assert_eq!(candidates[0].entry.1, "cheap");
+
+        candidates[0].mean = 0.20;
+        candidates[0].variance = 0.0001;
+        candidates[0].acquisition_score = 0.22;
+        candidates[1].mean = 0.90;
+        candidates[1].variance = 0.0001;
+        candidates[1].acquisition_score = 0.92;
+        credible_set_cost_order(&mut candidates, 2.0);
+        assert_eq!(candidates[0].entry.1, "expensive");
+    }
+
+    #[test]
+    fn mixed_pricing_preserves_acquisition_order_inside_credible_set() {
+        let mut candidates = vec![
+            ScoredCandidate {
+                canonical_index: 0,
+                entry: ("mock,priced".to_string(), "priced".to_string()),
+                acquisition_score: 0.81,
+                mean: 0.70,
+                variance: 0.04,
+                estimated_cost_usd: Some(0.10),
+                credible: false,
+            },
+            ScoredCandidate {
+                canonical_index: 1,
+                entry: ("mock,unknown".to_string(), "unknown".to_string()),
+                acquisition_score: 0.79,
+                mean: 0.69,
+                variance: 0.04,
+                estimated_cost_usd: None,
+                credible: false,
+            },
+        ];
+
+        credible_set_cost_order(&mut candidates, 2.0);
+        assert_eq!(candidates[0].entry.1, "priced");
+        assert!(candidates.iter().all(|candidate| candidate.credible));
     }
 }

@@ -351,6 +351,7 @@ async fn run_server(
     shutdown_timeout: u64,
 ) -> anyhow::Result<()> {
     let config = Config::from_file(config_path)?;
+    ensure_gp_build_support(&config)?;
     tracing::info!("Loaded config from {}", config_path);
     tracing::info!("Tier order: {:?}", config.backend_tiers());
     tracing::info!("Max concurrent streams: {}", max_streams);
@@ -444,6 +445,7 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     println!("Validating: {}", config_path);
 
     let config = Config::from_file(config_path)?;
+    ensure_gp_build_support(&config)?;
 
     let providers = config.providers();
     println!("✓ {} provider(s)", providers.len());
@@ -458,6 +460,18 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     }
 
     println!("\n✓ Configuration valid");
+    Ok(())
+}
+
+fn ensure_gp_build_support(config: &Config) -> anyhow::Result<()> {
+    #[cfg(not(feature = "gp"))]
+    if config.router().gp_routing.enabled {
+        anyhow::bail!(
+            "Router.gpRouting.enabled=true requires a CCR-Rust build with the `gp` feature"
+        );
+    }
+
+    let _ = config;
     Ok(())
 }
 

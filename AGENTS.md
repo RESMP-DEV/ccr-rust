@@ -30,13 +30,15 @@ For a clean local setup:
 Important files and areas:
 
 - `src/main.rs` — CLI entry point.
-- `src/config.rs` — configuration parsing and provider protocol definitions.
+- `src/config/` — configuration parsing, pricing, and provider protocol definitions.
 - `src/router/` — HTTP handlers, dispatch, request translation, response translation, and streaming.
+- `src/gp_router.rs` — request-aware GP reranking and credible-set cost ordering.
 - `src/frontend/` — client-format normalization.
 - `src/transform/` and `src/transformer.rs` — transformer implementations and registry plumbing.
 - `src/metrics/` — Prometheus metrics and persistence.
 - `src/mcp/` — MCP server and tool-catalog handling.
 - `src/ratelimit.rs` — provider backoff logic.
+- `vendor/gp-routing/` — pinned Apache-2.0 GP surrogate source used by standard builds.
 - `tests/` — integration coverage.
 
 ## Working Rules
@@ -48,6 +50,12 @@ Keep these invariants intact:
 - Keep frontend detection and serialization aligned when adding client-specific behavior.
 - Use environment-backed config placeholders instead of embedding secrets.
 - Preserve the existing rate-limit and retry model unless the change is explicitly about routing semantics.
+- Treat 429s as tracked failures: stop retries for that tier, continue to later eligible tiers, and synthesize a 429 only when every candidate is rate-limited.
+- When direct or search routing pins entries at the front, update `pinned_prefix_len`; GP reranking must never move the pinned prefix.
+- When `AppState` gains a field, update every integration-test helper that constructs it directly.
+- Keep `vendor/gp-routing/NOTICE` accurate when modifying the vendored encoder or surrogate boundary.
+- Keep the optional sindexer Git revision pinned to a reviewed public commit;
+  standalone CCR-Rust clones must not require an adjacent repository.
 
 ## Common Change Patterns
 
@@ -65,7 +73,7 @@ For new CLI commands:
 
 ## Validation Expectations
 
-Run at least the relevant unit or integration tests for the area you changed. For routing, translation, or config work, `cargo test` is usually the minimum acceptable validation path.
+Run at least the relevant unit or integration tests for the area you changed. For routing, translation, or config work, `cargo test --all-features` is usually the minimum acceptable validation path. Changes under `vendor/gp-routing/` also run that package's own tests.
 
 Integration tests use mocked upstreams, so prefer updating those over inventing ad hoc manual checks.
 

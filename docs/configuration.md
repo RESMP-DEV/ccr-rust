@@ -59,6 +59,16 @@ See [Gemini Integration](gemini-integration.md) for detailed security guidance.
       "api_base_url": "https://api.example.com/v1/chat/completions",
       "api_key": "sk-...",
       "models": ["model-a", "model-b"],
+      "pricing": {
+        "input_per_million_tokens": 1.0,
+        "output_per_million_tokens": 4.0
+      },
+      "model_pricing": {
+        "model-b": {
+          "input_per_million_tokens": 3.0,
+          "output_per_million_tokens": 12.0
+        }
+      },
       "transformer": {
         "use": ["transformer-name"],
         "model-specific": { "use": ["override-transformer"] }
@@ -69,6 +79,11 @@ See [Gemini Integration](gemini-integration.md) for detailed security guidance.
     "default": "provider,model",
     "background": "provider,model",
     "think": "provider,model",
+    "gpRouting": {
+      "enabled": true,
+      "maxCandidates": 32,
+      "acquisition": "ucb"
+    },
     "webSearch": "provider,model",
     "tierRetries": {
       "tier-0": {
@@ -99,7 +114,35 @@ Each provider entry configures an upstream API endpoint.
 | `api_base_url` | string | Yes | - | Full URL to the API endpoint. |
 | `api_key` | string | Yes | - | API key for authentication. |
 | `models` | array | Yes | - | List of model names available from this provider. |
+| `pricing` | object | No | - | Provider-default input/output prices in USD per million tokens. |
+| `model_pricing` | object | No | - | Model-keyed price overrides using the same two rate fields. |
 | `transformer` | object | No | - | Request/response transformation configuration. |
+
+### Provider and Model Pricing
+
+Pricing is optional. When configured, both `input_per_million_tokens` and
+`output_per_million_tokens` are required. A `model_pricing` entry overrides the
+provider default for that model:
+
+```json
+{
+  "pricing": {
+    "input_per_million_tokens": 1.0,
+    "output_per_million_tokens": 4.0
+  },
+  "model_pricing": {
+    "premium-model": {
+      "input_per_million_tokens": 3.0,
+      "output_per_million_tokens": 12.0
+    }
+  }
+}
+```
+
+CCR-Rust estimates pre-dispatch cost from the request input estimate and the
+configured output-token budget. The continuous feature is normalized relative
+to the priced candidates in that request. Missing pricing remains explicitly
+unknown; it is never treated as free.
 
 ### Provider Transformer Configuration
 
@@ -163,6 +206,20 @@ The `Router` section configures how incoming requests are routed to providers.
 | `tierRetries` | object | No | - | Per-tier retry configuration. |
 | `forceNonStreaming` | boolean | No | false | Disable streaming for agent workloads. |
 | `ignoreDirect` | boolean | No | false | Ignore client model targeting, enforce tier order. |
+| `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
+
+### Cost-Aware GP Routing
+
+The standard CCR-Rust build includes GP support. Set `gpRouting.enabled` to
+activate it. The encoder supports up to 32 configured provider/model routes;
+routes beyond that bound remain available in their configured fallback order.
+
+Cost does not use a fixed scalar penalty. CCR-Rust first forms a posterior
+quality credible set: a candidate remains eligible when its upper confidence
+bound overlaps the best candidate's lower confidence bound. It then prefers
+lower estimated cost only within that statistically indistinguishable set. If
+any credible candidate lacks pricing, acquisition order is retained for the
+whole set so incomplete metadata cannot bias routing.
 
 ### Route Format
 
