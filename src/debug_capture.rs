@@ -19,7 +19,7 @@
 //! ```
 //!
 //! Captured files are stored as JSON with timestamped filenames:
-//! `ccr_capture_v1_{provider}_{tier}_{timestamp}_{request_id}.json`
+//! `ccr_capture_v1_{provider}_{tier_name}_{timestamp}_{request_id}.json`
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,9 @@ const CAPTURE_FILE_PREFIX: &str = "ccr_capture_v1_";
 const DEFAULT_MAX_FILES: usize = 100;
 const HARD_MAX_FILES: usize = 1000;
 const MAX_CAPTURE_FILE_BYTES: usize = 4 * 1024 * 1024;
+const HARD_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_LIST_FILES: usize = 100;
+const MAX_LIST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Configuration for debug capture.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +84,7 @@ impl Default for DebugCaptureConfig {
             output_dir: default_output_dir(),
             max_files: default_max_files(),
             include_headers: false,
-            capture_success: true,
+            capture_success: default_capture_success(),
             max_body_size: default_max_body_size(),
         }
     }
@@ -191,6 +194,20 @@ impl DebugCapture {
             );
             config.max_files = HARD_MAX_FILES;
         }
+        if config.max_body_size == 0 {
+            warn!(
+                default = default_max_body_size(),
+                "Debug capture max_body_size must be bounded; using the default"
+            );
+            config.max_body_size = default_max_body_size();
+        } else if config.max_body_size > HARD_MAX_BODY_BYTES {
+            warn!(
+                requested = config.max_body_size,
+                maximum = HARD_MAX_BODY_BYTES,
+                "Debug capture max_body_size exceeds the hard limit; clamping"
+            );
+            config.max_body_size = HARD_MAX_BODY_BYTES;
+        }
 
         let output_path = expand_tilde(&config.output_dir);
 
@@ -245,6 +262,18 @@ impl DebugCapture {
     /// Generate a new request ID.
     pub fn next_request_id(&self) -> u64 {
         REQUEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Create a builder with all configured privacy limits applied.
+    pub fn builder(&self, provider: &str, tier_name: &str) -> CaptureBuilder {
+        CaptureBuilder::new(self.next_request_id(), provider, tier_name)
+            .include_headers(self.config.include_headers)
+            .max_body_size(self.config.max_body_size)
+    }
+
+    /// Return whether explicitly requested sanitized headers should be stored.
+    pub fn headers_enabled(&self) -> bool {
+        self.config.include_headers
     }
 
     /// Record a captured interaction.
@@ -336,10 +365,6 @@ impl DebugCapture {
             .filter(is_managed_capture_file)
             .collect();
 
-        if entries.len() <= self.config.max_files {
-            return Ok(());
-        }
-
         // Sort by modification time (oldest first)
         let mut files_with_time: Vec<_> = entries
             .into_iter()
@@ -353,6 +378,10 @@ impl DebugCapture {
 
         files_with_time
             .sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+
+        if files_with_time.len() <= self.config.max_files {
+            return Ok(());
+        }
 
         // Delete oldest files
         let to_delete = files_with_time.len() - self.config.max_files;
@@ -412,14 +441,24 @@ impl DebugCapture {
                 )
         });
 
-        let bounded_limit = limit.min(HARD_MAX_FILES);
+        let bounded_limit = limit.min(MAX_LIST_FILES);
+        let mut listed_bytes = 0_u64;
         for entry in entries {
             if captures.len() >= bounded_limit {
                 break;
             }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.len() > MAX_CAPTURE_FILE_BYTES as u64
+                || listed_bytes.saturating_add(metadata.len()) > MAX_LIST_BYTES
+            {
+                continue;
+            }
             match read_managed_capture(&entry.path()) {
                 Ok(capture) => {
                     if provider.is_none_or(|expected| capture.provider == expected) {
+                        listed_bytes += metadata.len();
                         captures.push(capture);
                     }
                 }
@@ -440,12 +479,24 @@ impl DebugCapture {
     pub fn get_stats(&self) -> Result<CaptureStats> {
         let mut stats = CaptureStats::default();
 
+        let mut inspected_bytes = 0_u64;
         for entry in fs::read_dir(&self.output_path)?
             .filter_map(|entry| entry.ok())
             .filter(is_managed_capture_file)
-            .take(HARD_MAX_FILES)
         {
+            if stats.total_captures >= MAX_LIST_FILES {
+                break;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.len() > MAX_CAPTURE_FILE_BYTES as u64
+                || inspected_bytes.saturating_add(metadata.len()) > MAX_LIST_BYTES
+            {
+                continue;
+            }
             if let Ok(capture) = read_managed_capture(&entry.path()) {
+                inspected_bytes += metadata.len();
                 stats.total_captures += 1;
                 *stats
                     .by_provider
@@ -631,7 +682,11 @@ impl CaptureBuilder {
     }
 
     pub fn max_body_size(mut self, size: usize) -> Self {
-        self.max_body_size = size;
+        self.max_body_size = if size == 0 {
+            default_max_body_size()
+        } else {
+            size.min(HARD_MAX_BODY_BYTES)
+        };
         self
     }
 
@@ -658,12 +713,8 @@ impl CaptureBuilder {
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0);
 
-        let (body, truncated) =
-            if self.max_body_size > 0 && response_body.len() > self.max_body_size {
-                (response_body[..self.max_body_size].to_string(), true)
-            } else {
-                (response_body.to_string(), false)
-            };
+        let (body, truncated) = truncate_utf8(response_body, self.max_body_size);
+        let success = error.is_none() && (200..300).contains(&status);
 
         CapturedInteraction {
             request_id: self.request_id,
@@ -689,7 +740,7 @@ impl CaptureBuilder {
             response_truncated: truncated,
             latency_ms,
             is_streaming: self.is_streaming,
-            success: (200..300).contains(&status),
+            success,
             error,
             metadata: None,
         }
@@ -699,6 +750,17 @@ impl CaptureBuilder {
     pub fn complete_with_error(self, error: impl Into<String>) -> CapturedInteraction {
         self.complete(0, "", None, Some(error.into()))
     }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
 }
 
 #[cfg(test)]
@@ -755,6 +817,54 @@ mod tests {
         assert_eq!(capture.response_body.len(), 1000);
     }
 
+    #[test]
+    fn test_truncation_preserves_utf8_boundaries() {
+        let capture = CaptureBuilder::new(4, "minimax", "ccr-mm")
+            .max_body_size(3)
+            .complete(500, "éé", None, Some("failed".to_string()));
+
+        assert!(capture.response_truncated);
+        assert_eq!(capture.response_body, "é");
+    }
+
+    #[test]
+    fn test_http_200_with_error_is_not_successful() {
+        let capture = CaptureBuilder::new(5, "minimax", "ccr-mm").complete(
+            200,
+            r#"{"error":"quota"}"#,
+            None,
+            Some("embedded provider error".to_string()),
+        );
+
+        assert!(!capture.success);
+    }
+
+    #[test]
+    fn test_builder_applies_header_and_body_privacy_config() {
+        let dir = tempdir().unwrap();
+        let manager = DebugCapture::new(DebugCaptureConfig {
+            enabled: true,
+            output_dir: dir.path().to_string_lossy().to_string(),
+            include_headers: false,
+            max_body_size: 3,
+            ..Default::default()
+        })
+        .unwrap();
+        let capture = manager
+            .builder("minimax", "ccr-mm")
+            .request_headers(serde_json::json!({"authorization": "secret"}))
+            .complete(
+                500,
+                "éé",
+                Some(serde_json::json!({"set-cookie": "secret"})),
+                Some("failed".to_string()),
+            );
+
+        assert!(capture.request_headers.is_none());
+        assert!(capture.response_headers.is_none());
+        assert_eq!(capture.response_body, "é");
+    }
+
     #[tokio::test]
     async fn test_debug_capture_manager() {
         let dir = tempdir().unwrap();
@@ -763,6 +873,7 @@ mod tests {
             providers: vec!["minimax".to_string()],
             output_dir: dir.path().to_string_lossy().to_string(),
             max_files: 10,
+            capture_success: true,
             ..Default::default()
         };
 
@@ -820,6 +931,7 @@ mod tests {
 
     #[test]
     fn test_capture_is_disabled_when_configuration_is_absent() {
+        assert!(!DebugCaptureConfig::default().capture_success);
         let config: DebugCaptureConfig = serde_json::from_str("{}").unwrap();
         assert!(!config.enabled);
         assert!(!config.capture_success);
@@ -926,6 +1038,45 @@ mod tests {
         })
         .unwrap();
         assert_eq!(manager.config.max_files, HARD_MAX_FILES);
+    }
+
+    #[test]
+    fn test_unbounded_body_limit_is_replaced_or_clamped() {
+        let manager = DebugCapture::new(DebugCaptureConfig {
+            max_body_size: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(manager.config.max_body_size, default_max_body_size());
+
+        let manager = DebugCapture::new(DebugCaptureConfig {
+            max_body_size: HARD_MAX_BODY_BYTES + 1,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(manager.config.max_body_size, HARD_MAX_BODY_BYTES);
+    }
+
+    #[tokio::test]
+    async fn test_listing_and_statistics_have_hard_result_caps() {
+        let dir = tempdir().unwrap();
+        let manager = DebugCapture::new(DebugCaptureConfig {
+            enabled: true,
+            output_dir: dir.path().to_string_lossy().to_string(),
+            max_files: HARD_MAX_FILES,
+            ..Default::default()
+        })
+        .unwrap();
+
+        for request_id in 0..=MAX_LIST_FILES as u64 {
+            manager.record(interaction(request_id)).await.unwrap();
+        }
+
+        assert_eq!(
+            manager.list_captures(None, usize::MAX).unwrap().len(),
+            MAX_LIST_FILES
+        );
+        assert_eq!(manager.get_stats().unwrap().total_captures, MAX_LIST_FILES);
     }
 
     #[cfg(unix)]

@@ -422,10 +422,6 @@ async fn run_server(
         )
         .route("/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
-        // Debug capture API
-        .route("/debug/capture/status", get(debug_capture_status))
-        .route("/debug/capture/list", get(debug_capture_list))
-        .route("/debug/capture/stats", get(debug_capture_stats))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -643,65 +639,6 @@ async fn latencies_handler(State(state): State<AppState>) -> impl axum::response
 
 async fn health() -> &'static str {
     "ok"
-}
-
-// Debug capture API handlers
-async fn debug_capture_status(State(state): State<AppState>) -> impl axum::response::IntoResponse {
-    match &state.debug_capture {
-        Some(capture) => {
-            let stats = capture.get_stats().unwrap_or_default();
-            axum::Json(serde_json::json!({
-                "enabled": true,
-                "output_dir": state.config.debug_capture().output_dir,
-                "providers": state.config.debug_capture().providers,
-                "stats": stats
-            }))
-        }
-        None => axum::Json(serde_json::json!({
-            "enabled": false,
-            "message": "Debug capture not configured. Add DebugCapture to config.json"
-        })),
-    }
-}
-
-async fn debug_capture_list(
-    State(state): State<AppState>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl axum::response::IntoResponse {
-    let provider = params.get("provider").map(|s| s.as_str());
-    let limit: usize = params
-        .get("limit")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(20);
-
-    match &state.debug_capture {
-        Some(capture) => match capture.list_captures(provider, limit) {
-            Ok(captures) => axum::Json(serde_json::json!({
-                "captures": captures,
-                "count": captures.len()
-            })),
-            Err(e) => axum::Json(serde_json::json!({
-                "error": format!("Failed to list captures: {}", e)
-            })),
-        },
-        None => axum::Json(serde_json::json!({
-            "error": "Debug capture not enabled"
-        })),
-    }
-}
-
-async fn debug_capture_stats(State(state): State<AppState>) -> impl axum::response::IntoResponse {
-    match &state.debug_capture {
-        Some(capture) => match capture.get_stats() {
-            Ok(stats) => axum::Json(serde_json::json!(stats)),
-            Err(e) => axum::Json(serde_json::json!({
-                "error": format!("Failed to get stats: {}", e)
-            })),
-        },
-        None => axum::Json(serde_json::json!({
-            "error": "Debug capture not enabled"
-        })),
-    }
 }
 
 #[cfg(all(test, feature = "gp"))]

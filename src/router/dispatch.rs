@@ -6,7 +6,7 @@ use std::time::Duration;
 use tracing::{trace, warn};
 
 use super::streaming::{
-    BoxByteStream, stream_anthropic_response_with_tracking, stream_response_translated,
+    stream_anthropic_response_with_tracking, stream_response_translated, BoxByteStream,
 };
 use super::translate_request::translate_request_anthropic_to_openai;
 use super::translate_response::{build_transformer_chain, translate_response_openai_to_anthropic};
@@ -21,6 +21,52 @@ use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
 use futures::StreamExt;
+
+fn sanitized_capture_headers(headers: &reqwest::header::HeaderMap) -> serde_json::Value {
+    let mut values = serde_json::Map::new();
+    for (name, value) in headers.iter().take(64) {
+        let normalized = name.as_str().to_ascii_lowercase();
+        let sensitive = matches!(
+            normalized.as_str(),
+            "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+        ) || normalized.contains("api-key")
+            || normalized.contains("apikey")
+            || normalized.contains("credential")
+            || normalized.ends_with("-token")
+            || normalized.ends_with("_token");
+        let rendered = if sensitive {
+            "[REDACTED]".to_string()
+        } else {
+            value
+                .to_str()
+                .unwrap_or("[NON_UTF8]")
+                .chars()
+                .take(512)
+                .collect()
+        };
+        values.insert(
+            name.as_str().to_string(),
+            serde_json::Value::String(rendered),
+        );
+    }
+    serde_json::Value::Object(values)
+}
+
+async fn persist_debug_capture(
+    capture: Option<&Arc<DebugCapture>>,
+    builder: Option<CaptureBuilder>,
+    status: u16,
+    response_body: &str,
+    response_headers: Option<serde_json::Value>,
+    error: Option<String>,
+) {
+    if let (Some(capture), Some(builder)) = (capture, builder) {
+        let interaction = builder.complete(status, response_body, response_headers, error);
+        if let Err(capture_err) = capture.record(interaction).await {
+            warn!("Failed to record debug capture: {}", capture_err);
+        }
+    }
+}
 
 /// Peek at the first chunk of a streaming response to detect error payloads
 /// wrapped in HTTP 200 (e.g. Z.AI returns quota errors as raw JSON in a
@@ -117,9 +163,8 @@ async fn check_stream_for_embedded_error(
             }
             Ok(Ok(None)) => {
                 if buf.is_empty() {
-                    let empty: BoxByteStream = Box::pin(
-                        futures::stream::empty::<Result<bytes::Bytes, reqwest::Error>>(),
-                    );
+                    let empty: BoxByteStream =
+                        Box::pin(futures::stream::empty::<Result<bytes::Bytes, reqwest::Error>>());
                     return Ok(empty);
                 }
                 break;
@@ -550,14 +595,16 @@ pub(super) async fn try_request_via_openai_protocol(
     // Set up capture if enabled for this provider
     let capture_builder = if let Some(ref capture) = debug_capture {
         if capture.should_capture(&provider.name) {
-            Some(
-                CaptureBuilder::new(capture.next_request_id(), &provider.name, tier_name)
-                    .model(model_name)
-                    .url(&url)
-                    .request_body(openai_request_value.clone())
-                    .streaming(stream_flag)
-                    .start(),
-            )
+            let mut builder = capture
+                .builder(&provider.name, tier_name)
+                .model(model_name)
+                .url(&url)
+                .request_body(openai_request_value.clone())
+                .streaming(stream_flag);
+            if capture.headers_enabled() {
+                builder = builder.request_headers(sanitized_capture_headers(&headers));
+            }
+            Some(builder.start())
         } else {
             None
         }
@@ -590,15 +637,43 @@ pub(super) async fn try_request_via_openai_protocol(
 
     if !resp.status().is_success() {
         let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
+        let captured_headers = debug_capture
+            .as_ref()
+            .filter(|capture| capture.headers_enabled())
+            .map(|_| sanitized_capture_headers(resp.headers()));
+        let body = match resp.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                persist_debug_capture(
+                    debug_capture.as_ref(),
+                    capture_builder,
+                    status.as_u16(),
+                    "",
+                    captured_headers,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(TryRequestError::Other(error.into()));
+            }
+        };
+        let provider_error = format!("Provider returned {status} from {url}");
+        persist_debug_capture(
+            debug_capture.as_ref(),
+            capture_builder,
+            status.as_u16(),
+            &body,
+            captured_headers,
+            Some(provider_error),
+        )
+        .await;
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
-
             record_rate_limit_hit(tier_name);
             ratelimit_tracker.record_429(tier_name, retry_after);
             record_rate_limit_backoff(tier_name);
@@ -606,10 +681,6 @@ pub(super) async fn try_request_via_openai_protocol(
             return Err(TryRequestError::RateLimited(retry_after));
         }
 
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| TryRequestError::Other(e.into()))?;
         return Err(TryRequestError::Other(anyhow::anyhow!(
             "Provider returned {} from {}: {}",
             status,
@@ -622,10 +693,34 @@ pub(super) async fn try_request_via_openai_protocol(
     if stream_flag {
         // For streaming, we need to translate OpenAI SSE events to Anthropic SSE.
         let rate_limit_info = extract_rate_limit_headers(&resp);
+        let resp_status = resp.status().as_u16();
+        let captured_headers = debug_capture
+            .as_ref()
+            .filter(|capture| capture.headers_enabled())
+            .map(|_| sanitized_capture_headers(resp.headers()));
 
         // Peek at first chunk to detect errors embedded in 200 streams.
-        let byte_stream =
-            check_stream_for_embedded_error(resp, tier_name, stream_first_event_timeout).await?;
+        let byte_stream = match check_stream_for_embedded_error(
+            resp,
+            tier_name,
+            stream_first_event_timeout,
+        )
+        .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                persist_debug_capture(
+                    debug_capture.as_ref(),
+                    capture_builder,
+                    resp_status,
+                    "",
+                    captured_headers,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
@@ -649,6 +744,10 @@ pub(super) async fn try_request_via_openai_protocol(
 
         // For non-streaming, translate the full response.
         let resp_status = resp.status().as_u16();
+        let captured_headers = debug_capture
+            .as_ref()
+            .filter(|capture| capture.headers_enabled())
+            .map(|_| sanitized_capture_headers(resp.headers()));
         let body = resp
             .bytes()
             .await
@@ -656,7 +755,19 @@ pub(super) async fn try_request_via_openai_protocol(
 
         // Check for embedded error in 200 body BEFORE recording success,
         // otherwise a failed request corrupts tier rate-limit state.
-        check_body_for_embedded_error(&body, tier_name)?;
+        if let Err(error) = check_body_for_embedded_error(&body, tier_name) {
+            let body_str = String::from_utf8_lossy(&body);
+            persist_debug_capture(
+                debug_capture.as_ref(),
+                capture_builder,
+                resp_status,
+                &body_str,
+                captured_headers,
+                Some(error.to_string()),
+            )
+            .await;
+            return Err(error);
+        }
 
         ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
 
@@ -664,7 +775,7 @@ pub(super) async fn try_request_via_openai_protocol(
 
         // Record capture for non-streaming response
         if let (Some(builder), Some(capture)) = (capture_builder, debug_capture.clone()) {
-            let interaction = builder.complete(resp_status, &body_str, None, None);
+            let interaction = builder.complete(resp_status, &body_str, captured_headers, None);
             if let Err(capture_err) = capture.record(interaction).await {
                 warn!("Failed to record debug capture: {}", capture_err);
             }
@@ -772,14 +883,16 @@ pub(super) async fn try_request_via_anthropic_protocol(
     // Set up capture if enabled for this provider
     let capture_builder = if let Some(ref capture) = debug_capture {
         if capture.should_capture(&provider.name) {
-            Some(
-                CaptureBuilder::new(capture.next_request_id(), &provider.name, tier_name)
-                    .model(model_name)
-                    .url(&url)
-                    .request_body(normalized_request_value)
-                    .streaming(request.stream.unwrap_or(false))
-                    .start(),
-            )
+            let mut builder = capture
+                .builder(&provider.name, tier_name)
+                .model(model_name)
+                .url(&url)
+                .request_body(normalized_request_value)
+                .streaming(request.stream.unwrap_or(false));
+            if capture.headers_enabled() {
+                builder = builder.request_headers(sanitized_capture_headers(&headers));
+            }
+            Some(builder.start())
         } else {
             None
         }
@@ -812,16 +925,44 @@ pub(super) async fn try_request_via_anthropic_protocol(
 
     if !resp.status().is_success() {
         let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
+        let captured_headers = debug_capture
+            .as_ref()
+            .filter(|capture| capture.headers_enabled())
+            .map(|_| sanitized_capture_headers(resp.headers()));
+        let body = match resp.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                persist_debug_capture(
+                    debug_capture.as_ref(),
+                    capture_builder,
+                    status.as_u16(),
+                    "",
+                    captured_headers,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(TryRequestError::Other(error.into()));
+            }
+        };
+        let provider_error = format!("Provider returned {status} from {url}");
+        persist_debug_capture(
+            debug_capture.as_ref(),
+            capture_builder,
+            status.as_u16(),
+            &body,
+            captured_headers,
+            Some(provider_error),
+        )
+        .await;
 
         // For 429 rate limit, pass through to let coordinator/client handle routing
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
-
             record_rate_limit_hit(tier_name);
             ratelimit_tracker.record_429(tier_name, retry_after);
             record_rate_limit_backoff(tier_name);
@@ -829,10 +970,6 @@ pub(super) async fn try_request_via_anthropic_protocol(
             return Err(TryRequestError::RateLimited(retry_after));
         }
 
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| TryRequestError::Other(e.into()))?;
         return Err(TryRequestError::Other(anyhow::anyhow!(
             "Provider returned {} from {}: {}",
             status,
@@ -844,10 +981,34 @@ pub(super) async fn try_request_via_anthropic_protocol(
     if request.stream.unwrap_or(false) {
         // Use streaming token tracking for Anthropic protocol
         let rate_limit_info = extract_rate_limit_headers(&resp);
+        let resp_status = resp.status().as_u16();
+        let captured_headers = debug_capture
+            .as_ref()
+            .filter(|capture| capture.headers_enabled())
+            .map(|_| sanitized_capture_headers(resp.headers()));
 
         // Peek at first chunk to detect errors embedded in 200 streams.
-        let byte_stream =
-            check_stream_for_embedded_error(resp, tier_name, stream_first_event_timeout).await?;
+        let byte_stream = match check_stream_for_embedded_error(
+            resp,
+            tier_name,
+            stream_first_event_timeout,
+        )
+        .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                persist_debug_capture(
+                    debug_capture.as_ref(),
+                    capture_builder,
+                    resp_status,
+                    "",
+                    captured_headers,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
@@ -872,13 +1033,29 @@ pub(super) async fn try_request_via_anthropic_protocol(
 
         let resp_status = resp.status().as_u16();
         let status = reqwest_status_to_axum(resp.status());
+        let captured_headers = debug_capture
+            .as_ref()
+            .filter(|capture| capture.headers_enabled())
+            .map(|_| sanitized_capture_headers(resp.headers()));
         let body = resp
             .bytes()
             .await
             .map_err(|e| TryRequestError::Other(e.into()))?;
 
         // Check for embedded error before recording success.
-        check_body_for_embedded_error(&body, tier_name)?;
+        if let Err(error) = check_body_for_embedded_error(&body, tier_name) {
+            let body_str = String::from_utf8_lossy(&body);
+            persist_debug_capture(
+                debug_capture.as_ref(),
+                capture_builder,
+                resp_status,
+                &body_str,
+                captured_headers,
+                Some(error.to_string()),
+            )
+            .await;
+            return Err(error);
+        }
 
         ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
 
@@ -886,7 +1063,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
 
         // Record capture for non-streaming Anthropic response
         if let (Some(builder), Some(capture)) = (capture_builder, debug_capture.clone()) {
-            let interaction = builder.complete(resp_status, &body_str, None, None);
+            let interaction = builder.complete(resp_status, &body_str, captured_headers, None);
             if let Err(capture_err) = capture.record(interaction).await {
                 warn!("Failed to record debug capture: {}", capture_err);
             }
@@ -996,5 +1173,28 @@ mod tests {
 
         assert_eq!(headers.get("authorization").unwrap(), "Bearer ak-test");
         assert!(headers.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn debug_capture_headers_are_bounded_and_redacted() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer secret"),
+        );
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            reqwest::header::HeaderValue::from_static("also-secret"),
+        );
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-request-id"),
+            reqwest::header::HeaderValue::from_static("request-123"),
+        );
+
+        let captured = sanitized_capture_headers(&headers);
+
+        assert_eq!(captured["authorization"], "[REDACTED]");
+        assert_eq!(captured["x-api-key"], "[REDACTED]");
+        assert_eq!(captured["x-request-id"], "request-123");
     }
 }
