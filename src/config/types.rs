@@ -200,12 +200,53 @@ impl<'de> Deserialize<'de> for ProviderTransformer {
     }
 }
 
+/// Token pricing for a provider or model override, in USD per million tokens.
+///
+/// Pricing is optional at the provider level. When supplied, both rates are
+/// explicit so cost comparisons never silently treat a missing component as
+/// free. A model-specific entry takes precedence over the provider default.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ModelPricing {
+    #[serde(alias = "inputPerMillionTokens")]
+    pub input_per_million_tokens: f64,
+
+    #[serde(alias = "outputPerMillionTokens")]
+    pub output_per_million_tokens: f64,
+}
+
+impl ModelPricing {
+    /// Estimate the request cost for the supplied token counts.
+    /// Invalid negative or non-finite rates are treated as unpriced.
+    pub fn estimate_request_cost_usd(&self, input_tokens: u64, output_tokens: u64) -> Option<f64> {
+        if !self.input_per_million_tokens.is_finite()
+            || !self.output_per_million_tokens.is_finite()
+            || self.input_per_million_tokens < 0.0
+            || self.output_per_million_tokens < 0.0
+        {
+            return None;
+        }
+
+        let estimated = (input_tokens as f64 * self.input_per_million_tokens
+            + output_tokens as f64 * self.output_per_million_tokens)
+            / 1_000_000.0;
+        estimated.is_finite().then_some(estimated)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
     pub name: String,
     pub api_base_url: String,
     pub api_key: String,
     pub models: Vec<String>,
+
+    /// Default token pricing for this provider.
+    #[serde(default)]
+    pub pricing: Option<ModelPricing>,
+
+    /// Optional model-specific token pricing overrides.
+    #[serde(default, alias = "modelPricing")]
+    pub model_pricing: HashMap<String, ModelPricing>,
 
     /// Upstream API protocol for this provider.
     ///
@@ -261,6 +302,11 @@ fn default_honor_ratelimit_headers() -> bool {
 }
 
 impl Provider {
+    /// Resolve model-specific pricing, falling back to the provider default.
+    pub fn pricing_for_model(&self, model: &str) -> Option<&ModelPricing> {
+        self.model_pricing.get(model).or(self.pricing.as_ref())
+    }
+
     /// Get the provider-level transformer chain, or an empty slice if none.
     pub fn provider_transformers(&self) -> &[TransformerEntry] {
         self.transformer
@@ -651,7 +697,9 @@ fn default_redis_prefix() -> String {
 }
 
 fn default_gp_max_candidates() -> usize {
-    8
+    // Matches the vendored GP encoder's bounded backend capacity. Keeping this
+    // literal here avoids making config parsing depend on the optional crate.
+    32
 }
 
 fn default_gp_buffer_capacity() -> usize {
@@ -793,7 +841,7 @@ mod backoff_tests {
         .expect("parse RouterConfig");
 
         assert!(!router.gp_routing.enabled);
-        assert_eq!(router.gp_routing.max_candidates, 8);
+        assert_eq!(router.gp_routing.max_candidates, 32);
         assert_eq!(router.gp_routing.acquisition, GpAcquisitionStrategy::Ucb);
     }
 

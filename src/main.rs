@@ -351,6 +351,7 @@ async fn run_server(
     shutdown_timeout: u64,
 ) -> anyhow::Result<()> {
     let config = Config::from_file(config_path)?;
+    ensure_gp_build_support(&config)?;
     tracing::info!("Loaded config from {}", config_path);
     tracing::info!("Tier order: {:?}", config.backend_tiers());
     tracing::info!("Max concurrent streams: {}", max_streams);
@@ -444,6 +445,7 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     println!("Validating: {}", config_path);
 
     let config = Config::from_file(config_path)?;
+    ensure_gp_build_support(&config)?;
 
     let providers = config.providers();
     println!("✓ {} provider(s)", providers.len());
@@ -458,6 +460,36 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     }
 
     println!("\n✓ Configuration valid");
+    Ok(())
+}
+
+fn ensure_gp_build_support(config: &Config) -> anyhow::Result<()> {
+    #[cfg(not(feature = "gp"))]
+    if config.router().gp_routing.enabled {
+        anyhow::bail!(
+            "Router.gpRouting.enabled=true requires a CCR-Rust build with the `gp` feature"
+        );
+    }
+
+    #[cfg(feature = "gp")]
+    if config.router().gp_routing.enabled {
+        validate_gp_runtime_config(&config.router().gp_routing)?;
+    }
+
+    let _ = config;
+    Ok(())
+}
+
+#[cfg(feature = "gp")]
+fn validate_gp_runtime_config(config: &config::GpRoutingRuntimeConfig) -> anyhow::Result<()> {
+    if let Some(kpls_dim) = config.kpls_dim {
+        let feature_dim = gp_routing::features::FEATURE_DIM;
+        if kpls_dim == 0 || kpls_dim > feature_dim {
+            anyhow::bail!(
+                "Router.gpRouting.kplsDim must be between 1 and {feature_dim}; got {kpls_dim}"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -669,5 +701,27 @@ async fn debug_capture_stats(State(state): State<AppState>) -> impl axum::respon
         None => axum::Json(serde_json::json!({
             "error": "Debug capture not enabled"
         })),
+    }
+}
+
+#[cfg(all(test, feature = "gp"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gp_runtime_validation_rejects_invalid_kpls_dimensions() {
+        for kpls_dim in [0, gp_routing::features::FEATURE_DIM + 1] {
+            let config = config::GpRoutingRuntimeConfig {
+                kpls_dim: Some(kpls_dim),
+                ..Default::default()
+            };
+            assert!(validate_gp_runtime_config(&config).is_err());
+        }
+
+        let config = config::GpRoutingRuntimeConfig {
+            kpls_dim: Some(gp_routing::features::FEATURE_DIM),
+            ..Default::default()
+        };
+        assert!(validate_gp_runtime_config(&config).is_ok());
     }
 }

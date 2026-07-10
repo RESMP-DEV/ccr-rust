@@ -382,8 +382,40 @@ mod tests {
         assert_eq!(p.protocol, ProviderProtocol::Openai);
         assert!(p.anthropic_version.is_none());
         assert!(p.transformer.is_none());
+        assert!(p.pricing.is_none());
+        assert!(p.model_pricing.is_empty());
         assert!(p.provider_transformers().is_empty());
         assert!(p.model_transformers("qwen2.5-coder:latest").is_none());
+    }
+
+    #[test]
+    fn provider_pricing_parses_with_model_override() {
+        let p = parse_provider(
+            r#"{
+                "name": "priced",
+                "api_base_url": "https://example.test/v1",
+                "api_key": "x",
+                "models": ["economy", "premium"],
+                "pricing": {
+                    "input_per_million_tokens": 1.25,
+                    "output_per_million_tokens": 5.0
+                },
+                "model_pricing": {
+                    "premium": {
+                        "input_per_million_tokens": 3.0,
+                        "output_per_million_tokens": 15.0
+                    }
+                }
+            }"#,
+        );
+
+        let economy = p.pricing_for_model("economy").expect("provider pricing");
+        assert_eq!(economy.input_per_million_tokens, 1.25);
+        assert_eq!(economy.output_per_million_tokens, 5.0);
+
+        let premium = p.pricing_for_model("premium").expect("model pricing");
+        assert_eq!(premium.input_per_million_tokens, 3.0);
+        assert_eq!(premium.output_per_million_tokens, 15.0);
     }
 
     #[test]

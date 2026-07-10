@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Self-contained GP routing** — Vendored the Apache-2.0 `gp-routing` crate at
+  its pinned upstream commit so public builds no longer require access to a
+  private repository.
+- **Standalone sindexer dependency** — Pin the optional MIT-licensed sindexer
+  integration to its public Git commit so CCR-Rust builds no longer require a
+  sibling checkout.
+- **Provider and model pricing** — Added optional USD-per-million input/output
+  pricing with model-specific overrides and continuous per-request cost
+  features for GP routing.
+
 - **Z.AI GLM-5.2 with reasoning_effort** — Added GLM-5.2 model with configurable
   `reasoning_effort` parameter (`low`, `medium`, `high`). The `glm` transformer now
   injects `reasoning_effort=medium` by default for GLM-5.2/5.1/5-turbo models, enabling
@@ -35,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **GP routing enabled in standard builds** — Added `gp` to the default feature
+  set, expanded the encoder and default candidate limit from 8 to 32 routes,
+  and reject GP-enabled configuration when using an explicitly GP-free build.
+- **Uncertainty-respecting cost ordering** — Cheaper routes are promoted only
+  inside the GP posterior quality credible set, avoiding an arbitrary scalar
+  exchange rate between predicted quality and dollars.
+
 - **Default coding model** — Changed default routing from `glm-5.1` to `glm-5.2` for improved
   reasoning and coding performance with configurable reasoning effort.
 
@@ -46,6 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variants to the tier ordering).
 
 ### Fixed
+
+- **GP configuration validation** — Reject invalid KPLS dimensions during
+  startup validation and before fitting so bad configuration cannot trigger
+  repeated failed refits, and cap public backend-ranking inputs to the fixed
+  32-slot feature capacity.
 
 - **MiniMax structured reasoning handling** — The `minimax` transformer now correctly extracts
   and normalizes reasoning content from MiniMax-M3's structured `reasoning_content` array

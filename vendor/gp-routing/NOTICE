@@ -1,0 +1,16 @@
+gp-routing
+Copyright RESMP-DEV
+
+This product includes software developed in the RESMP-DEV/gp-routing project:
+https://github.com/RESMP-DEV/gp-routing
+
+Vendored from commit e471cba9816fe44b2d17a8136f124a8acb41e4b2.
+
+Modified by CCR-Rust:
+- increased the one-hot backend capacity from 8 to 32;
+- updated the fixed feature dimension and downstream indices accordingly;
+- changed the binary paid/free feature into a continuous relative request-cost
+  feature in the inclusive range 0.0 through 1.0, accompanied by an explicit
+  pricing-known bit so missing prices are not learned as free;
+- normalized formatting in `src/acquisition.rs` and `src/ring_buffer.rs`
+  without changing their behavior.
