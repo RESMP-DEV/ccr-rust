@@ -272,16 +272,27 @@ pub async fn stream_response_translated(
         // Record usage and verify token drift if we have context
         if let Some(ctx) = &verify_ctx {
             if let Some(ref usage) = usage {
+                // OpenAI-compatible streams may omit the final usage chunk,
+                // leaving input_tokens == 0 (translated Anthropic→OpenAI
+                // requests do not set stream_options.include_usage). Fall back
+                // to the pre-request estimate so usage, drift verification, and
+                // cost all account for prompt tokens, mirroring
+                // stream_anthropic_response_with_tracking.
+                let final_input_tokens = if usage.input_tokens == 0 && ctx.local_estimate > 0 {
+                    ctx.local_estimate
+                } else {
+                    usage.input_tokens
+                };
                 record_usage(
                     &ctx.tier_name,
-                    usage.input_tokens,
+                    final_input_tokens,
                     usage.output_tokens,
                     0,
                     0,
                 );
-                verify_token_usage(&ctx.tier_name, ctx.local_estimate, usage.input_tokens);
+                verify_token_usage(&ctx.tier_name, ctx.local_estimate, final_input_tokens);
                 if let Some(cost) = ctx.pricing.and_then(|p| {
-                    p.estimate_request_cost_usd(usage.input_tokens, usage.output_tokens)
+                    p.estimate_request_cost_usd(final_input_tokens, usage.output_tokens)
                 }) {
                     record_cost(&ctx.tier_name, cost);
                 }
