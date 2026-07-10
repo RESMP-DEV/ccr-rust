@@ -139,6 +139,10 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1", env = "CCR_MCP_DAEMON_HOST")]
         host: String,
 
+        /// Bearer token required by the health and MCP endpoints
+        #[arg(long, env = "CCR_MCP_AUTH_TOKEN", hide_env_values = true)]
+        auth_token: String,
+
         /// Directory for memory graph persistence
         #[arg(long, env = "CCR_MCP_MEMORY_DIR")]
         memory_dir: Option<String>,
@@ -146,6 +150,10 @@ enum Commands {
         /// Project root for Pyright type-checking
         #[arg(long, env = "PYRIGHT_PROJECT_ROOT")]
         pyright_root: Option<String>,
+
+        /// Private directory for ephemeral Pyright request workspaces
+        #[arg(long, env = "CCR_MCP_PYRIGHT_WORKSPACE_DIR")]
+        pyright_workspace_dir: Option<String>,
     },
     /// List and analyze debug captures.
     Captures {
@@ -587,14 +595,18 @@ async fn main() -> Result<()> {
         Some(Commands::McpDaemon {
             port,
             host,
+            auth_token,
             memory_dir,
             pyright_root,
+            pyright_workspace_dir,
         }) => {
             ccr_rust::mcp::daemon::run(ccr_rust::mcp::daemon::DaemonArgs {
                 port,
                 host,
+                auth_token,
                 memory_dir: memory_dir.map(std::path::PathBuf::from),
                 pyright_root: pyright_root.map(std::path::PathBuf::from),
+                pyright_workspace_dir: pyright_workspace_dir.map(std::path::PathBuf::from),
             })
             .await?;
         }

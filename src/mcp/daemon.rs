@@ -5,14 +5,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::extract::{Request, State};
+use axum::http::{header::WWW_AUTHENTICATE, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use crate::mcp::auth::BearerAuth;
 use crate::mcp::protocol::JsonRpcMessage;
 use crate::mcp::tools::context7::Context7Tool;
 use crate::mcp::tools::exa::ExaTool;
@@ -22,6 +24,7 @@ use crate::mcp::tools::ToolRegistry;
 
 struct DaemonState {
     registry: ToolRegistry,
+    auth: BearerAuth,
 }
 
 pub struct DaemonArgs {
@@ -29,9 +32,21 @@ pub struct DaemonArgs {
     pub host: String,
     pub memory_dir: Option<PathBuf>,
     pub pyright_root: Option<PathBuf>,
+    pub pyright_workspace_dir: Option<PathBuf>,
+    pub auth_token: String,
 }
 
 pub async fn run(args: DaemonArgs) -> Result<()> {
+    let DaemonArgs {
+        port,
+        host,
+        memory_dir,
+        pyright_root,
+        pyright_workspace_dir,
+        auth_token,
+    } = args;
+    let auth = BearerAuth::new(auth_token)?;
+
     let http_client = Client::builder()
         .user_agent("ccr-rust-mcp-daemon")
         .timeout(std::time::Duration::from_secs(30))
@@ -50,7 +65,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     tracing::info!("context7 tool enabled");
     tools.push(Box::new(Context7Tool::new(http_client.clone())));
 
-    let memory_path = args.memory_dir.map(|dir| {
+    let memory_path = memory_dir.map(|dir| {
         std::fs::create_dir_all(&dir).ok();
         dir.join("memory.json")
     });
@@ -64,26 +79,44 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         tools.push(Box::new(SindexerTool::new()));
     }
 
-    if let Some(ref pyright_root) = args.pyright_root {
-        tracing::info!(root = %pyright_root.display(), "pyright tool enabled");
-        tools.push(Box::new(PyrightTool::new(
-            pyright_root.clone(),
-            PathBuf::from("/tmp/ccr-pyright-workspaces"),
-            3,
-        )));
+    match (pyright_root, pyright_workspace_dir) {
+        (Some(project_root), Some(workspace_dir)) => {
+            tracing::info!(
+                project_root = %project_root.display(),
+                workspace_dir = %workspace_dir.display(),
+                "pyright tool enabled"
+            );
+            tools.push(Box::new(PyrightTool::new(
+                project_root,
+                workspace_dir,
+                3,
+            )?));
+        }
+        (Some(_), None) => anyhow::bail!(
+            "--pyright-workspace-dir or CCR_MCP_PYRIGHT_WORKSPACE_DIR is required with --pyright-root"
+        ),
+        (None, Some(_)) => anyhow::bail!(
+            "--pyright-root or PYRIGHT_PROJECT_ROOT is required with --pyright-workspace-dir"
+        ),
+        (None, None) => {}
     }
 
     let state = Arc::new(DaemonState {
         registry: ToolRegistry::new(tools),
+        auth,
     });
 
     let app = Router::new()
         .route("/mcp", post(handle_mcp))
         .route("/health", get(handle_health))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ))
         .with_state(state);
 
-    let host: std::net::IpAddr = args.host.parse().context("invalid host address")?;
-    let addr = SocketAddr::from((host, args.port));
+    let host: std::net::IpAddr = host.parse().context("invalid host address")?;
+    let addr = SocketAddr::from((host, port));
     tracing::info!("mcp-daemon listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -92,6 +125,23 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     axum::serve(listener, app).await.context("server error")?;
 
     Ok(())
+}
+
+async fn require_bearer(
+    State(state): State<Arc<DaemonState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.auth.authorizes(request.headers()) {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            [(WWW_AUTHENTICATE, "Bearer")],
+            String::new(),
+        )
+            .into_response()
+    }
 }
 
 async fn handle_health() -> impl IntoResponse {

@@ -3,6 +3,7 @@ pub mod context7;
 pub mod exa;
 pub mod memory;
 pub mod pyright;
+mod pyright_workspace;
 #[cfg(feature = "sindexer")]
 pub mod sindexer;
 

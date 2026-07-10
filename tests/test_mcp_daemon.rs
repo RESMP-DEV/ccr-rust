@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use serde_json::{json, Value};
 
+const AUTH_TOKEN: &str = "mcp-daemon-test-token";
+
 async fn start_daemon(port: u16) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         ccr_rust::mcp::daemon::run(ccr_rust::mcp::daemon::DaemonArgs {
             port,
             host: "127.0.0.1".to_string(),
+            auth_token: AUTH_TOKEN.to_string(),
             memory_dir: None,
             pyright_root: None,
+            pyright_workspace_dir: None,
         })
         .await
         .ok();
@@ -15,14 +19,21 @@ async fn start_daemon(port: u16) -> tokio::task::JoinHandle<()> {
 }
 
 async fn mcp_post(port: u16, body: &Value) -> Value {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("http://127.0.0.1:{port}/mcp"))
-        .json(body)
-        .send()
-        .await
-        .expect("request failed");
+    let resp = send_mcp(port, body, Some(AUTH_TOKEN)).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
     resp.json().await.expect("json parse failed")
+}
+
+async fn send_mcp(port: u16, body: &Value, auth_token: Option<&str>) -> reqwest::Response {
+    let client = reqwest::Client::new();
+    let request = client
+        .post(format!("http://127.0.0.1:{port}/mcp"))
+        .json(body);
+    let request = match auth_token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    };
+    request.send().await.expect("request failed")
 }
 
 #[tokio::test]
@@ -163,9 +174,61 @@ async fn test_health_endpoint() {
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("http://127.0.0.1:{port}/health"))
+        .bearer_auth(AUTH_TOKEN)
         .send()
         .await
         .expect("health check failed");
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "ok");
+}
+
+#[tokio::test]
+async fn test_health_and_mcp_require_correct_bearer_auth() {
+    let port = 13460;
+    let _handle = start_daemon(port).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+    for auth_token in [None, Some("wrong-token")] {
+        let request = client.get(format!("http://127.0.0.1:{port}/health"));
+        let request = match auth_token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        };
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            "Bearer"
+        );
+    }
+
+    let health = client
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .bearer_auth(AUTH_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+    let ping = json!({"jsonrpc": "2.0", "id": "ping", "method": "ping"});
+    for auth_token in [None, Some("wrong-token")] {
+        let response = send_mcp(port, &ping, auth_token).await;
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            "Bearer"
+        );
+    }
+
+    let response = send_mcp(port, &ping, Some(AUTH_TOKEN)).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["result"], json!({}));
 }

@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Authenticated native MCP daemon** — `mcp-daemon` now requires a bearer token
+  from `--auth-token` or `CCR_MCP_AUTH_TOKEN`, compares presented credentials in
+  constant time, and protects both `/health` and `/mcp`.
+- **Private configurable Pyright workspaces** — Pyright now requires
+  `--pyright-workspace-dir` or `CCR_MCP_PYRIGHT_WORKSPACE_DIR` alongside the
+  project root, enforces mode `0700`, and removes stale CCR-owned UUID
+  workspaces at daemon startup without traversing symlink targets.
 - **GP routing enabled in standard builds** — Added `gp` to the default feature
   set, expanded the encoder and default candidate limit from 8 to 32 routes,
   and reject GP-enabled configuration when using an explicitly GP-free build.

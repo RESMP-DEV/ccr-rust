@@ -447,6 +447,7 @@ dependencies = [
  "shellexpand",
  "sindexer",
  "smallvec",
+ "subtle",
  "tempfile",
  "tiktoken-rs",
  "tokio",
