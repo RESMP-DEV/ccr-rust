@@ -423,6 +423,7 @@ async fn run_server(
         .route("/v1/latencies", get(latencies_handler))
         .route("/v1/usage", get(metrics::usage_handler))
         .route("/v1/token-drift", get(metrics::token_drift_handler))
+        .route("/v1/token-audit", get(metrics::token_audit_handler))
         .route("/v1/throughput", get(metrics::throughput_handler))
         .route(
             "/v1/frontend-metrics",
