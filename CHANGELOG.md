@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-request token audit on `/v1/token-audit`** — New read-only endpoint
+  exposing recent per-request telemetry (tier, token counts, drift against the
+  pre-request estimate) so consumers can correlate individual requests with the
+  aggregate `/v1/usage` counters.
+
 - **Cost reporting on `/v1/usage`** — The usage summary now returns
   `total_cost_usd` and a per-tier `cost_usd`, computed at request time from the
   provider's resolved model pricing (`pricing_for_model`) as each response is
@@ -80,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variants to the tier ordering).
 
 ### Fixed
+
+- **Streamed SSE usage matches recorded usage** — In the OpenAI→Anthropic
+  translated streaming path, the prompt-token fallback to the pre-request
+  estimate is now applied before the final `message_delta`/stop events are
+  serialized. Previously clients could see `input_tokens: 0` in the final SSE
+  usage while `/v1/usage` and cost accounting counted the estimated prompt,
+  leaving per-response and aggregate accounting inconsistent.
 
 - **Private bounded debug capture** — Raw provider capture remains explicitly
   disabled when configuration is absent, defaults to error-only capture when
