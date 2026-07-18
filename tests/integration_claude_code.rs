@@ -958,7 +958,7 @@ async fn test_streamed_usage_estimate_fallback_records_no_fake_drift() {
 
     // The final message_delta usage must carry the pre-request estimate, not
     // the raw 0 the upstream (implicitly) reported.
-    let mut saw_message_delta_usage = false;
+    let mut message_delta_input_tokens = None;
     for line in body_text.lines() {
         let Some(data) = line.strip_prefix("data: ") else {
             continue;
@@ -968,17 +968,40 @@ async fn test_streamed_usage_estimate_fallback_records_no_fake_drift() {
         };
         if event["type"] == "message_delta" {
             if let Some(input_tokens) = event["usage"]["input_tokens"].as_u64() {
-                saw_message_delta_usage = true;
-                assert!(
-                    input_tokens > 0,
-                    "client-visible input_tokens should fall back to the pre-request estimate"
-                );
+                message_delta_input_tokens = Some(input_tokens);
             }
         }
     }
+    let message_delta_input_tokens =
+        message_delta_input_tokens.expect("stream should contain a message_delta event with usage");
+
+    // The client-visible value must equal the recorded pre-request estimate,
+    // which /v1/token-audit exposes as total_tokens for this tier.
+    let audit_resp =
+        axum::response::IntoResponse::into_response(ccr_rust::metrics::token_audit_handler().await);
+    let audit_bytes = axum::body::to_bytes(audit_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let audit_json: serde_json::Value = serde_json::from_slice(&audit_bytes).unwrap();
+    let expected_estimate = audit_json
+        .as_array()
+        .expect("token-audit response is a JSON array")
+        .iter()
+        .rev()
+        .find(|e| {
+            e["tier"]
+                .as_str()
+                .is_some_and(|t| t.contains("drift-probe-mock"))
+        })
+        .and_then(|e| e["total_tokens"].as_u64())
+        .expect("audit log should contain a pre-request estimate for this tier");
     assert!(
-        saw_message_delta_usage,
-        "stream should contain a message_delta event with usage"
+        expected_estimate > 0,
+        "pre-request estimate should be nonzero"
+    );
+    assert_eq!(
+        message_delta_input_tokens, expected_estimate,
+        "client-visible input_tokens should equal the recorded pre-request estimate"
     );
 
     // But drift verification must NOT have recorded a sample for this tier:
