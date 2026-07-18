@@ -12,7 +12,11 @@ pub struct ToolCatalog {
 
 impl ToolCatalog {
     pub fn add_backend_tools(&mut self, idx: usize, tools: Vec<McpTool>) {
-        info!(backend_idx = idx, tool_count = tools.len(), "registering backend tools");
+        info!(
+            backend_idx = idx,
+            tool_count = tools.len(),
+            "registering backend tools"
+        );
         for tool in tools {
             let name = tool.name.clone();
             self.routes.insert(name.clone(), idx);

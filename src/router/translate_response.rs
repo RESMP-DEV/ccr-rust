@@ -20,9 +20,10 @@ pub(super) fn translate_response_openai_to_anthropic(
     };
 
     // Extract reasoning_content from the first choice for preservation
-    let reasoning_content = openai_resp.choices.first().and_then(|choice| {
-        choice.message.reasoning_content.clone()
-    });
+    let reasoning_content = openai_resp
+        .choices
+        .first()
+        .and_then(|choice| choice.message.reasoning_content.clone());
 
     let content = if let Some(choice) = openai_resp.choices.first() {
         let mut blocks: Vec<AnthropicContentBlock> = Vec::new();

@@ -34,9 +34,11 @@ impl NativeTool for SindexerTool {
         vec![
             McpTool {
                 name: "index_codebase".to_string(),
-                description: "Index a codebase directory for semantic code search. Walks the directory, \
+                description:
+                    "Index a codebase directory for semantic code search. Walks the directory, \
                     parses source files, extracts code chunks, and generates embeddings. \
-                    Use force=true to re-index an already indexed codebase.".to_string(),
+                    Use force=true to re-index an already indexed codebase."
+                        .to_string(),
                 inputSchema: json!({
                     "type": "object",
                     "properties": {
@@ -56,7 +58,8 @@ impl NativeTool for SindexerTool {
             McpTool {
                 name: "search_code".to_string(),
                 description: "Search indexed code using natural language or code queries. \
-                    Returns the most semantically similar code chunks from the indexed codebase.".to_string(),
+                    Returns the most semantically similar code chunks from the indexed codebase."
+                    .to_string(),
                 inputSchema: json!({
                     "type": "object",
                     "properties": {
@@ -135,7 +138,8 @@ impl NativeTool for SindexerTool {
             },
             McpTool {
                 name: "drop_collection".to_string(),
-                description: "Drop a specific collection from the vector database by name.".to_string(),
+                description: "Drop a specific collection from the vector database by name."
+                    .to_string(),
                 inputSchema: json!({
                     "type": "object",
                     "properties": {
@@ -167,17 +171,29 @@ impl NativeTool for SindexerTool {
 
 impl SindexerTool {
     async fn index_codebase(&self, args: Value) -> Result<ToolResult> {
-        let path = args.get("path").and_then(|v| v.as_str()).context("missing path")?;
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .context("missing path")?;
         let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
         let path = PathBuf::from(path);
 
         match self.sindexer.index(&path, force).await {
             Ok(result) => {
-                let mode = if result.lexical_only { " (lexical only)" } else { "" };
+                let mode = if result.lexical_only {
+                    " (lexical only)"
+                } else {
+                    ""
+                };
                 let msg = if result.warnings.is_empty() {
                     format!("Indexed {}{}", path.display(), mode)
                 } else {
-                    format!("Indexed {} ({}){}", path.display(), result.warnings.join("; "), mode)
+                    format!(
+                        "Indexed {} ({}){}",
+                        path.display(),
+                        result.warnings.join("; "),
+                        mode
+                    )
                 };
                 Ok(ToolResult::text(serde_json::to_string(&json!({
                     "success": true,
@@ -193,8 +209,14 @@ impl SindexerTool {
     }
 
     async fn search_code(&self, args: Value) -> Result<ToolResult> {
-        let path = args.get("path").and_then(|v| v.as_str()).context("missing path")?;
-        let query = args.get("query").and_then(|v| v.as_str()).context("missing query")?;
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .context("missing path")?;
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .context("missing query")?;
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
         let extensions: Vec<String> = args
             .get("extensions")
@@ -228,14 +250,20 @@ impl SindexerTool {
     }
 
     async fn get_indexing_status(&self, args: Value) -> Result<ToolResult> {
-        let path = args.get("path").and_then(|v| v.as_str()).context("missing path")?;
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .context("missing path")?;
         let path = PathBuf::from(path);
         let status = self.sindexer.status(&path);
         Ok(ToolResult::text(serde_json::to_string(&status)?))
     }
 
     async fn clear_index(&self, args: Value) -> Result<ToolResult> {
-        let path = args.get("path").and_then(|v| v.as_str()).context("missing path")?;
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .context("missing path")?;
         let path = PathBuf::from(path);
 
         match self.sindexer.clear(&path).await {
