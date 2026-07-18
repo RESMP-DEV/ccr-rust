@@ -265,8 +265,9 @@ pub async fn stream_response_translated(
         // input_tokens == 0 (translated Anthropic→OpenAI requests do not set
         // stream_options.include_usage). Fall back to the pre-request estimate
         // BEFORE serializing the stop events so the client-visible SSE usage
-        // matches what /v1/usage, drift verification, and cost record,
-        // mirroring stream_anthropic_response_with_tracking.
+        // matches what /v1/usage and cost accounting record, mirroring
+        // stream_anthropic_response_with_tracking. Drift verification below
+        // deliberately keeps the raw upstream value.
         if let (Some(ctx), Some(usage)) = (&verify_ctx, usage.as_mut()) {
             if usage.input_tokens == 0 && ctx.local_estimate > 0 {
                 usage.input_tokens = ctx.local_estimate;
@@ -284,8 +285,11 @@ pub async fn stream_response_translated(
         // Record usage and verify token drift if we have context
         if let Some(ctx) = &verify_ctx {
             if let Some(ref usage) = usage {
-                // input_tokens already normalized against the pre-request
-                // estimate above, before the stop events were serialized.
+                // usage.input_tokens was normalized against the pre-request
+                // estimate above. Drift verification receives the raw
+                // upstream value instead: when the provider omitted usage
+                // (raw 0) there is nothing to compare, and passing the
+                // substituted estimate would record a false 0% drift sample.
                 record_usage(
                     &ctx.tier_name,
                     usage.input_tokens,
@@ -293,7 +297,7 @@ pub async fn stream_response_translated(
                     0,
                     0,
                 );
-                verify_token_usage(&ctx.tier_name, ctx.local_estimate, usage.input_tokens);
+                verify_token_usage(&ctx.tier_name, ctx.local_estimate, input_tokens);
                 if let Some(cost) = ctx.pricing.and_then(|p| {
                     p.estimate_request_cost_usd(usage.input_tokens, usage.output_tokens)
                 }) {
@@ -515,9 +519,12 @@ pub async fn stream_anthropic_response_with_tracking(
             output_tokens
         };
 
-        // Record usage
+        // Record usage. Drift verification receives the raw upstream value:
+        // when the provider omitted usage (input_tokens == 0) there is
+        // nothing to compare, and passing the substituted estimate would
+        // record a false 0% drift sample.
         record_usage(&tier_name, final_input_tokens, final_output_tokens, 0, 0);
-        verify_token_usage(&tier_name, local_estimate, final_input_tokens);
+        verify_token_usage(&tier_name, local_estimate, input_tokens);
         if let Some(cost) = pricing
             .and_then(|p| p.estimate_request_cost_usd(final_input_tokens, final_output_tokens))
         {
