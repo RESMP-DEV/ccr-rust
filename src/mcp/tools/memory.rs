@@ -71,119 +71,155 @@ impl MemoryTool {
 impl NativeTool for MemoryTool {
     fn tools(&self) -> Vec<McpTool> {
         vec![
-            tool_def("create_entities", "Create multiple new entities in the knowledge graph", json!({
-                "type": "object",
-                "properties": {
-                    "entities": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": { "type": "string" },
-                                "entityType": { "type": "string" },
-                                "observations": { "type": "array", "items": { "type": "string" } }
-                            },
-                            "required": ["name", "entityType", "observations"]
+            tool_def(
+                "create_entities",
+                "Create multiple new entities in the knowledge graph",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "entities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "entityType": { "type": "string" },
+                                    "observations": { "type": "array", "items": { "type": "string" } }
+                                },
+                                "required": ["name", "entityType", "observations"]
+                            }
                         }
-                    }
-                },
-                "required": ["entities"]
-            })),
-            tool_def("create_relations", "Create multiple new relations between entities in the knowledge graph", json!({
-                "type": "object",
-                "properties": {
-                    "relations": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "from": { "type": "string" },
-                                "to": { "type": "string" },
-                                "relationType": { "type": "string" }
-                            },
-                            "required": ["from", "to", "relationType"]
+                    },
+                    "required": ["entities"]
+                }),
+            ),
+            tool_def(
+                "create_relations",
+                "Create multiple new relations between entities in the knowledge graph",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "relations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from": { "type": "string" },
+                                    "to": { "type": "string" },
+                                    "relationType": { "type": "string" }
+                                },
+                                "required": ["from", "to", "relationType"]
+                            }
                         }
-                    }
-                },
-                "required": ["relations"]
-            })),
-            tool_def("add_observations", "Add new observations to existing entities", json!({
-                "type": "object",
-                "properties": {
-                    "observations": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "entityName": { "type": "string" },
-                                "contents": { "type": "array", "items": { "type": "string" } }
-                            },
-                            "required": ["entityName", "contents"]
+                    },
+                    "required": ["relations"]
+                }),
+            ),
+            tool_def(
+                "add_observations",
+                "Add new observations to existing entities",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "observations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "entityName": { "type": "string" },
+                                    "contents": { "type": "array", "items": { "type": "string" } }
+                                },
+                                "required": ["entityName", "contents"]
+                            }
                         }
-                    }
-                },
-                "required": ["observations"]
-            })),
-            tool_def("delete_entities", "Delete multiple entities and their associated relations", json!({
-                "type": "object",
-                "properties": {
-                    "entityNames": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["entityNames"]
-            })),
-            tool_def("delete_observations", "Delete specific observations from entities", json!({
-                "type": "object",
-                "properties": {
-                    "deletions": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "entityName": { "type": "string" },
-                                "observations": { "type": "array", "items": { "type": "string" } }
-                            },
-                            "required": ["entityName", "observations"]
+                    },
+                    "required": ["observations"]
+                }),
+            ),
+            tool_def(
+                "delete_entities",
+                "Delete multiple entities and their associated relations",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "entityNames": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["entityNames"]
+                }),
+            ),
+            tool_def(
+                "delete_observations",
+                "Delete specific observations from entities",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "deletions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "entityName": { "type": "string" },
+                                    "observations": { "type": "array", "items": { "type": "string" } }
+                                },
+                                "required": ["entityName", "observations"]
+                            }
                         }
-                    }
-                },
-                "required": ["deletions"]
-            })),
-            tool_def("delete_relations", "Delete multiple relations from the knowledge graph", json!({
-                "type": "object",
-                "properties": {
-                    "relations": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "from": { "type": "string" },
-                                "to": { "type": "string" },
-                                "relationType": { "type": "string" }
-                            },
-                            "required": ["from", "to", "relationType"]
+                    },
+                    "required": ["deletions"]
+                }),
+            ),
+            tool_def(
+                "delete_relations",
+                "Delete multiple relations from the knowledge graph",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "relations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from": { "type": "string" },
+                                    "to": { "type": "string" },
+                                    "relationType": { "type": "string" }
+                                },
+                                "required": ["from", "to", "relationType"]
+                            }
                         }
-                    }
-                },
-                "required": ["relations"]
-            })),
-            tool_def("read_graph", "Read the entire knowledge graph", json!({
-                "type": "object",
-                "properties": {}
-            })),
-            tool_def("search_nodes", "Search for nodes in the knowledge graph based on a query", json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Search query to match against entity names, types, and observations" }
-                },
-                "required": ["query"]
-            })),
-            tool_def("open_nodes", "Open specific nodes in the knowledge graph by their names", json!({
-                "type": "object",
-                "properties": {
-                    "names": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["names"]
-            })),
+                    },
+                    "required": ["relations"]
+                }),
+            ),
+            tool_def(
+                "read_graph",
+                "Read the entire knowledge graph",
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            ),
+            tool_def(
+                "search_nodes",
+                "Search for nodes in the knowledge graph based on a query",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query to match against entity names, types, and observations" }
+                    },
+                    "required": ["query"]
+                }),
+            ),
+            tool_def(
+                "open_nodes",
+                "Open specific nodes in the knowledge graph by their names",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "names": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["names"]
+                }),
+            ),
         ]
     }
 
@@ -207,12 +243,9 @@ impl NativeTool for MemoryTool {
 impl MemoryTool {
     fn create_entities(&self, args: Value) -> Result<ToolResult> {
         debug!("creating entities in knowledge graph");
-        let input: Vec<Entity> = serde_json::from_value(
-            args.get("entities")
-                .cloned()
-                .context("missing entities")?,
-        )
-        .context("invalid entities")?;
+        let input: Vec<Entity> =
+            serde_json::from_value(args.get("entities").cloned().context("missing entities")?)
+                .context("invalid entities")?;
 
         let mut graph = self.graph.write();
         let mut created = Vec::new();
@@ -232,9 +265,9 @@ impl MemoryTool {
         self.persist();
 
         info!(created_count = created.len(), "entities created");
-        Ok(ToolResult::text(
-            serde_json::to_string(&json!({ "entities": created }))?,
-        ))
+        Ok(ToolResult::text(serde_json::to_string(
+            &json!({ "entities": created }),
+        )?))
     }
 
     fn create_relations(&self, args: Value) -> Result<ToolResult> {
@@ -259,9 +292,9 @@ impl MemoryTool {
         drop(graph);
         self.persist();
 
-        Ok(ToolResult::text(
-            serde_json::to_string(&json!({ "relations": created }))?,
-        ))
+        Ok(ToolResult::text(serde_json::to_string(
+            &json!({ "relations": created }),
+        )?))
     }
 
     fn add_observations(&self, args: Value) -> Result<ToolResult> {
@@ -296,9 +329,9 @@ impl MemoryTool {
         drop(graph);
         self.persist();
 
-        Ok(ToolResult::text(
-            serde_json::to_string(&json!({ "results": results }))?,
-        ))
+        Ok(ToolResult::text(serde_json::to_string(
+            &json!({ "results": results }),
+        )?))
     }
 
     fn delete_entities(&self, args: Value) -> Result<ToolResult> {
@@ -317,9 +350,9 @@ impl MemoryTool {
         drop(graph);
         self.persist();
 
-        Ok(ToolResult::text(
-            serde_json::to_string(&json!({ "success": true, "message": "entities deleted" }))?,
-        ))
+        Ok(ToolResult::text(serde_json::to_string(
+            &json!({ "success": true, "message": "entities deleted" }),
+        )?))
     }
 
     fn delete_observations(&self, args: Value) -> Result<ToolResult> {
@@ -331,10 +364,7 @@ impl MemoryTool {
 
         let mut graph = self.graph.write();
         for del in deletions {
-            let entity_name = del
-                .get("entityName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let entity_name = del.get("entityName").and_then(|v| v.as_str()).unwrap_or("");
             let obs_to_del: Vec<String> = del
                 .get("observations")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -346,9 +376,9 @@ impl MemoryTool {
         drop(graph);
         self.persist();
 
-        Ok(ToolResult::text(
-            serde_json::to_string(&json!({ "success": true, "message": "observations deleted" }))?,
-        ))
+        Ok(ToolResult::text(serde_json::to_string(
+            &json!({ "success": true, "message": "observations deleted" }),
+        )?))
     }
 
     fn delete_relations(&self, args: Value) -> Result<ToolResult> {
@@ -367,9 +397,9 @@ impl MemoryTool {
         drop(graph);
         self.persist();
 
-        Ok(ToolResult::text(
-            serde_json::to_string(&json!({ "success": true, "message": "relations deleted" }))?,
-        ))
+        Ok(ToolResult::text(serde_json::to_string(
+            &json!({ "success": true, "message": "relations deleted" }),
+        )?))
     }
 
     fn read_graph(&self) -> Result<ToolResult> {
@@ -402,7 +432,9 @@ impl MemoryTool {
         let matched_relations: Vec<&Relation> = graph
             .relations
             .iter()
-            .filter(|r| matched_names.contains(&r.from.as_str()) || matched_names.contains(&r.to.as_str()))
+            .filter(|r| {
+                matched_names.contains(&r.from.as_str()) || matched_names.contains(&r.to.as_str())
+            })
             .collect();
 
         Ok(ToolResult::text(serde_json::to_string(&json!({
@@ -426,7 +458,9 @@ impl MemoryTool {
         let matched_relations: Vec<&Relation> = graph
             .relations
             .iter()
-            .filter(|r| matched_names.contains(&r.from.as_str()) || matched_names.contains(&r.to.as_str()))
+            .filter(|r| {
+                matched_names.contains(&r.from.as_str()) || matched_names.contains(&r.to.as_str())
+            })
             .collect();
 
         Ok(ToolResult::text(serde_json::to_string(&json!({

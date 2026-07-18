@@ -33,7 +33,10 @@ pub fn strip_progress_bars(text: &str) -> String {
 /// Apply all pattern-based compressions to text.
 /// Returns the cleaned/compressed text.
 pub fn compress(text: &str) -> String {
-    debug!(input_len = text.len(), "output compress: applying pattern compression");
+    debug!(
+        input_len = text.len(),
+        "output compress: applying pattern compression"
+    );
     // Clean first
     let cleaned = strip_ansi(text);
     let cleaned = collapse_blank_lines(&cleaned);
@@ -56,7 +59,10 @@ pub fn compress(text: &str) -> String {
         return result;
     }
 
-    debug!(output_len = cleaned.len(), "output compress: no pattern matched, returning cleaned text");
+    debug!(
+        output_len = cleaned.len(),
+        "output compress: no pattern matched, returning cleaned text"
+    );
     cleaned
 }
 
