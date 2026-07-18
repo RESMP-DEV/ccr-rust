@@ -77,7 +77,6 @@ pub async fn token_drift_handler() -> impl IntoResponse {
 
 /// Handler for GET /v1/token-audit - returns the most recent pre-request token
 /// audit entries from the in-memory ring buffer.
-#[allow(dead_code)]
 pub async fn token_audit_handler() -> impl IntoResponse {
     let guard = AUDIT_LOG.read();
     let entries: Vec<PreRequestAuditEntry> = match guard.as_ref() {

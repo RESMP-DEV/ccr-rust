@@ -854,3 +854,177 @@ async fn test_claude_code_end_to_end_with_tier_retries() {
 
     assert_eq!(response_json["content"][0]["text"], "Success after retry!");
 }
+
+#[tokio::test]
+async fn test_streamed_usage_estimate_fallback_records_no_fake_drift() {
+    if skip_if_localhost_bind_unavailable(
+        "test_streamed_usage_estimate_fallback_records_no_fake_drift",
+    ) {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    // OpenAI-compatible SSE stream that omits the usage chunk entirely, as
+    // upstreams do when stream_options.include_usage is not set.
+    let sse_body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "chunk_1",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": "claude-sonnet-4-6",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": "Hello"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chunk_2",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": "claude-sonnet-4-6",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": " there."},
+                "finish_reason": "stop"
+            }]
+        })
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // Unique provider name so the drift-state assertion cannot collide with
+    // other tests in this binary that share the global metrics state.
+    let config_value = json!({
+        "Providers": [
+            {
+                "name": "drift-probe-mock",
+                "api_base_url": mock_server.uri(),
+                "api_key": "test-key",
+                "models": ["claude-sonnet-4-6"]
+            }
+        ],
+        "Router": {
+            "default": "drift-probe-mock,claude-sonnet-4-6"
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&config_value).unwrap(),
+    )
+    .unwrap();
+
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let request_body = json!({
+        "model": "drift-probe-mock,claude-sonnet-4-6",
+        "messages": [{"role": "user", "content": "Say hello in a few words"}],
+        "max_tokens": 1000,
+        "stream": true
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+    // The final message_delta usage must carry the pre-request estimate, not
+    // the raw 0 the upstream (implicitly) reported.
+    let mut message_delta_input_tokens = None;
+    for line in body_text.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        if event["type"] == "message_delta" {
+            if let Some(input_tokens) = event["usage"]["input_tokens"].as_u64() {
+                message_delta_input_tokens = Some(input_tokens);
+            }
+        }
+    }
+    let message_delta_input_tokens =
+        message_delta_input_tokens.expect("stream should contain a message_delta event with usage");
+
+    // The client-visible value must equal the recorded pre-request estimate,
+    // which /v1/token-audit exposes as total_tokens for this tier.
+    let audit_resp =
+        axum::response::IntoResponse::into_response(ccr_rust::metrics::token_audit_handler().await);
+    let audit_bytes = axum::body::to_bytes(audit_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let audit_json: serde_json::Value = serde_json::from_slice(&audit_bytes).unwrap();
+    let expected_estimate = audit_json
+        .as_array()
+        .expect("token-audit response is a JSON array")
+        .iter()
+        .rev()
+        .find(|e| {
+            e["tier"]
+                .as_str()
+                .is_some_and(|t| t.contains("drift-probe-mock"))
+        })
+        .and_then(|e| e["total_tokens"].as_u64())
+        .expect("audit log should contain a pre-request estimate for this tier");
+    assert!(
+        expected_estimate > 0,
+        "pre-request estimate should be nonzero"
+    );
+    assert_eq!(
+        message_delta_input_tokens, expected_estimate,
+        "client-visible input_tokens should equal the recorded pre-request estimate"
+    );
+
+    // But drift verification must NOT have recorded a sample for this tier:
+    // the upstream omitted usage, so there is nothing to compare the estimate
+    // against, and a substituted estimate would register as false 0% drift.
+    let drift_resp =
+        axum::response::IntoResponse::into_response(ccr_rust::metrics::token_drift_handler().await);
+    let drift_bytes = axum::body::to_bytes(drift_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let drift_json: serde_json::Value = serde_json::from_slice(&drift_bytes).unwrap();
+    let fake_drift_entries: Vec<&serde_json::Value> = drift_json
+        .as_array()
+        .expect("token-drift response is a JSON array")
+        .iter()
+        .filter(|e| {
+            e["tier"]
+                .as_str()
+                .is_some_and(|t| t.contains("drift-probe-mock"))
+        })
+        .collect();
+    assert!(
+        fake_drift_entries.is_empty(),
+        "no drift sample should be recorded when upstream omits usage, got: {fake_drift_entries:?}"
+    );
+}
