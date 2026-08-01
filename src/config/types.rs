@@ -252,6 +252,7 @@ pub struct Provider {
     ///
     /// - `openai` (default): send OpenAI-compatible `/chat/completions` requests.
     /// - `anthropic`: send Anthropic-compatible `/messages` requests.
+    /// - `responses`: send OpenAI Responses-compatible `/responses` requests.
     #[serde(default)]
     pub protocol: ProviderProtocol,
 
@@ -330,6 +331,7 @@ pub enum ProviderProtocol {
     #[default]
     Openai,
     Anthropic,
+    Responses,
 }
 
 /// Configuration for web search routing.

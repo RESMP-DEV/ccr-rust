@@ -23,6 +23,8 @@ pub use openai_compat::handle_chat_completions;
 mod responses_api;
 pub use responses_api::handle_responses;
 
+mod responses_protocol;
+
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -238,12 +240,12 @@ pub async fn handle_messages(
         );
 
         // Per-provider streaming decision: allow_streaming bypasses forceNonStreaming
-        let provider_allows_streaming = config
-            .resolve_provider(tier)
-            .map(|p| p.allow_streaming)
-            .unwrap_or(false);
-        let forced_non_streaming =
-            config.router().force_non_streaming && !provider_allows_streaming;
+        let provider = config.resolve_provider(tier);
+        let provider_allows_streaming = provider.map(|p| p.allow_streaming).unwrap_or(false);
+        let provider_uses_responses =
+            provider.is_some_and(|p| p.protocol == crate::config::ProviderProtocol::Responses);
+        let forced_non_streaming = provider_uses_responses
+            || (config.router().force_non_streaming && !provider_allows_streaming);
         if client_wants_stream && forced_non_streaming {
             request.stream = Some(false);
         } else {
