@@ -32,3 +32,4 @@ reports/
 *.log
 
 .mypy_cache/
+.sindexer/
