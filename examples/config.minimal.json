@@ -1,0 +1,18 @@
+{
+    "_comment": "Minimal single-provider config. Copy to ~/.claude-code-router/config.json, export DEEPSEEK_API_KEY, then run: ccr-rust validate && ccr-rust start",
+    "Providers": [
+        {
+            "name": "deepseek",
+            "api_base_url": "https://api.deepseek.com",
+            "api_key": "${DEEPSEEK_API_KEY}",
+            "models": [
+                "deepseek-chat"
+            ]
+        }
+    ],
+    "Router": {
+        "default": "deepseek,deepseek-chat"
+    },
+    "PORT": 3456,
+    "HOST": "127.0.0.1"
+}

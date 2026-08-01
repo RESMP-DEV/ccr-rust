@@ -2,46 +2,37 @@
 
 ## Getting started
 
+The repository root is the crate — no subdirectory needed:
+
 ```bash
-cd contrib/ccr-rust
-cargo build --release
+cargo check
 cargo test
+cargo build --release
+cargo install --path . --force   # keep the installed CLI in sync with your build
 ```
+
+See [AGENTS.md](AGENTS.md) for the full working rules and validation expectations.
 
 ## Source tree
 
 ```
 src/
-├── main.rs          # CLI entry point, parsing
-├── lib.rs           # Crate root, pub trait exports
-├── cli.rs           # Command handlers (start, stop, status, validate, dashboard, version)
-├── config/          # Config parsing, provider resolution
-│   ├── mod.rs       # Config loading + validation
-│   └── types.rs     # Provider, Router, Persistence structs
-├── frontend/        # HTTP/WebSocket listener + request handlers
-│   ├── mod.rs       # Axum router setup
-│   ├── anthropic.rs # Anthropic API endpoint handlers
-│   ├── openai.rs    # OpenAI API endpoint handlers
-│   └── streaming.rs # SSE + streaming response conversions
-├── router/          # Provider selection + request dispatch
-│   ├── mod.rs       # Thompson Sampling tier selection
-│   ├── types.rs     # Request/response types
-│   └── streaming.rs # Streaming compatibility layer
-├── metrics/         # Prometheus metrics collection
-│   └── mod.rs       # Token counts, latencies, provider stats
-├── mcp/             # MCP server container (aggregation)
-│   └── mod.rs       # MCP stdio interface
-├── persistence/     # Redis client (optional)
-│   └── mod.rs       # Session/cache storage
-├── transformer/     # Request/response transformers
-│   ├── mod.rs       # Trait definition (Transformer, TransformError)
-│   └── builtin.rs   # Built-in transformer impls (KimiTransformer, etc.)
-└── transform/       # Provider-specific transformers
-    ├── registry.rs  # Name -> transformer mapping
-    ├── kimi.rs      # Kimi toolcompress, thinktag
-    ├── gemini.rs    # Gemini token parsing
-    ├── mmfp4.rs     # MMFP4 quantization hints
-    └── ...          # Per-provider adaptations
+├── main.rs          # CLI entry point, subcommand dispatch
+├── lib.rs           # Crate root, pub module exports
+├── config/          # Config parsing, pricing, provider protocol definitions
+├── router/          # HTTP handlers, dispatch, request/response translation, streaming
+├── frontend/        # Client-format normalization (Claude Code, Codex, detection)
+├── transform/       # Provider-specific transformers + factory registry
+├── transformer/     # Transformer trait, chain, and built-in impls
+├── routing.rs       # EWMA latency tracking
+├── gp_router.rs     # Request-aware GP reranking (feature = "gp")
+├── ratelimit.rs     # Provider backoff / rate-limit tracking
+├── metrics/         # Prometheus metrics + Redis persistence
+├── mcp/             # MCP stdio server and shared HTTP daemon
+├── dashboard.rs     # Interactive TUI dashboard (feature = "dashboard")
+└── debug_capture.rs # Request/response capture for troubleshooting
+vendor/gp-routing/   # Vendored Apache-2.0 GP surrogate crate
+tests/               # Integration tests (mocked upstreams)
 ```
 
 ## Key modules
@@ -50,10 +41,10 @@ src/
 Loads and validates `~/.claude-code-router/config.json`. Supports `${ENV_VAR}` expansion. Resolves providers, API keys, and optional Redis persistence.
 
 ### `frontend/`
-HTTP listeners (Anthropic `/v1/messages`, OpenAI `/v1/chat/completions`, `/v1/responses`). Converts requests to internal format, dispatches to router, returns streaming or JSON responses.
+Client-format normalization: detects which client is calling (Claude Code, Codex, generic OpenAI SDK) and applies client-specific behavior.
 
 ### `router/`
-Implements Thompson Sampling (Bayesian bandit) for automatic tier selection based on success rates. Retries with exponential backoff on failures.
+HTTP handlers (Anthropic `/v1/messages`, OpenAI `/v1/chat/completions`, `/v1/responses`), provider dispatch, protocol translation, and streaming. Tier cascade with exponential backoff on 5xx/timeouts; rate-limit-aware tier skipping via `ratelimit.rs`; EWMA latency tracking in `routing.rs`; optional GP-backed reranking in `gp_router.rs`.
 
 ### `transformer/`
 Interface for request/response transformations (e.g., KimiTransformer for token optimization, thinking blocks).
@@ -85,16 +76,19 @@ cargo fmt
 - Format: `cargo fmt` (Rust standard)
 - Linting: `cargo clippy` (no warnings)
 - Documentation: `///` comments on public items
-- Error handling: Use `thiserror` for custom error types
+- Error handling: `anyhow::Result` for fallible functions
 
 ## Adding a new provider
 
-1. Add provider entry to `config/types.rs` (Provider struct)
-2. Implement client logic in `router/dispatch.rs` (send request to provider API)
-3. Add transformer in `transform/` if protocol translation needed
-4. Add metrics in `metrics/mod.rs` (per-provider stats)
-5. Update `docs/configuration.md` with API key setup
-6. Test with `cargo test`
+Standard OpenAI- or Anthropic-compatible upstreams need **config only** — no
+code changes (see [docs/configuration.md](docs/configuration.md)). Only add
+code when a provider truly needs normalization:
+
+1. Add a transformer in `src/transform/` and register it in **both** registry
+   construction paths (`src/transform/registry.rs` and `src/transformer/mod.rs`)
+2. Add a protocol variant only if the upstream cannot fit the current transport model
+3. Update `docs/configuration.md` with API key setup
+4. Add integration coverage in `tests/` (mocked upstreams) and run `cargo test --all-features`
 
 ## Commit workflow
 
