@@ -16,9 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Responses and stream edge cases** — Normalize empty function arguments,
-  accept RFC 3339 response timestamps, ignore duplicate terminal stream events,
-  preserve non-object `error` metadata, and remove stale entity headers when
-  JSON responses are rewritten as SSE.
+  preserve reasoning summaries, accept RFC 3339 response timestamps, ignore
+  duplicate terminal stream events, preserve non-object `error` metadata, and
+  remove stale entity headers when JSON responses are rewritten as SSE.
 
 ### Added
 
