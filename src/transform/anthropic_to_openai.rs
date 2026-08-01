@@ -40,6 +40,7 @@ impl Transformer for AnthropicToOpenAiResponseTransformer {
                 == Some("content_block_start")
             || anthropic_response.get("type").and_then(|t| t.as_str())
                 == Some("content_block_delta")
+            || anthropic_response.get("type").and_then(|t| t.as_str()) == Some("content_block_stop")
             || anthropic_response.get("type").and_then(|t| t.as_str()) == Some("message_delta")
             || anthropic_response.get("type").and_then(|t| t.as_str()) == Some("message_stop")
         {
@@ -99,7 +100,7 @@ fn transform_non_streaming_response(anthropic_response: Value) -> Result<Value> 
     // Add usage if present
     let mut response_obj = openai_response;
     if let Some(usage) = anthropic_response.get("usage") {
-        response_obj["usage"] = usage.clone();
+        response_obj["usage"] = anthropic_usage_to_openai(usage);
     }
 
     debug!(
@@ -321,8 +322,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 .get("message")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-
-            serde_json::json!({
+            let mut chunk = serde_json::json!({
                 "id": message.get("id").and_then(|v| v.as_str()).unwrap_or("chatcmpl-unknown"),
                 "object": "chat.completion.chunk",
                 "created": current_timestamp(),
@@ -332,7 +332,11 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                     "delta": {"role": "assistant"},
                     "finish_reason": null
                 }]
-            })
+            });
+            if let Some(usage) = message.get("usage") {
+                chunk["usage"] = anthropic_usage_to_openai(usage);
+            }
+            chunk
         }
         "content_block_start" => {
             // Start of a content block
@@ -437,7 +441,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .map(map_anthropic_stop_reason);
 
-            serde_json::json!({
+            let mut chunk = serde_json::json!({
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",
                 "created": current_timestamp(),
@@ -447,10 +451,14 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                     "delta": {},
                     "finish_reason": stop_reason
                 }]
-            })
+            });
+            if let Some(usage) = anthropic_event.get("usage") {
+                chunk["usage"] = anthropic_usage_to_openai(usage);
+            }
+            chunk
         }
-        "message_stop" | "content_block_stop" => {
-            // End of message or content block - no delta needed
+        "content_block_stop" => {
+            // End of a content block - no delta needed.
             serde_json::json!({
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",
@@ -462,6 +470,20 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                     "finish_reason": null
                 }]
             })
+        }
+        "message_stop" => {
+            // OpenAI's usage-bearing terminal stream chunk has no choices.
+            let mut chunk = serde_json::json!({
+                "id": "chatcmpl-stream",
+                "object": "chat.completion.chunk",
+                "created": current_timestamp(),
+                "model": "unknown",
+                "choices": []
+            });
+            if let Some(usage) = anthropic_event.get("usage") {
+                chunk["usage"] = anthropic_usage_to_openai(usage);
+            }
+            chunk
         }
         _ => {
             // Unknown event type - return empty delta
@@ -480,6 +502,22 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
     };
 
     Ok(openai_event)
+}
+
+fn anthropic_usage_to_openai(usage: &Value) -> Value {
+    let prompt_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let completion_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    serde_json::json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens.saturating_add(completion_tokens)
+    })
 }
 
 /// Get current Unix timestamp.
@@ -541,7 +579,9 @@ mod tests {
         assert_eq!(result["choices"][0]["message"]["role"], "assistant");
         assert_eq!(result["choices"][0]["message"]["content"], "Hello, world!");
         assert_eq!(result["choices"][0]["finish_reason"], "stop");
-        assert_eq!(result["usage"]["input_tokens"], 10);
+        assert_eq!(result["usage"]["prompt_tokens"], 10);
+        assert_eq!(result["usage"]["completion_tokens"], 5);
+        assert_eq!(result["usage"]["total_tokens"], 15);
     }
 
     #[test]
@@ -637,6 +677,8 @@ mod tests {
         assert_eq!(result["id"], "msg_stream123");
         assert_eq!(result["choices"][0]["delta"]["role"], "assistant");
         assert!(result["choices"][0]["finish_reason"].is_null());
+        assert_eq!(result["usage"]["prompt_tokens"], 10);
+        assert_eq!(result["usage"]["completion_tokens"], 1);
     }
 
     #[test]
@@ -656,6 +698,21 @@ mod tests {
 
         assert_eq!(result["object"], "chat.completion.chunk");
         assert_eq!(result["choices"][0]["delta"]["content"], "Hello");
+    }
+
+    #[test]
+    fn test_transform_streaming_content_block_stop() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_event = serde_json::json!({
+            "type": "content_block_stop",
+            "index": 0
+        });
+
+        let result = transformer.transform_response(anthropic_event).unwrap();
+
+        assert_eq!(result["object"], "chat.completion.chunk");
+        assert!(result["choices"][0]["delta"].is_object());
+        assert!(result["choices"][0]["finish_reason"].is_null());
     }
 
     #[test]
@@ -698,6 +755,25 @@ mod tests {
 
         assert_eq!(result["object"], "chat.completion.chunk");
         assert_eq!(result["choices"][0]["finish_reason"], "stop");
+        assert_eq!(result["usage"]["prompt_tokens"], 0);
+        assert_eq!(result["usage"]["completion_tokens"], 50);
+    }
+
+    #[test]
+    fn test_transform_streaming_message_stop_emits_terminal_usage_chunk() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_event = serde_json::json!({
+            "type": "message_stop",
+            "usage": {"input_tokens": 120, "output_tokens": 30}
+        });
+
+        let result = transformer.transform_response(anthropic_event).unwrap();
+
+        assert_eq!(result["object"], "chat.completion.chunk");
+        assert_eq!(result["choices"].as_array().unwrap().len(), 0);
+        assert_eq!(result["usage"]["prompt_tokens"], 120);
+        assert_eq!(result["usage"]["completion_tokens"], 30);
+        assert_eq!(result["usage"]["total_tokens"], 150);
     }
 
     #[test]
