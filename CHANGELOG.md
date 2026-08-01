@@ -67,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Rust dependency security refresh** — Updated `quinn-proto`,
   `crossbeam-epoch`, `anyhow`, and `memmap2` to patched releases and added a
   SHA-pinned RustSec audit job so future vulnerable lockfile changes fail CI.
+  Updated the `cargo-deny` policy for the current schema, reviewed license and
+  Git-source allowances, and made path/Git dependency versions explicit.
 - **Authenticated native MCP daemon** — `mcp-daemon` now requires a bearer token
   from `--auth-token` or `CCR_MCP_AUTH_TOKEN`, compares presented credentials in
   constant time, and protects both `/health` and `/mcp`.
