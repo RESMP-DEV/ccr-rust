@@ -112,6 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Responses protocol validation and streaming contracts** — Accept completed
+  payloads with null error fields, preserve flat function tools, reject malformed
+  images and unsupported tools, normalize wrapped Responses payloads before
+  success accounting, retain tier headers during pseudo-streaming, and emit
+  OpenAI usage exactly once on the terminal stream chunk.
 - **OpenAI gateway envelope and lifecycle compatibility** — Non-streaming
   OpenAI-compatible responses wrapped as `{success:true,data:{...}}` are
   normalized before deserialization, and `content_block_stop` now follows the
