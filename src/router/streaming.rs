@@ -747,6 +747,10 @@ pub(super) async fn wrap_json_response_as_sse(response: Response) -> Response {
             axum::http::HeaderValue::from_static("no-cache"),
         );
         parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        parts.headers.remove(axum::http::header::CONTENT_ENCODING);
+        parts.headers.remove(axum::http::header::TRANSFER_ENCODING);
+        parts.headers.remove(axum::http::header::ETAG);
+        parts.headers.remove(axum::http::header::LAST_MODIFIED);
         Response::from_parts(parts, Body::from(sse_body))
     } else {
         // Can't parse as Anthropic — return original response unchanged
@@ -757,6 +761,50 @@ pub(super) async fn wrap_json_response_as_sse(response: Response) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn json_to_sse_rewrite_removes_stale_entity_headers() {
+        let payload = serde_json::json!({
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "test-model",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let mut response = Response::new(Body::from(payload.to_string()));
+        for (name, value) in [
+            (axum::http::header::CONTENT_LENGTH, "10"),
+            (axum::http::header::CONTENT_ENCODING, "gzip"),
+            (axum::http::header::TRANSFER_ENCODING, "chunked"),
+            (axum::http::header::ETAG, "\"old\""),
+            (
+                axum::http::header::LAST_MODIFIED,
+                "Fri, 01 Aug 2025 00:00:00 GMT",
+            ),
+        ] {
+            response
+                .headers_mut()
+                .insert(name, axum::http::HeaderValue::from_str(value).unwrap());
+        }
+
+        let rewritten = wrap_json_response_as_sse(response).await;
+
+        assert_eq!(
+            rewritten.headers().get(axum::http::header::CONTENT_TYPE),
+            Some(&axum::http::HeaderValue::from_static("text/event-stream"))
+        );
+        for name in [
+            axum::http::header::CONTENT_LENGTH,
+            axum::http::header::CONTENT_ENCODING,
+            axum::http::header::TRANSFER_ENCODING,
+            axum::http::header::ETAG,
+            axum::http::header::LAST_MODIFIED,
+        ] {
+            assert!(rewritten.headers().get(name).is_none());
+        }
+    }
 
     #[test]
     fn test_emit_anthropic_sse_events_tool_use() {
