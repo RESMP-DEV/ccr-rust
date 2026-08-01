@@ -1,8 +1,10 @@
 # Build stage
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 COPY src ./src
+COPY benches ./benches
 RUN cargo build --release
 
 # Runtime stage

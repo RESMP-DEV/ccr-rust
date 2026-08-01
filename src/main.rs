@@ -69,7 +69,9 @@ Config is read from ~/.claude-code-router/config.json by default
 
 #[derive(Parser)]
 #[command(name = "ccr-rust")]
-#[command(about = "Multi-provider LLM router with automatic failover, streaming, and observability")]
+#[command(
+    about = "Multi-provider LLM router with automatic failover, streaming, and observability"
+)]
 #[command(after_help = CLI_EXAMPLES)]
 struct Cli {
     #[command(subcommand)]

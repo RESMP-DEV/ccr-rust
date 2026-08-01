@@ -148,13 +148,13 @@ curl -s http://127.0.0.1:3456/v1/messages \
 export ANTHROPIC_BASE_URL=http://127.0.0.1:3456
 claude
 
-# Codex
-export OPENAI_BASE_URL=http://127.0.0.1:3456/v1
-codex
+# Codex (configure CCR-Rust as a custom provider first)
+# See docs/codex_setup.md for the current config.toml settings.
+codex --profile ccr
 
-# OpenCode (or any OpenAI-compatible client)
-export OPENAI_BASE_URL=http://127.0.0.1:3456/v1
-opencode
+# Other OpenAI-compatible clients
+# Set the client's base URL to http://127.0.0.1:3456/v1 using its
+# provider configuration; the exact setting varies by client.
 ```
 
 If Claude Code complains about a missing `ANTHROPIC_API_KEY`, keep that variable set to any non-empty value locally — CCR-Rust uses the upstream provider keys from its own config file, not the one from your client.
