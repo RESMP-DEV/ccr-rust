@@ -51,12 +51,69 @@ Validate configuration file syntax and providers.
 ccr-rust validate
 ```
 
+### `dashboard`
+Launch the interactive TUI dashboard (requires the default `dashboard` feature).
+
+```bash
+ccr-rust dashboard [OPTIONS]
+```
+
+| Option | Short | Environment | Default | Description |
+|--------|-------|-------------|---------|-------------|
+| `--host` | - | `CCR_DASHBOARD_HOST` | `127.0.0.1` | Router host to connect to |
+| `--port` | `-p` | `CCR_DASHBOARD_PORT` | `3456` | Router port to connect to |
+
 ### `version`
 Show version and build information.
 
 ```bash
 ccr-rust version
 ```
+
+### `captures`
+List and analyze debug captures (requires `DebugCapture.enabled=true` in config).
+
+```bash
+ccr-rust captures [OPTIONS]
+```
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--provider` | `-p` | - | Filter by provider name |
+| `--limit` | `-l` | `20` | Maximum captures to list |
+| `--stats` | - | `false` | Show aggregate statistics instead of individual captures |
+| `--output-dir` | - | config value | Capture directory override |
+| `--full` | - | `false` | Show full request/response bodies |
+
+### `mcp`
+Run as a stdio MCP (Model Context Protocol) server, optionally wrapping other MCP backends.
+
+```bash
+ccr-rust mcp [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--level` | Log level (default `low`) |
+| `--wrap <backend>` | Wrap another MCP backend (repeatable) |
+| `--include <tools>` | Comma-separated tool allowlist |
+| `--exclude <tools>` | Comma-separated tool denylist |
+
+### `mcp-daemon`
+Run as a shared MCP daemon over HTTP with native tools. Requires a bearer token.
+
+```bash
+ccr-rust mcp-daemon [OPTIONS] --auth-token <TOKEN>
+```
+
+| Option | Short | Environment | Default | Description |
+|--------|-------|-------------|---------|-------------|
+| `--port` | `-p` | - | `3457` | Daemon port |
+| `--host` | - | `CCR_MCP_DAEMON_HOST` | `127.0.0.1` | Listen address |
+| `--auth-token` | - | `CCR_MCP_AUTH_TOKEN` | - | Required bearer token (prefer the env var) |
+| `--memory-dir` | - | `CCR_MCP_MEMORY_DIR` | - | Directory for memory graph persistence |
+| `--pyright-root` | - | `PYRIGHT_PROJECT_ROOT` | - | Project root for Pyright type-checking |
+| `--pyright-workspace-dir` | - | `CCR_MCP_PYRIGHT_WORKSPACE_DIR` | - | Private directory for ephemeral Pyright workspaces |
 
 ### `clear-stats`
 Delete persisted CCR observability stats from Redis for one prefix.
@@ -91,11 +148,20 @@ ccr-rust -c /etc/ccr/config.json start
 # Check server status
 ccr-rust status
 
-# Validate configuration
-ccr-rust validate --config ~/custom.toml
+# Validate an alternate config file
+ccr-rust --config ~/custom-config.json validate
 
 # Show version
 ccr-rust version
+
+# Dashboard against a remote router
+ccr-rust dashboard --host 10.0.0.5 --port 3456
+
+# Recent captures for one provider, with full bodies
+ccr-rust captures --provider minimax --limit 10 --full
+
+# MCP daemon with bearer auth via env var
+CCR_MCP_AUTH_TOKEN="a-private-random-token" ccr-rust mcp-daemon
 
 # Clear persisted stats using config persistence settings
 ccr-rust clear-stats
@@ -127,13 +193,17 @@ Once running, the server exposes the following endpoints:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/messages` | POST | Chat completions API (Anthropic-compatible) |
+| `/v1/messages` | POST | Messages API (Anthropic-compatible) |
+| `/v1/chat/completions` | POST | Chat completions API (OpenAI-compatible) |
+| `/v1/responses` | POST | Responses API (OpenAI-compatible, streaming) |
+| `/v1/models` | GET | List configured models |
 | `/v1/presets` | GET | List available routing presets |
-| `/preset/:preset_name/v1/messages` | POST | Chat completions using a specific preset |
+| `/preset/:preset_name/v1/messages` | POST | Messages using a specific preset |
 | `/v1/latencies` | GET | Latency metrics per backend |
 | `/v1/usage` | GET | Usage statistics |
 | `/v1/token-drift` | GET | Token drift metrics |
 | `/v1/token-audit` | GET | Recent pre-request token audit entries |
+| `/v1/throughput` | GET | Throughput statistics |
 | `/v1/frontend-metrics` | GET | Per-frontend request/latency metrics |
 | `/health` | GET | Health check |
 | `/metrics` | GET | Prometheus-style metrics |

@@ -54,9 +54,25 @@ use router::AppState;
 use routing::EwmaTracker;
 use transformer::TransformerRegistry;
 
+const CLI_EXAMPLES: &str = "\
+Examples:
+  ccr-rust start                          Start the router on 127.0.0.1:3456
+  ccr-rust start --host 0.0.0.0 -p 8080   Start on a custom address and port
+  ccr-rust --config /etc/ccr/config.json start
+                                          Start with an alternate config file
+  ccr-rust validate                       Check config syntax without starting
+  ccr-rust status                         Verify the router is running
+  ccr-rust dashboard                      Live terminal dashboard
+
+Config is read from ~/.claude-code-router/config.json by default
+(override with --config or CCR_CONFIG). See docs/configuration.md.";
+
 #[derive(Parser)]
 #[command(name = "ccr-rust")]
-#[command(about = "Claude Code Router in Rust")]
+#[command(
+    about = "Multi-provider LLM router with automatic failover, streaming, and observability"
+)]
+#[command(after_help = CLI_EXAMPLES)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -68,7 +84,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the CCR server
+    /// Start the CCR server (default when no subcommand is given)
+    #[command(after_help = "\
+Examples:
+  ccr-rust start                          Start on 127.0.0.1:3456
+  ccr-rust start --host 0.0.0.0 -p 8080   Listen on all interfaces, port 8080
+  ccr-rust start --max-streams 0          Allow unlimited concurrent streams")]
     Start {
         /// Server host
         #[arg(long, default_value = "127.0.0.1")]
@@ -87,6 +108,7 @@ enum Commands {
         shutdown_timeout: u64,
     },
     /// Check if server is running
+    #[command(after_help = "Example:\n  ccr-rust status --host 10.0.0.5 -p 3456")]
     Status {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
@@ -94,9 +116,15 @@ enum Commands {
         port: u16,
     },
     /// Validate config file syntax and providers
+    #[command(after_help = "Example:\n  ccr-rust --config examples/config.minimal.json validate")]
     Validate,
     #[cfg(feature = "dashboard")]
     /// Launch interactive TUI dashboard
+    #[command(after_help = "\
+Examples:
+  ccr-rust dashboard                      Dashboard for a local router
+  ccr-rust dashboard --host 10.0.0.5      Dashboard for a remote router
+                                          (also: CCR_DASHBOARD_HOST/CCR_DASHBOARD_PORT)")]
     Dashboard {
         /// Tracker host (override with CCR_DASHBOARD_HOST env var)
         #[arg(long, env = "CCR_DASHBOARD_HOST", default_value = "127.0.0.1")]
@@ -109,6 +137,10 @@ enum Commands {
     /// Show version and build info
     Version,
     /// Clear persisted CCR stats in Redis for a prefix.
+    #[command(after_help = "\
+Examples:
+  ccr-rust clear-stats                    Use Persistence settings from config
+  ccr-rust clear-stats --redis-url redis://127.0.0.1:6379/0 --redis-prefix ccr-rust:persistence:v1")]
     ClearStats {
         /// Redis URL override (defaults to Persistence.redis_url or CCR_REDIS_URL)
         #[arg(long, env = "CCR_REDIS_URL")]
@@ -130,6 +162,12 @@ enum Commands {
         exclude: Option<Vec<String>>,
     },
     /// Run as a shared MCP daemon (HTTP transport, native tools)
+    #[command(after_help = "\
+Examples:
+  export CCR_MCP_AUTH_TOKEN=\"a-private-random-token\"
+  ccr-rust mcp-daemon                     Serve on 127.0.0.1:3457 with bearer auth
+  ccr-rust mcp-daemon --pyright-root /path/to/project \\
+    --pyright-workspace-dir ~/.cache/ccr-rust/pyright-workspaces")]
     McpDaemon {
         /// Daemon port
         #[arg(short, long, default_value = "3457")]
@@ -156,6 +194,11 @@ enum Commands {
         pyright_workspace_dir: Option<String>,
     },
     /// List and analyze debug captures.
+    #[command(after_help = "\
+Examples:
+  ccr-rust captures --stats               Aggregate capture statistics
+  ccr-rust captures -p minimax -l 10      10 most recent captures for 'minimax'
+  ccr-rust captures --full                Include full request/response bodies")]
     Captures {
         /// Filter by provider name (e.g., "minimax")
         #[arg(short, long)]

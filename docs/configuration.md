@@ -26,18 +26,22 @@ CCR-Rust supports environment variable expansion in config files using `${VAR_NA
 }
 ```
 
-### .env File Support
+### Where variables come from
 
-CCR-Rust automatically loads `.env` files from:
-1. Current working directory
-2. `~/.claude-code-router/.env`
+`${VAR_NAME}` is expanded from the **router process's environment** at config
+load time. CCR-Rust does not read `.env` files itself — export the variables
+in the shell that starts the router, or configure them in your service manager
+(systemd `Environment=`, Docker `-e`, etc.):
 
 ```bash
-# .env
-GEMINI_API_KEY=your-key-here
-DEEPSEEK_API_KEY=sk-xxx
-MINIMAX_API_KEY=mk-xxx
+export GEMINI_API_KEY=your-key-here
+export DEEPSEEK_API_KEY=sk-xxx
+export MINIMAX_API_KEY=mk-xxx
+ccr-rust start
 ```
+
+If you prefer keeping keys in a `.env` file, load it into the shell first
+(e.g. `set -a; . ~/.claude-code-router/.env; set +a`) before starting CCR-Rust.
 
 ### Security Best Practice
 

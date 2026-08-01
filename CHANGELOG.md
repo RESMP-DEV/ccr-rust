@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Quickstart-oriented documentation** — README restructured around a
+  two-minute quickstart, installation (source + Docker), usage examples, and a
+  troubleshooting FAQ. New `examples/` directory with minimal and multi-tier
+  configs plus a smoke-test script. CLI `--help` output now includes usage
+  examples for every command, and `docs/cli.md` documents the previously
+  missing `dashboard`, `mcp`, `mcp-daemon`, and `captures` commands.
+
 - **Per-request token audit on `/v1/token-audit`** — New read-only endpoint
   exposing recent per-request telemetry (timestamp, tier, and the pre-request
   token-count breakdown: message, system, tools, total) so consumers can
