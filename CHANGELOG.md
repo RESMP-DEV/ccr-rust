@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configs plus a smoke-test script. CLI `--help` output now includes usage
   examples for every command, and `docs/cli.md` documents the previously
   missing `dashboard`, `mcp`, `mcp-daemon`, and `captures` commands.
+- **Responses API upstream protocol** — Providers may set
+  `protocol: "responses"` to send bounded non-streaming requests to
+  `/responses`. CCR-Rust converts chat messages, multimodal input, tools,
+  function-call history, completed text, tool calls, and usage while preserving
+  the existing Anthropic and OpenAI client contracts. Responses upstreams are
+  forced through the existing JSON-to-SSE wrapper when a client requests a
+  stream.
 
 - **Per-request token audit on `/v1/token-audit`** — New read-only endpoint
   exposing recent per-request telemetry (timestamp, tier, and the pre-request
@@ -102,6 +109,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variants to the tier ordering).
 
 ### Fixed
+
+- **OpenAI gateway envelope and lifecycle compatibility** — Non-streaming
+  OpenAI-compatible responses wrapped as `{success:true,data:{...}}` are
+  normalized before deserialization, and `content_block_stop` now follows the
+  streaming Anthropic-to-OpenAI path. Strict OpenAI clients no longer receive
+  a raw Anthropic lifecycle frame. Anthropic input/output token fields are
+  mapped to OpenAI prompt/completion/total usage, and translated streams end
+  with a standard choices-empty usage chunk.
 
 - **Streamed SSE usage matches recorded usage** — In the OpenAI→Anthropic
   translated streaming path, the prompt-token fallback to the pre-request

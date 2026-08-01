@@ -703,8 +703,16 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
     });
     events.push(format!("event: message_delta\ndata: {}\n\n", msg_delta));
 
-    // message_stop
-    events.push("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string());
+    // message_stop carries the complete usage so OpenAI compatibility clients
+    // can receive the standard terminal `choices: []` usage chunk.
+    let message_stop = serde_json::json!({
+        "type": "message_stop",
+        "usage": {
+            "input_tokens": resp.usage.input_tokens,
+            "output_tokens": resp.usage.output_tokens
+        }
+    });
+    events.push(format!("event: message_stop\ndata: {}\n\n", message_stop));
 
     events
 }

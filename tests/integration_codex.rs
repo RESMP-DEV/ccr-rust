@@ -174,6 +174,74 @@ async fn test_codex_request_detection_by_user_agent() {
 }
 
 #[tokio::test]
+async fn test_codex_unwraps_openai_success_envelope() {
+    if skip_if_localhost_bind_unavailable() {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "data": {
+                "id": "chatcmpl-wrapped",
+                "object": "chat.completion",
+                "created": 1234567890,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "wrapped-response-ok"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 4
+                }
+            }
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config_json = make_test_config(&mock_server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&codex_request_body()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        response_json["choices"][0]["message"]["content"],
+        "wrapped-response-ok"
+    );
+    assert!(response_json.get("success").is_none());
+}
+
+#[tokio::test]
 async fn test_models_endpoint_includes_route_ids_for_codex() {
     if skip_if_localhost_bind_unavailable() {
         return;

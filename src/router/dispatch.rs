@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{trace, warn};
 
+use super::responses_protocol::{
+    openai_chat_request_to_responses, responses_response_to_openai_chat,
+};
 use super::streaming::{
     stream_anthropic_response_with_tracking, stream_response_translated, BoxByteStream,
 };
@@ -50,6 +53,37 @@ fn sanitized_capture_headers(headers: &reqwest::header::HeaderMap) -> serde_json
         );
     }
     serde_json::Value::Object(values)
+}
+
+/// Normalize the success envelope used by some OpenAI-compatible gateways.
+///
+/// ClinePass returns non-streaming responses as
+/// `{"success":true,"data":{...OpenAI response...}}` while its streaming
+/// endpoint emits ordinary OpenAI SSE. Normalize only an unambiguous OpenAI
+/// response/error payload so unrelated provider metadata remains untouched.
+fn normalize_openai_response_body(body: bytes::Bytes) -> bytes::Bytes {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+        return body;
+    }
+    let Some(data) = value.get("data") else {
+        return body;
+    };
+    if data
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .is_none()
+        && data
+            .get("error")
+            .and_then(serde_json::Value::as_object)
+            .is_none()
+    {
+        return body;
+    }
+
+    serde_json::to_vec(data).map_or(body, bytes::Bytes::from)
 }
 
 async fn persist_debug_capture(
@@ -315,7 +349,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
     };
 
     match provider.protocol {
-        ProviderProtocol::Openai => {
+        ProviderProtocol::Openai | ProviderProtocol::Responses => {
             try_request_via_openai_protocol(
                 config,
                 provider,
@@ -555,7 +589,11 @@ pub(super) async fn try_request_via_openai_protocol(
         openai_passthrough_body,
     } = args;
 
-    let url = provider_openai_chat_completions_url(provider);
+    let url = if provider.protocol == ProviderProtocol::Responses {
+        provider_endpoint_url(provider, "responses")
+    } else {
+        provider_openai_chat_completions_url(provider)
+    };
     let headers = build_openai_headers(provider)?;
 
     // Fast path: when the inbound request was already OpenAI-formatted (Codex
@@ -591,6 +629,15 @@ pub(super) async fn try_request_via_openai_protocol(
             serde_json::to_value(&openai_request).map_err(|e| TryRequestError::Other(e.into()))?;
         (value, stream)
     };
+    let (request_value, stream_flag) = if provider.protocol == ProviderProtocol::Responses {
+        (
+            openai_chat_request_to_responses(&openai_request_value, model_name)
+                .map_err(TryRequestError::Other)?,
+            false,
+        )
+    } else {
+        (openai_request_value, stream_flag)
+    };
 
     // Set up capture if enabled for this provider
     let capture_builder = if let Some(ref capture) = debug_capture {
@@ -599,7 +646,7 @@ pub(super) async fn try_request_via_openai_protocol(
                 .builder(&provider.name, tier_name)
                 .model(model_name)
                 .url(&url)
-                .request_body(openai_request_value.clone())
+                .request_body(request_value.clone())
                 .streaming(stream_flag);
             if capture.headers_enabled() {
                 builder = builder.request_headers(sanitized_capture_headers(&headers));
@@ -616,7 +663,7 @@ pub(super) async fn try_request_via_openai_protocol(
         .http_client()
         .post(&url)
         .headers(headers)
-        .json(&openai_request_value)
+        .json(&request_value)
         .send()
         .await;
 
@@ -781,6 +828,20 @@ pub(super) async fn try_request_via_openai_protocol(
                 warn!("Failed to record debug capture: {}", capture_err);
             }
         }
+
+        let body = normalize_openai_response_body(body);
+        let body = if provider.protocol == ProviderProtocol::Responses {
+            let response_value = serde_json::from_slice::<serde_json::Value>(&body)
+                .map_err(|error| TryRequestError::Other(error.into()))?;
+            let openai_value = responses_response_to_openai_chat(&response_value, model_name)
+                .map_err(TryRequestError::Other)?;
+            bytes::Bytes::from(
+                serde_json::to_vec(&openai_value)
+                    .map_err(|error| TryRequestError::Other(error.into()))?,
+            )
+        } else {
+            body
+        };
 
         // Try to parse as OpenAI response and translate.
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
@@ -1209,5 +1270,33 @@ mod tests {
         assert_eq!(captured["authorization"], "[REDACTED]");
         assert_eq!(captured["x-api-key"], "[REDACTED]");
         assert_eq!(captured["x-request-id"], "request-123");
+    }
+
+    #[test]
+    fn openai_success_envelope_is_unwrapped() {
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "success": true,
+                "data": {
+                    "id": "chatcmpl-wrapped",
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+                }
+            }))
+            .unwrap(),
+        );
+
+        let normalized = normalize_openai_response_body(body);
+        let payload: serde_json::Value = serde_json::from_slice(&normalized).unwrap();
+
+        assert_eq!(payload["id"], "chatcmpl-wrapped");
+        assert!(payload.get("success").is_none());
+        assert_eq!(payload["choices"][0]["message"]["content"], "ok");
+    }
+
+    #[test]
+    fn unrelated_success_envelope_is_preserved() {
+        let body = bytes::Bytes::from_static(br#"{"success":true,"data":{"value":1}}"#);
+
+        assert_eq!(normalize_openai_response_body(body.clone()), body);
     }
 }
