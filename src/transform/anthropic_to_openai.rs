@@ -322,7 +322,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 .get("message")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            let mut chunk = serde_json::json!({
+            serde_json::json!({
                 "id": message.get("id").and_then(|v| v.as_str()).unwrap_or("chatcmpl-unknown"),
                 "object": "chat.completion.chunk",
                 "created": current_timestamp(),
@@ -332,11 +332,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                     "delta": {"role": "assistant"},
                     "finish_reason": null
                 }]
-            });
-            if let Some(usage) = message.get("usage") {
-                chunk["usage"] = anthropic_usage_to_openai(usage);
-            }
-            chunk
+            })
         }
         "content_block_start" => {
             // Start of a content block
@@ -441,7 +437,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .map(map_anthropic_stop_reason);
 
-            let mut chunk = serde_json::json!({
+            serde_json::json!({
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",
                 "created": current_timestamp(),
@@ -451,11 +447,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                     "delta": {},
                     "finish_reason": stop_reason
                 }]
-            });
-            if let Some(usage) = anthropic_event.get("usage") {
-                chunk["usage"] = anthropic_usage_to_openai(usage);
-            }
-            chunk
+            })
         }
         "content_block_stop" => {
             // End of a content block - no delta needed.
@@ -473,17 +465,13 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
         }
         "message_stop" => {
             // OpenAI's usage-bearing terminal stream chunk has no choices.
-            let mut chunk = serde_json::json!({
+            serde_json::json!({
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",
                 "created": current_timestamp(),
                 "model": "unknown",
                 "choices": []
-            });
-            if let Some(usage) = anthropic_event.get("usage") {
-                chunk["usage"] = anthropic_usage_to_openai(usage);
-            }
-            chunk
+            })
         }
         _ => {
             // Unknown event type - return empty delta
@@ -677,8 +665,7 @@ mod tests {
         assert_eq!(result["id"], "msg_stream123");
         assert_eq!(result["choices"][0]["delta"]["role"], "assistant");
         assert!(result["choices"][0]["finish_reason"].is_null());
-        assert_eq!(result["usage"]["prompt_tokens"], 10);
-        assert_eq!(result["usage"]["completion_tokens"], 1);
+        assert!(result.get("usage").is_none());
     }
 
     #[test]
@@ -755,12 +742,11 @@ mod tests {
 
         assert_eq!(result["object"], "chat.completion.chunk");
         assert_eq!(result["choices"][0]["finish_reason"], "stop");
-        assert_eq!(result["usage"]["prompt_tokens"], 0);
-        assert_eq!(result["usage"]["completion_tokens"], 50);
+        assert!(result.get("usage").is_none());
     }
 
     #[test]
-    fn test_transform_streaming_message_stop_emits_terminal_usage_chunk() {
+    fn test_transform_streaming_message_stop_has_empty_choices() {
         let transformer = AnthropicToOpenAiResponseTransformer;
         let anthropic_event = serde_json::json!({
             "type": "message_stop",
@@ -771,9 +757,7 @@ mod tests {
 
         assert_eq!(result["object"], "chat.completion.chunk");
         assert_eq!(result["choices"].as_array().unwrap().len(), 0);
-        assert_eq!(result["usage"]["prompt_tokens"], 120);
-        assert_eq!(result["usage"]["completion_tokens"], 30);
-        assert_eq!(result["usage"]["total_tokens"], 150);
+        assert!(result.get("usage").is_none());
     }
 
     #[test]

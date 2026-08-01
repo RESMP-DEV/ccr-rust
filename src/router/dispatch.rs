@@ -57,10 +57,9 @@ fn sanitized_capture_headers(headers: &reqwest::header::HeaderMap) -> serde_json
 
 /// Normalize the success envelope used by some OpenAI-compatible gateways.
 ///
-/// ClinePass returns non-streaming responses as
-/// `{"success":true,"data":{...OpenAI response...}}` while its streaming
-/// endpoint emits ordinary OpenAI SSE. Normalize only an unambiguous OpenAI
-/// response/error payload so unrelated provider metadata remains untouched.
+/// Some gateways return non-streaming OpenAI or Responses payloads inside
+/// `{"success":true,"data":{...}}`. Normalize only an unambiguous response or
+/// error payload so unrelated provider metadata remains untouched.
 fn normalize_openai_response_body(body: bytes::Bytes) -> bytes::Bytes {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return body;
@@ -75,6 +74,10 @@ fn normalize_openai_response_body(body: bytes::Bytes) -> bytes::Bytes {
         .get("choices")
         .and_then(serde_json::Value::as_array)
         .is_none()
+        && data
+            .get("output")
+            .and_then(serde_json::Value::as_array)
+            .is_none()
         && data
             .get("error")
             .and_then(serde_json::Value::as_object)
@@ -239,7 +242,7 @@ async fn check_stream_for_embedded_error(
 /// Check a non-streaming response body for an embedded error in a 200.
 fn check_body_for_embedded_error(body: &[u8], tier_name: &str) -> Result<(), TryRequestError> {
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
-        if json.get("error").is_some() {
+        if json.get("error").is_some_and(|error| !error.is_null()) {
             let msg = json["error"]["message"]
                 .as_str()
                 .unwrap_or("Unknown error in response body");
@@ -796,15 +799,16 @@ pub(super) async fn try_request_via_openai_protocol(
             .as_ref()
             .filter(|capture| capture.headers_enabled())
             .map(|_| sanitized_capture_headers(resp.headers()));
-        let body = resp
+        let raw_body = resp
             .bytes()
             .await
             .map_err(|e| TryRequestError::Other(e.into()))?;
+        let body = normalize_openai_response_body(raw_body.clone());
 
         // Check for embedded error in 200 body BEFORE recording success,
         // otherwise a failed request corrupts tier rate-limit state.
         if let Err(error) = check_body_for_embedded_error(&body, tier_name) {
-            let body_str = String::from_utf8_lossy(&body);
+            let body_str = String::from_utf8_lossy(&raw_body);
             persist_debug_capture(
                 debug_capture.as_ref(),
                 capture_builder,
@@ -817,11 +821,41 @@ pub(super) async fn try_request_via_openai_protocol(
             return Err(error);
         }
 
-        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+        let body_result = if provider.protocol == ProviderProtocol::Responses {
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .map_err(|error| TryRequestError::Other(error.into()))
+                .and_then(|response_value| {
+                    responses_response_to_openai_chat(&response_value, model_name)
+                        .map_err(TryRequestError::Other)
+                })
+                .and_then(|openai_value| {
+                    serde_json::to_vec(&openai_value)
+                        .map(bytes::Bytes::from)
+                        .map_err(|error| TryRequestError::Other(error.into()))
+                })
+        } else {
+            Ok(body)
+        };
+        let body = match body_result {
+            Ok(body) => body,
+            Err(error) => {
+                let body_str = String::from_utf8_lossy(&raw_body);
+                persist_debug_capture(
+                    debug_capture.as_ref(),
+                    capture_builder,
+                    resp_status,
+                    &body_str,
+                    captured_headers,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
-        let body_str = String::from_utf8_lossy(&body);
+        let body_str = String::from_utf8_lossy(&raw_body);
 
-        // Record capture for non-streaming response
+        // Record capture for the raw non-streaming response.
         if let (Some(builder), Some(capture)) = (capture_builder, debug_capture.clone()) {
             let interaction = builder.complete(resp_status, &body_str, captured_headers, None);
             if let Err(capture_err) = capture.record(interaction).await {
@@ -829,19 +863,7 @@ pub(super) async fn try_request_via_openai_protocol(
             }
         }
 
-        let body = normalize_openai_response_body(body);
-        let body = if provider.protocol == ProviderProtocol::Responses {
-            let response_value = serde_json::from_slice::<serde_json::Value>(&body)
-                .map_err(|error| TryRequestError::Other(error.into()))?;
-            let openai_value = responses_response_to_openai_chat(&response_value, model_name)
-                .map_err(TryRequestError::Other)?;
-            bytes::Bytes::from(
-                serde_json::to_vec(&openai_value)
-                    .map_err(|error| TryRequestError::Other(error.into()))?,
-            )
-        } else {
-            body
-        };
+        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
 
         // Try to parse as OpenAI response and translate.
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
@@ -1298,5 +1320,20 @@ mod tests {
         let body = bytes::Bytes::from_static(br#"{"success":true,"data":{"value":1}}"#);
 
         assert_eq!(normalize_openai_response_body(body.clone()), body);
+    }
+
+    #[test]
+    fn responses_success_and_error_envelopes_are_unwrapped() {
+        for body in [
+            bytes::Bytes::from_static(br#"{"success":true,"data":{"id":"resp_1","output":[]}}"#),
+            bytes::Bytes::from_static(
+                br#"{"success":true,"data":{"error":{"message":"bad request"}}}"#,
+            ),
+        ] {
+            let normalized = normalize_openai_response_body(body);
+            let payload: serde_json::Value = serde_json::from_slice(&normalized).unwrap();
+            assert!(payload.get("success").is_none());
+            assert!(payload.get("output").is_some() || payload.get("error").is_some());
+        }
     }
 }
