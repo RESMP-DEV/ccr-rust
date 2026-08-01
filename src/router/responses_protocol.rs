@@ -16,6 +16,31 @@ fn content_text(content: &Value) -> String {
     }
 }
 
+fn function_arguments(arguments: Option<&Value>) -> String {
+    let rendered = arguments.map(content_text).unwrap_or_default();
+    if rendered.trim().is_empty() {
+        "{}".to_string()
+    } else {
+        rendered
+    }
+}
+
+fn response_created_at(created_at: Option<&Value>) -> i64 {
+    created_at
+        .and_then(|created| {
+            created.as_i64().or_else(|| {
+                created.as_str().and_then(|value| {
+                    value.parse().ok().or_else(|| {
+                        chrono::DateTime::parse_from_rfc3339(value)
+                            .ok()
+                            .map(|timestamp| timestamp.timestamp())
+                    })
+                })
+            })
+        })
+        .unwrap_or_default()
+}
+
 fn response_content_blocks(content: &Value, role: &str) -> Vec<Value> {
     let text_type = if role == "assistant" {
         "output_text"
@@ -130,11 +155,7 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or("function"),
-                    "arguments": function
-                        .get("arguments")
-                        .filter(|value| !value.is_null())
-                        .map(content_text)
-                        .unwrap_or_else(|| "{}".to_string())
+                    "arguments": function_arguments(function.get("arguments"))
                 }));
             }
         }
@@ -217,11 +238,7 @@ fn response_tool_calls(response: &Value) -> Vec<Value> {
         .flatten()
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
         .map(|item| {
-            let arguments = item
-                .get("arguments")
-                .filter(|value| !value.is_null())
-                .map(content_text)
-                .unwrap_or_else(|| "{}".to_string());
+            let arguments = function_arguments(item.get("arguments"));
             json!({
                 "id": item
                     .get("call_id")
@@ -291,14 +308,7 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
     Ok(json!({
         "id": response.get("id").and_then(Value::as_str).unwrap_or("resp_unknown"),
         "object": "chat.completion",
-        "created": response
-            .get("created_at")
-            .and_then(|created| {
-                created
-                    .as_i64()
-                    .or_else(|| created.as_str().and_then(|value| value.parse().ok()))
-            })
-            .unwrap_or_default(),
+        "created": response_created_at(response.get("created_at")),
         "model": response.get("model").and_then(Value::as_str).unwrap_or(model),
         "choices": [{
             "index": 0,
@@ -352,7 +362,7 @@ mod tests {
                 {"role": "assistant", "tool_calls": [{
                     "id": "call_1",
                     "type": "function",
-                    "function": {"name": "flat", "arguments": null}
+                    "function": {"name": "flat", "arguments": ""}
                 }]}
             ],
             "tools": [
@@ -423,7 +433,7 @@ mod tests {
                 "call_id": null,
                 "id": "call_7",
                 "name": "run_check",
-                "arguments": null
+                "arguments": "   "
             }]
         });
 
@@ -465,5 +475,21 @@ mod tests {
             converted["choices"][0]["message"]["content"],
             "I cannot help with that."
         );
+    }
+
+    #[test]
+    fn parses_rfc3339_response_timestamp() {
+        let response = json!({
+            "id": "resp_timestamp",
+            "created_at": "2026-08-01T12:34:56Z",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "ok"}]
+            }]
+        });
+
+        let converted = responses_response_to_openai_chat(&response, "muse").unwrap();
+
+        assert_eq!(converted["created"], 1_785_587_696_i64);
     }
 }

@@ -464,7 +464,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
             })
         }
         "message_stop" => {
-            // OpenAI's usage-bearing terminal stream chunk has no choices.
+            // The stream adapter attaches collected usage to this terminal chunk.
             serde_json::json!({
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",

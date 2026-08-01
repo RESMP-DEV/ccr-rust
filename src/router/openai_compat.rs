@@ -249,11 +249,16 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                 let data = frame.data;
                                 let event_type = frame.event;
 
+                                // The first terminal marker closes the OpenAI stream. Ignore
+                                // duplicate or trailing Anthropic frames rather than emitting
+                                // data after [DONE].
+                                if sent_done {
+                                    continue;
+                                }
+
                                 if data.trim() == "[DONE]" {
-                                    if !sent_done {
-                                        let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
-                                        sent_done = true;
-                                    }
+                                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
+                                    sent_done = true;
                                     continue;
                                 }
 
@@ -321,7 +326,7 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                     }
                                 };
 
-                                if event_kind.as_deref() == Some("message_stop") {
+                                if event_kind.as_deref() == Some("message_stop") && !sent_done {
                                     if let (Some(prompt), Some(completion)) =
                                         (prompt_tokens, completion_tokens)
                                     {
@@ -398,5 +403,34 @@ pub async fn handle_chat_completions(
         convert_anthropic_stream_response_to_openai(response).await
     } else {
         convert_anthropic_json_response_to_openai(response).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn duplicate_message_stop_does_not_emit_after_done() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\",\"usage\":{\"output_tokens\":2}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\",\"usage\":{\"output_tokens\":2}}\n\n",
+        );
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
+        assert_eq!(output.matches("\"total_tokens\":3").count(), 1);
+        assert!(output.ends_with("data: [DONE]\n\n"));
     }
 }
