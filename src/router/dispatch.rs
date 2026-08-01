@@ -1325,9 +1325,9 @@ mod tests {
     #[test]
     fn non_object_error_metadata_is_not_an_embedded_error() {
         for body in [
-            br#"{\"error\":\"none\",\"output\":[]} "#.as_slice(),
-            br#"{\"error\":[],\"output\":[]} "#.as_slice(),
-            br#"{\"error\":null,\"output\":[]} "#.as_slice(),
+            br#"{"error":"none","output":[]}"#.as_slice(),
+            br#"{"error":[],"output":[]}"#.as_slice(),
+            br#"{"error":null,"output":[]}"#.as_slice(),
         ] {
             assert!(check_body_for_embedded_error(body, "test-tier").is_ok());
             assert!(embedded_stream_error(std::str::from_utf8(body).unwrap()).is_none());

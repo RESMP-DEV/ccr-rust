@@ -230,6 +230,27 @@ fn response_text(response: &Value) -> String {
     }
 }
 
+fn response_reasoning_text(response: &Value) -> String {
+    let mut reasoning = String::new();
+    if let Some(output) = response.get("output").and_then(Value::as_array) {
+        for item in output {
+            if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+                continue;
+            }
+            for field in ["summary", "content"] {
+                if let Some(parts) = item.get(field).and_then(Value::as_array) {
+                    for part in parts {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            reasoning.push_str(text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    reasoning
+}
+
 fn response_tool_calls(response: &Value) -> Vec<Value> {
     response
         .get("output")
@@ -268,6 +289,7 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("Responses provider payload is missing output"))?;
     let text = response_text(response);
+    let reasoning = response_reasoning_text(response);
     let tool_calls = response_tool_calls(response);
     if output.is_empty() && text.is_empty() && tool_calls.is_empty() {
         return Err(anyhow!("Responses provider returned no output items"));
@@ -279,6 +301,9 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
     });
     if !tool_calls.is_empty() {
         message["tool_calls"] = Value::Array(tool_calls.clone());
+    }
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = Value::String(reasoning);
     }
     let incomplete_reason = response
         .get("incomplete_details")
@@ -404,11 +429,17 @@ mod tests {
             "error": null,
             "incomplete_details": null,
             "model": "muse-spark-1.1",
-            "output": [{
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "AlphaHENG ready"}]
-            }],
+            "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "Checked the route."}]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "AlphaHENG ready"}]
+                }
+            ],
             "usage": {"input_tokens": 11, "output_tokens": 3, "total_tokens": 14}
         });
 
@@ -419,6 +450,10 @@ mod tests {
             "AlphaHENG ready"
         );
         assert_eq!(converted["choices"][0]["finish_reason"], "stop");
+        assert_eq!(
+            converted["choices"][0]["message"]["reasoning_content"],
+            "Checked the route."
+        );
         assert_eq!(converted["usage"]["prompt_tokens"], 11);
         assert_eq!(converted["usage"]["completion_tokens"], 3);
     }
