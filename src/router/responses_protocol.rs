@@ -231,7 +231,7 @@ fn response_text(response: &Value) -> String {
 }
 
 fn response_reasoning_text(response: &Value) -> String {
-    let mut reasoning = String::new();
+    let mut reasoning = Vec::new();
     if let Some(output) = response.get("output").and_then(Value::as_array) {
         for item in output {
             if item.get("type").and_then(Value::as_str) != Some("reasoning") {
@@ -241,14 +241,14 @@ fn response_reasoning_text(response: &Value) -> String {
                 if let Some(parts) = item.get(field).and_then(Value::as_array) {
                     for part in parts {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
-                            reasoning.push_str(text);
+                            reasoning.push(text);
                         }
                     }
                 }
             }
         }
     }
-    reasoning
+    reasoning.join("\n\n")
 }
 
 fn response_tool_calls(response: &Value) -> Vec<Value> {
@@ -432,7 +432,10 @@ mod tests {
             "output": [
                 {
                     "type": "reasoning",
-                    "summary": [{"type": "summary_text", "text": "Checked the route."}]
+                    "summary": [
+                        {"type": "summary_text", "text": "Checked the route."},
+                        {"type": "summary_text", "text": "Selected Muse."}
+                    ]
                 },
                 {
                     "type": "message",
@@ -452,7 +455,7 @@ mod tests {
         assert_eq!(converted["choices"][0]["finish_reason"], "stop");
         assert_eq!(
             converted["choices"][0]["message"]["reasoning_content"],
-            "Checked the route."
+            "Checked the route.\n\nSelected Muse."
         );
         assert_eq!(converted["usage"]["prompt_tokens"], 11);
         assert_eq!(converted["usage"]["completion_tokens"], 3);
