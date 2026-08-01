@@ -703,15 +703,7 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
     });
     events.push(format!("event: message_delta\ndata: {}\n\n", msg_delta));
 
-    // message_stop carries the complete usage so OpenAI compatibility clients
-    // can receive the standard terminal `choices: []` usage chunk.
-    let message_stop = serde_json::json!({
-        "type": "message_stop",
-        "usage": {
-            "input_tokens": resp.usage.input_tokens,
-            "output_tokens": resp.usage.output_tokens
-        }
-    });
+    let message_stop = serde_json::json!({"type": "message_stop"});
     events.push(format!("event: message_stop\ndata: {}\n\n", message_stop));
 
     events
@@ -724,7 +716,7 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
 /// as SSE events that Claude CLI can parse. Falls through to the original response
 /// if parsing fails.
 pub(super) async fn wrap_json_response_as_sse(response: Response) -> Response {
-    let (parts, body) = response.into_parts();
+    let (mut parts, body) = response.into_parts();
 
     // Only wrap successful JSON responses
     if parts.status != StatusCode::OK {
@@ -746,16 +738,16 @@ pub(super) async fn wrap_json_response_as_sse(response: Response) -> Response {
     if let Ok(anthropic_resp) = serde_json::from_slice::<AnthropicResponse>(&bytes) {
         let sse_events = emit_anthropic_sse_events(&anthropic_resp);
         let sse_body = sse_events.join("");
-
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(Body::from(sse_body))
-            .unwrap_or_else(|_| {
-                // Fallback: return original bytes if SSE build fails
-                Response::from_parts(parts, Body::from(bytes))
-            })
+        parts.headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        parts.headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        Response::from_parts(parts, Body::from(sse_body))
     } else {
         // Can't parse as Anthropic — return original response unchanged
         Response::from_parts(parts, Body::from(bytes))

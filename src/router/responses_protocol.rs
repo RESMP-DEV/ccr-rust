@@ -35,8 +35,11 @@ fn response_content_blocks(content: &Value, role: &str) -> Vec<Value> {
                         .map(|text| json!({"type": text_type, "text": text})),
                     "image_url" => item
                         .get("image_url")
-                        .and_then(|image| image.get("url").or(Some(image)))
-                        .cloned()
+                        .and_then(|image| {
+                            image
+                                .as_str()
+                                .or_else(|| image.get("url").and_then(Value::as_str))
+                        })
                         .map(|image_url| json!({"type": "input_image", "image_url": image_url})),
                     "input_image" => Some(item.clone()),
                     _ => None,
@@ -50,24 +53,34 @@ fn response_content_blocks(content: &Value, role: &str) -> Vec<Value> {
 
 fn responses_tool(tool: &Value) -> Option<Value> {
     if tool.get("type").and_then(Value::as_str) != Some("function") {
+        return None;
+    }
+    if tool.get("name").and_then(Value::as_str).is_some() {
         return Some(tool.clone());
     }
     let function = tool.get("function")?.as_object()?;
+    function.get("name")?.as_str()?;
     let mut converted = function.clone();
     converted.insert("type".to_string(), Value::String("function".to_string()));
     Some(Value::Object(converted))
 }
 
-fn responses_tool_choice(choice: &Value) -> Value {
-    let Some(function) = choice.get("function").and_then(Value::as_object) else {
-        return choice.clone();
-    };
+fn responses_tool_choice(choice: &Value) -> Option<Value> {
+    if choice.is_string() {
+        return Some(choice.clone());
+    }
+    if choice.get("type").and_then(Value::as_str) != Some("function") {
+        return None;
+    }
+    if choice.get("name").and_then(Value::as_str).is_some() {
+        return Some(choice.clone());
+    }
+    let function = choice.get("function").and_then(Value::as_object)?;
+    let name = function.get("name")?.as_str()?;
     let mut converted = Map::new();
     converted.insert("type".to_string(), Value::String("function".to_string()));
-    if let Some(name) = function.get("name") {
-        converted.insert("name".to_string(), name.clone());
-    }
-    Value::Object(converted)
+    converted.insert("name".to_string(), Value::String(name.to_string()));
+    Some(Value::Object(converted))
 }
 
 /// Convert an OpenAI Chat Completions request into an upstream Responses request.
@@ -82,6 +95,7 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
         let role = message
             .get("role")
             .and_then(Value::as_str)
+            .map(|role| if role == "system" { "developer" } else { role })
             .unwrap_or("user");
         if role == "tool" {
             input.push(json!({
@@ -118,6 +132,7 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
                         .unwrap_or("function"),
                     "arguments": function
                         .get("arguments")
+                        .filter(|value| !value.is_null())
                         .map(content_text)
                         .unwrap_or_else(|| "{}".to_string())
                 }));
@@ -141,7 +156,9 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
         body["tools"] = Value::Array(tools.iter().filter_map(responses_tool).collect());
     }
     if let Some(tool_choice) = request.get("tool_choice") {
-        body["tool_choice"] = responses_tool_choice(tool_choice);
+        if let Some(tool_choice) = responses_tool_choice(tool_choice) {
+            body["tool_choice"] = tool_choice;
+        }
     }
     Ok(body)
 }
@@ -150,6 +167,16 @@ fn response_text(response: &Value) -> String {
     let mut text = String::new();
     if let Some(output) = response.get("output").and_then(Value::as_array) {
         for item in output {
+            if item.get("type").and_then(Value::as_str) == Some("refusal") {
+                if let Some(value) = item
+                    .get("refusal")
+                    .or_else(|| item.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    text.push_str(value);
+                }
+                continue;
+            }
             if item.get("type").and_then(Value::as_str) != Some("message") {
                 continue;
             }
@@ -157,9 +184,13 @@ fn response_text(response: &Value) -> String {
                 for part in content {
                     if matches!(
                         part.get("type").and_then(Value::as_str),
-                        Some("output_text" | "text")
+                        Some("output_text" | "text" | "refusal")
                     ) {
-                        if let Some(value) = part.get("text").and_then(Value::as_str) {
+                        if let Some(value) = part
+                            .get("text")
+                            .or_else(|| part.get("refusal"))
+                            .and_then(Value::as_str)
+                        {
                             text.push_str(value);
                         }
                     }
@@ -188,13 +219,14 @@ fn response_tool_calls(response: &Value) -> Vec<Value> {
         .map(|item| {
             let arguments = item
                 .get("arguments")
+                .filter(|value| !value.is_null())
                 .map(content_text)
                 .unwrap_or_else(|| "{}".to_string());
             json!({
                 "id": item
                     .get("call_id")
-                    .or_else(|| item.get("id"))
                     .and_then(Value::as_str)
+                    .or_else(|| item.get("id").and_then(Value::as_str))
                     .unwrap_or("call_unknown"),
                 "type": "function",
                 "function": {
@@ -211,7 +243,7 @@ fn response_tool_calls(response: &Value) -> Vec<Value> {
 
 /// Convert a completed Responses API payload to OpenAI Chat Completions JSON.
 pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -> Result<Value> {
-    if let Some(error) = response.get("error") {
+    if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
         return Err(anyhow!("Responses provider returned an error: {error}"));
     }
     let output = response
@@ -237,8 +269,12 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
         .and_then(Value::as_str);
     let finish_reason = if !tool_calls.is_empty() {
         "tool_calls"
-    } else if incomplete_reason == Some("max_output_tokens") {
-        "length"
+    } else if let Some(reason) = incomplete_reason {
+        match reason {
+            "max_output_tokens" => "length",
+            "content_filter" => "content_filter",
+            _ => "stop",
+        }
     } else {
         "stop"
     };
@@ -255,7 +291,14 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
     Ok(json!({
         "id": response.get("id").and_then(Value::as_str).unwrap_or("resp_unknown"),
         "object": "chat.completion",
-        "created": response.get("created_at").and_then(Value::as_i64).unwrap_or_default(),
+        "created": response
+            .get("created_at")
+            .and_then(|created| {
+                created
+                    .as_i64()
+                    .or_else(|| created.as_str().and_then(|value| value.parse().ok()))
+            })
+            .unwrap_or_default(),
         "model": response.get("model").and_then(Value::as_str).unwrap_or(model),
         "choices": [{
             "index": 0,
@@ -298,12 +341,58 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_system_role_and_supported_tools() {
+        let request = json!({
+            "messages": [
+                {"role": "system", "content": "Be concise"},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {}},
+                    {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}
+                ]},
+                {"role": "assistant", "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "flat", "arguments": null}
+                }]}
+            ],
+            "tools": [
+                {"type": "function", "name": "flat", "parameters": {"type": "object"}},
+                {"type": "function", "function": {"name": "nested", "parameters": {}}},
+                {"type": "code_interpreter"}
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "nested"}}
+        });
+
+        let converted = openai_chat_request_to_responses(&request, "muse").unwrap();
+
+        assert_eq!(converted["input"][0]["role"], "developer");
+        assert_eq!(
+            converted["input"][1]["content"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            converted["input"][1]["content"][0]["image_url"],
+            "https://example.test/a.png"
+        );
+        assert_eq!(converted["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(converted["tools"][0]["name"], "flat");
+        assert_eq!(converted["tools"][1]["name"], "nested");
+        assert_eq!(
+            converted["tool_choice"],
+            json!({"type": "function", "name": "nested"})
+        );
+        assert_eq!(converted["input"][2]["arguments"], "{}");
+    }
+
+    #[test]
     fn converts_responses_text_and_usage_to_chat_shape() {
         let response = json!({
             "id": "resp_meta_1",
             "object": "response",
             "created_at": 42,
             "status": "completed",
+            "error": null,
+            "incomplete_details": null,
             "model": "muse-spark-1.1",
             "output": [{
                 "type": "message",
@@ -331,9 +420,10 @@ mod tests {
             "model": "muse-spark-1.1",
             "output": [{
                 "type": "function_call",
-                "call_id": "call_7",
+                "call_id": null,
+                "id": "call_7",
                 "name": "run_check",
-                "arguments": "{\"target\":\"tests\"}"
+                "arguments": null
             }]
         });
 
@@ -347,6 +437,33 @@ mod tests {
         assert_eq!(
             converted["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
             "run_check"
+        );
+        assert_eq!(
+            converted["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{}"
+        );
+    }
+
+    #[test]
+    fn preserves_refusal_text_and_content_filter_reason() {
+        let response = json!({
+            "id": "resp_refusal",
+            "created_at": "42",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+            "output": [{
+                "type": "message",
+                "content": [{"type": "refusal", "refusal": "I cannot help with that."}]
+            }]
+        });
+
+        let converted = responses_response_to_openai_chat(&response, "muse").unwrap();
+
+        assert_eq!(converted["created"], 42);
+        assert_eq!(converted["choices"][0]["finish_reason"], "content_filter");
+        assert_eq!(
+            converted["choices"][0]["message"]["content"],
+            "I cannot help with that."
         );
     }
 }

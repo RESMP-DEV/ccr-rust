@@ -340,7 +340,7 @@ pub(super) fn create_stream_stop_events(
         index: None,
         content_block: None,
         delta: Some(serde_json::json!({"stop_reason": stop_reason})),
-        usage: Some(usage.clone()),
+        usage: Some(usage),
         stop_reason: None,
     });
 
@@ -350,7 +350,7 @@ pub(super) fn create_stream_stop_events(
         index: None,
         content_block: None,
         delta: None,
-        usage: Some(usage),
+        usage: None,
         stop_reason: None,
     });
 

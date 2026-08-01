@@ -288,6 +288,12 @@ async fn test_codex_stream_reassembles_fragmented_openai_sse_frames() {
         "Anthropic lifecycle frames must not leak to OpenAI clients"
     );
     let terminal = json_events.last().expect("terminal OpenAI usage chunk");
+    assert!(
+        json_events[..json_events.len() - 1]
+            .iter()
+            .all(|event| event.get("usage").is_none()),
+        "usage must appear only on the terminal OpenAI chunk"
+    );
     assert_eq!(terminal["choices"].as_array().unwrap().len(), 0);
     assert_eq!(terminal["usage"]["prompt_tokens"], 12);
     assert_eq!(terminal["usage"]["completion_tokens"], 4);

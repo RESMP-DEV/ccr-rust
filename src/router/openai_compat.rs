@@ -236,6 +236,8 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         let mut decoder = SseFrameDecoder::new();
         let transformer = AnthropicToOpenAiResponseTransformer;
         let mut sent_done = false;
+        let mut prompt_tokens = None;
+        let mut completion_tokens = None;
 
         loop {
             tokio::select! {
@@ -271,7 +273,46 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                     }
                                 }
 
-                                let transformed: serde_json::Value = match transformer.transform_response(event_json) {
+                                let event_kind = event_json
+                                    .get("type")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_string);
+                                match event_kind.as_deref() {
+                                    Some("message_start") => {
+                                        let usage = &event_json["message"]["usage"];
+                                        prompt_tokens = usage
+                                            .get("input_tokens")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .or(prompt_tokens);
+                                        completion_tokens = usage
+                                            .get("output_tokens")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .or(completion_tokens);
+                                    }
+                                    Some("message_delta") => {
+                                        prompt_tokens = event_json["usage"]
+                                            .get("input_tokens")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .or(prompt_tokens);
+                                        completion_tokens = event_json["usage"]
+                                            .get("output_tokens")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .or(completion_tokens);
+                                    }
+                                    Some("message_stop") => {
+                                        prompt_tokens = event_json["usage"]
+                                            .get("input_tokens")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .or(prompt_tokens);
+                                        completion_tokens = event_json["usage"]
+                                            .get("output_tokens")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .or(completion_tokens);
+                                    }
+                                    _ => {}
+                                }
+
+                                let mut transformed: serde_json::Value = match transformer.transform_response(event_json) {
                                     Ok(value) => value,
                                     Err(_) => {
                                         let msg = format!("data: {}\n\n", data);
@@ -279,6 +320,18 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                         continue;
                                     }
                                 };
+
+                                if event_kind.as_deref() == Some("message_stop") {
+                                    if let (Some(prompt), Some(completion)) =
+                                        (prompt_tokens, completion_tokens)
+                                    {
+                                        transformed["usage"] = serde_json::json!({
+                                            "prompt_tokens": prompt,
+                                            "completion_tokens": completion,
+                                            "total_tokens": prompt.saturating_add(completion)
+                                        });
+                                    }
+                                }
 
                                 let msg = format!("data: {}\n\n", serde_json::to_string(&transformed).unwrap_or_default());
                                 if tx.send(Ok(Bytes::from(msg))).await.is_err() {

@@ -25,6 +25,11 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
 
     Router::new()
         .route("/v1/messages", post(ccr_rust::router::handle_messages))
+        .route(
+            "/v1/chat/completions",
+            post(ccr_rust::router::handle_chat_completions),
+        )
+        .route("/v1/responses", post(ccr_rust::router::handle_responses))
         .with_state(state)
 }
 
@@ -47,6 +52,8 @@ async fn meta_muse_uses_responses_endpoint_and_returns_anthropic_json() {
             "object": "response",
             "created_at": 42,
             "status": "completed",
+            "error": null,
+            "incomplete_details": null,
             "model": "muse-spark-1.1",
             "output": [{
                 "type": "message",
@@ -206,4 +213,95 @@ async fn meta_muse_wraps_completed_response_for_streaming_clients() {
     let requests = upstream.received_requests().await.unwrap();
     let upstream_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(upstream_body["stream"], false);
+}
+
+#[tokio::test]
+async fn meta_muse_preserves_streaming_for_openai_frontends() {
+    if !localhost_bind_available() {
+        eprintln!("Skipping test: localhost bind unavailable");
+        return;
+    }
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "resp_meta_openai_stream",
+            "object": "response",
+            "created_at": 44,
+            "status": "completed",
+            "error": null,
+            "incomplete_details": null,
+            "model": "muse-spark-1.1",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "streamed through adapters"}]
+            }],
+            "usage": {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12}
+        })))
+        .expect(2)
+        .mount(&upstream)
+        .await;
+
+    let config_json = json!({
+        "Providers": [{
+            "name": "meta-muse",
+            "api_base_url": upstream.uri(),
+            "api_key": "meta-test-key",
+            "models": ["muse-spark-1.1"],
+            "protocol": "responses",
+            "tier_name": "ccr-meta-muse"
+        }],
+        "Router": {
+            "default": "meta-muse,muse-spark-1.1",
+            "tiers": ["meta-muse,muse-spark-1.1"]
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    for (uri, payload) in [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "auto",
+                "messages": [{"role": "user", "content": "stream chat"}],
+                "stream": true
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({"model": "auto", "input": "stream responses", "stream": true}),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        assert_eq!(response.headers()["x-ccr-tier"], "ccr-meta-muse");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8(body.to_vec())
+            .unwrap()
+            .contains("streamed through adapters"));
+    }
+
+    let requests = upstream.received_requests().await.unwrap();
+    assert!(requests.iter().all(|request| {
+        serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["stream"] == false
+    }));
 }
