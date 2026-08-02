@@ -6,14 +6,15 @@
 
 use axum::{
     body::{to_bytes, Body},
-    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use tracing::error;
 
-use super::{openai_compat::handle_chat_completions, AppState};
+mod handler;
+
+pub use handler::handle_responses;
 
 fn parse_sse_frames(payload: &str) -> Vec<(Option<String>, String)> {
     let mut frames = Vec::new();
@@ -144,6 +145,17 @@ fn map_openai_usage_to_responses_usage(usage: &serde_json::Value) -> serde_json:
     })
 }
 
+fn responses_reasoning_item(response_id: &str, reasoning: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("rs_{}", response_id),
+        "type": "reasoning",
+        "summary": [{
+            "type": "summary_text",
+            "text": reasoning
+        }]
+    })
+}
+
 fn openai_chat_completion_to_responses_json(openai: &serde_json::Value) -> serde_json::Value {
     let response_id = openai
         .get("id")
@@ -193,6 +205,14 @@ fn openai_chat_completion_to_responses_json(openai: &serde_json::Value) -> serde
                     }
                     _ => {}
                 }
+            }
+
+            if let Some(reasoning) = message
+                .get("reasoning_content")
+                .and_then(|v| v.as_str())
+                .filter(|reasoning| !reasoning.is_empty())
+            {
+                output_items.push(responses_reasoning_item(response_id, reasoning));
             }
 
             output_items.push(serde_json::json!({
@@ -643,6 +663,25 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
     Response::from_parts(parts, Body::from(output))
 }
 
+fn add_reasoning_output_item(output: &mut String, response_id: &str, added: &mut bool) {
+    if *added {
+        return;
+    }
+
+    let event = serde_json::json!({
+        "type": "response.output_item.added",
+        "item": {
+            "id": format!("rs_{}", response_id),
+            "type": "reasoning",
+            "summary": []
+        }
+    });
+    output.push_str("event: response.output_item.added\ndata: ");
+    output.push_str(&event.to_string());
+    output.push_str("\n\n");
+    *added = true;
+}
+
 fn convert_sse_payload_to_responses(payload: &str) -> String {
     #[derive(Default)]
     struct ToolAccum {
@@ -660,6 +699,7 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         .as_secs() as i64;
     let mut model = "unknown".to_string();
     let mut created_sent = false;
+    let mut reasoning_item_added = false;
     let mut message_item_added = false;
     let mut message_text = String::new();
     let mut reasoning_text = String::new();
@@ -739,27 +779,6 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         if let Some(choice) = choice {
             let delta = choice.get("delta").cloned().unwrap_or_default();
 
-            if delta
-                .get("role")
-                .and_then(|v| v.as_str())
-                .is_some_and(|r| r == "assistant")
-                && !message_item_added
-            {
-                let added = serde_json::json!({
-                    "type": "response.output_item.added",
-                    "item": {
-                        "id": format!("msg_{}", response_id),
-                        "type": "message",
-                        "role": "assistant",
-                        "content": []
-                    }
-                });
-                output.push_str("event: response.output_item.added\ndata: ");
-                output.push_str(&added.to_string());
-                output.push_str("\n\n");
-                message_item_added = true;
-            }
-
             if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
                 if !message_item_added {
                     let added = serde_json::json!({
@@ -787,7 +806,12 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
                 output.push_str("\n\n");
             }
 
-            if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+            if let Some(reasoning) = delta
+                .get("reasoning_content")
+                .and_then(|v| v.as_str())
+                .filter(|reasoning| !reasoning.is_empty())
+            {
+                add_reasoning_output_item(&mut output, &response_id, &mut reasoning_item_added);
                 reasoning_text.push_str(reasoning);
                 let delta_event = serde_json::json!({
                     "type": "response.reasoning_text.delta",
@@ -859,25 +883,24 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         });
         match event_type.as_deref() {
             Some("content_block_delta") => {
-                if !message_item_added {
-                    let added = serde_json::json!({
-                        "type": "response.output_item.added",
-                        "item": {
-                            "id": format!("msg_{}", response_id),
-                            "type": "message",
-                            "role": "assistant",
-                            "content": []
-                        }
-                    });
-                    output.push_str("event: response.output_item.added\ndata: ");
-                    output.push_str(&added.to_string());
-                    output.push_str("\n\n");
-                    message_item_added = true;
-                }
-
                 if let Some(delta) = chunk.get("delta") {
                     if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
                         if !text.is_empty() {
+                            if !message_item_added {
+                                let added = serde_json::json!({
+                                    "type": "response.output_item.added",
+                                    "item": {
+                                        "id": format!("msg_{}", response_id),
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": []
+                                    }
+                                });
+                                output.push_str("event: response.output_item.added\ndata: ");
+                                output.push_str(&added.to_string());
+                                output.push_str("\n\n");
+                                message_item_added = true;
+                            }
                             message_text.push_str(text);
                             let delta_event = serde_json::json!({
                                 "type": "response.output_text.delta",
@@ -890,6 +913,11 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
                     }
                     if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
                         if !thinking.is_empty() {
+                            add_reasoning_output_item(
+                                &mut output,
+                                &response_id,
+                                &mut reasoning_item_added,
+                            );
                             reasoning_text.push_str(thinking);
                             let delta_event = serde_json::json!({
                                 "type": "response.reasoning_text.delta",
@@ -919,14 +947,20 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
 
     let mut output_items = Vec::new();
 
+    if !reasoning_text.is_empty() {
+        let reasoning_item = responses_reasoning_item(&response_id, &reasoning_text);
+        output_items.push(reasoning_item.clone());
+        let done = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": reasoning_item
+        });
+        output.push_str("event: response.output_item.done\ndata: ");
+        output.push_str(&done.to_string());
+        output.push_str("\n\n");
+    }
+
     if message_item_added {
         let mut message_content = Vec::new();
-        if !reasoning_text.is_empty() {
-            message_content.push(serde_json::json!({
-                "type": "output_text",
-                "text": reasoning_text
-            }));
-        }
         if !message_text.is_empty() {
             message_content.push(serde_json::json!({
                 "type": "output_text",
@@ -994,85 +1028,4 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
     output.push_str("\n\n");
 
     output
-}
-
-/// Handle OpenAI Responses API requests.
-pub async fn handle_responses(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Body,
-) -> Response {
-    let body_bytes = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": format!("Failed to read request body: {}", err)
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let decoded = match decode_request_body(&body_bytes, &headers) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": err
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let request_body = match parse_json_payload(&decoded) {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": err
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let stream_requested = request_body
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-
-    let openai_chat_request = match responses_request_to_openai_chat_request(&request_body) {
-        Ok(request) => request,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": err
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let openai_response =
-        handle_chat_completions(State(state), headers, Json(openai_chat_request)).await;
-
-    if stream_requested {
-        convert_openai_stream_response_to_responses(openai_response).await
-    } else {
-        convert_openai_json_response_to_responses(openai_response).await
-    }
 }
