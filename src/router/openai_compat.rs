@@ -106,6 +106,12 @@ pub(super) fn anthropic_response_to_internal(
     if let Some(incomplete_details) = response.incomplete_details {
         extra_data.insert("incomplete_details".to_string(), incomplete_details);
     }
+    if let Some(responses_output) = response.responses_output {
+        extra_data.insert(
+            super::RESPONSES_OUTPUT_PASSTHROUGH_KEY.to_string(),
+            responses_output,
+        );
+    }
 
     crate::frontend::InternalResponse {
         id: response.id,
@@ -469,14 +475,27 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
 ///
 /// Converts to Anthropic format internally, processes the request,
 /// then converts the response back to OpenAI format.
-pub async fn handle_chat_completions(
+async fn handle_chat_completions_inner(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request_body): Json<serde_json::Value>,
+    Json(mut request_body): Json<serde_json::Value>,
+    native_responses_request: Option<serde_json::Value>,
 ) -> Response {
+    if let Some(object) = request_body.as_object_mut() {
+        object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
+        object.remove(super::RESPONSES_OUTPUT_PASSTHROUGH_KEY);
+    }
+
     // Preserve the original OpenAI-formatted body for potential passthrough
     // to OpenAI-compatible backends (avoids OpenAI→Anthropic→OpenAI round-trip).
-    let passthrough_body = request_body.clone();
+    let mut passthrough_body = request_body.clone();
+    if let Some(mut native_responses_request) = native_responses_request {
+        if let Some(object) = native_responses_request.as_object_mut() {
+            object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
+            object.remove(super::RESPONSES_OUTPUT_PASSTHROUGH_KEY);
+        }
+        passthrough_body[super::RESPONSES_REQUEST_PASSTHROUGH_KEY] = native_responses_request;
+    }
 
     let frontend = CodexFrontend::new();
     let internal_request = match frontend.parse_request(request_body) {
@@ -500,6 +519,23 @@ pub async fn handle_chat_completions(
     } else {
         convert_anthropic_json_response_to_openai(response).await
     }
+}
+
+pub async fn handle_chat_completions(
+    state: State<AppState>,
+    headers: HeaderMap,
+    request: Json<serde_json::Value>,
+) -> Response {
+    handle_chat_completions_inner(state, headers, request, None).await
+}
+
+pub(super) async fn handle_responses_chat_completions(
+    state: State<AppState>,
+    headers: HeaderMap,
+    request: Json<serde_json::Value>,
+    native_responses_request: serde_json::Value,
+) -> Response {
+    handle_chat_completions_inner(state, headers, request, Some(native_responses_request)).await
 }
 
 #[cfg(test)]

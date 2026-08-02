@@ -242,92 +242,99 @@ fn openai_chat_completion_to_responses_json(openai: &serde_json::Value) -> serde
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
+    let preserved_output = openai
+        .get(super::RESPONSES_OUTPUT_PASSTHROUGH_KEY)
+        .and_then(|output| output.as_array())
+        .cloned();
     let mut output_items = Vec::new();
-    if let Some(choice) = openai
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-    {
-        if let Some(message) = choice.get("message") {
-            let mut content_blocks = Vec::new();
-            if let Some(content) = message.get("content") {
-                match content {
-                    serde_json::Value::String(text) if !text.is_empty() => {
-                        content_blocks.push(serde_json::json!({
-                            "type": "output_text",
-                            "text": text
-                        }));
-                    }
-                    serde_json::Value::Array(items) => {
-                        for item in items {
-                            if item.get("type").and_then(|v| v.as_str()) == Some("text") {
-                                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                                    content_blocks.push(serde_json::json!({
-                                        "type": "output_text",
-                                        "text": text
-                                    }));
+    if preserved_output.is_none() {
+        if let Some(choice) = openai
+            .get("choices")
+            .and_then(|choices| choices.as_array())
+            .and_then(|choices| choices.first())
+        {
+            if let Some(message) = choice.get("message") {
+                let mut content_blocks = Vec::new();
+                if let Some(content) = message.get("content") {
+                    match content {
+                        serde_json::Value::String(text) if !text.is_empty() => {
+                            content_blocks.push(serde_json::json!({
+                                "type": "output_text",
+                                "text": text
+                            }));
+                        }
+                        serde_json::Value::Array(items) => {
+                            for item in items {
+                                if item.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                    if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                        content_blocks.push(serde_json::json!({
+                                            "type": "output_text",
+                                            "text": text
+                                        }));
+                                    }
                                 }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
 
-            if let Some(reasoning) = message
-                .get("reasoning_content")
-                .and_then(|v| v.as_str())
-                .filter(|reasoning| !reasoning.is_empty())
-            {
-                output_items.push(responses_reasoning_item(response_id, reasoning));
-            }
+                if let Some(reasoning) = message
+                    .get("reasoning_content")
+                    .and_then(|v| v.as_str())
+                    .filter(|reasoning| !reasoning.is_empty())
+                {
+                    output_items.push(responses_reasoning_item(response_id, reasoning));
+                }
 
-            if let Some(refusal) = message
-                .get("refusal")
-                .and_then(|v| v.as_str())
-                .filter(|refusal| !refusal.is_empty())
-            {
-                content_blocks.push(serde_json::json!({
-                    "type": "refusal",
-                    "refusal": refusal
-                }));
-            }
-
-            output_items.push(serde_json::json!({
-                "id": format!("msg_{}", response_id),
-                "type": "message",
-                "role": "assistant",
-                "content": content_blocks
-            }));
-
-            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-                for tool_call in tool_calls {
-                    let call_id = tool_call
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("call_unknown");
-                    let name = tool_call
-                        .get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("tool");
-                    let arguments = tool_call
-                        .get("function")
-                        .and_then(|f| f.get("arguments"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("{}");
-
-                    output_items.push(serde_json::json!({
-                        "id": call_id,
-                        "type": "function_call",
-                        "call_id": call_id,
-                        "name": name,
-                        "arguments": arguments
+                if let Some(refusal) = message
+                    .get("refusal")
+                    .and_then(|v| v.as_str())
+                    .filter(|refusal| !refusal.is_empty())
+                {
+                    content_blocks.push(serde_json::json!({
+                        "type": "refusal",
+                        "refusal": refusal
                     }));
+                }
+
+                output_items.push(serde_json::json!({
+                    "id": format!("msg_{}", response_id),
+                    "type": "message",
+                    "role": "assistant",
+                    "content": content_blocks
+                }));
+
+                if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                    for tool_call in tool_calls {
+                        let call_id = tool_call
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("call_unknown");
+                        let name = tool_call
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool");
+                        let arguments = tool_call
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{}");
+
+                        output_items.push(serde_json::json!({
+                            "id": call_id,
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": arguments
+                        }));
+                    }
                 }
             }
         }
     }
+    let output_items = preserved_output.unwrap_or(output_items);
 
     let usage = openai
         .get("usage")
@@ -346,7 +353,10 @@ fn openai_chat_completion_to_responses_json(openai: &serde_json::Value) -> serde
         "output": output_items,
         "usage": usage
     });
-    if let Some(incomplete_details) = openai.get("incomplete_details") {
+    if let Some(incomplete_details) = openai
+        .get("incomplete_details")
+        .filter(|value| !value.is_null())
+    {
         response["incomplete_details"] = incomplete_details.clone();
     }
     response
@@ -438,6 +448,66 @@ pub(super) fn responses_request_to_openai_chat_request(
         Some(input) if input.is_string() || input.is_array() => {}
         Some(_) => {
             return Err("responses request 'input' must be text or an array".to_string());
+        }
+    }
+
+    if let Some(tools) = body.get("tools") {
+        let tools = tools
+            .as_array()
+            .ok_or_else(|| "responses request 'tools' must be an array".to_string())?;
+        for tool in tools {
+            let tool_type = tool
+                .as_object()
+                .and_then(|object| object.get("type"))
+                .and_then(|value| value.as_str())
+                .filter(|tool_type| !tool_type.is_empty())
+                .ok_or_else(|| {
+                    "responses request tool entries require a non-empty string 'type'".to_string()
+                })?;
+            if tool_type == "function"
+                && tool
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .filter(|name| !name.is_empty())
+                    .is_none()
+            {
+                return Err(
+                    "responses function tools require a non-empty string 'name'".to_string()
+                );
+            }
+        }
+    }
+    if let Some(tool_choice) = body.get("tool_choice").filter(|value| !value.is_null()) {
+        match tool_choice {
+            serde_json::Value::String(choice) if !choice.is_empty() => {}
+            serde_json::Value::Object(object) => {
+                let choice_type = object
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .filter(|choice_type| !choice_type.is_empty())
+                    .ok_or_else(|| {
+                        "responses request 'tool_choice' must be a non-empty string or typed object"
+                            .to_string()
+                    })?;
+                if choice_type == "function"
+                    && object
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .filter(|name| !name.is_empty())
+                        .is_none()
+                {
+                    return Err(
+                        "responses function tool choices require a non-empty string 'name'"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => {
+                return Err(
+                    "responses request 'tool_choice' must be a non-empty string or typed object"
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -566,7 +636,11 @@ pub(super) fn responses_request_to_openai_chat_request(
     if let Some(tools) = body.get("tools").cloned() {
         request["tools"] = tools;
     }
-    if let Some(tool_choice) = body.get("tool_choice").cloned() {
+    if let Some(tool_choice) = body
+        .get("tool_choice")
+        .filter(|value| !value.is_null())
+        .cloned()
+    {
         request["tool_choice"] = tool_choice;
     }
     if let Some(temperature) = body.get("temperature").cloned() {
@@ -584,17 +658,17 @@ pub(super) fn responses_request_to_openai_chat_request(
         request["max_completion_tokens"] = max_tokens;
     }
     if let Some(reasoning) = body.get("reasoning").filter(|value| !value.is_null()) {
-        let effort = reasoning
-            .get("effort")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "responses request 'reasoning.effort' must be a string".to_string())?;
+        let effort = match reasoning.get("effort").filter(|value| !value.is_null()) {
+            Some(effort) => effort.as_str().ok_or_else(|| {
+                "responses request 'reasoning.effort' must be a string".to_string()
+            })?,
+            None => "medium",
+        };
         request["reasoning_effort"] = serde_json::Value::String(effort.to_string());
-        request[super::RESPONSES_REASONING_PASSTHROUGH_KEY] = reasoning.clone();
     }
     if let Some(previous_response_id) = body.get("previous_response_id").cloned() {
         request["previous_response_id"] = previous_response_id;
     }
-
     Ok(request)
 }
 
@@ -807,6 +881,7 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
     let mut reasoning_text = String::new();
     let mut response_status = "completed".to_string();
     let mut incomplete_details = None;
+    let mut preserved_output = None;
     let mut tools: std::collections::BTreeMap<usize, ToolAccum> = std::collections::BTreeMap::new();
     let mut usage = map_openai_usage_to_responses_usage(&serde_json::json!({}));
 
@@ -840,6 +915,12 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
             .filter(|value| !value.is_null())
         {
             incomplete_details = Some(details.clone());
+        }
+        if let Some(output) = chunk
+            .get(super::RESPONSES_OUTPUT_PASSTHROUGH_KEY)
+            .and_then(|value| value.as_array())
+        {
+            preserved_output = Some(output.clone());
         }
 
         // Anthropic message_start metadata fallback
@@ -1160,6 +1241,10 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         output.push_str("event: response.output_item.done\ndata: ");
         output.push_str(&done.to_string());
         output.push_str("\n\n");
+    }
+
+    if let Some(preserved_output) = preserved_output {
+        output_items = preserved_output;
     }
 
     let terminal_type = match response_status.as_str() {

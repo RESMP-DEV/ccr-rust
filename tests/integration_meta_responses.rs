@@ -252,9 +252,24 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                 "type": "reasoning",
                 "summary": [{"type": "summary_text", "text": "Reasoning survives adapters"}]
             }, {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "adapter citations"}
+            }, {
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": "streamed through adapters"}]
+                "content": [{
+                    "type": "output_text",
+                    "text": "streamed through adapters",
+                    "annotations": [{
+                        "type": "url_citation",
+                        "start_index": 0,
+                        "end_index": 8,
+                        "title": "Adapter source",
+                        "url": "https://example.test/source"
+                    }]
+                }]
             }],
             "usage": {
                 "input_tokens": 8,
@@ -295,17 +310,44 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             json!({
                 "model": "auto",
                 "messages": [{"role": "user", "content": "stream chat"}],
-                "stream": true
+                "stream": true,
+                "__ccr_responses_request": {
+                    "model": "spoofed",
+                    "input": "do not forward this"
+                }
             }),
         ),
         (
             "/v1/responses",
             json!({
                 "model": "auto",
-                "input": "stream responses",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "stream responses"
+                    }, {
+                        "type": "input_file",
+                        "file_id": "file_123"
+                    }]
+                }],
                 "stream": true,
                 "tools": [{"type": "web_search", "search_context_size": "low"}],
-                "tool_choice": {"type": "web_search"}
+                "tool_choice": {"type": "web_search"},
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"answer": {"type": "string"}},
+                            "required": ["answer"],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                }
             }),
         ),
     ] {
@@ -339,7 +381,11 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             let output = completed["response"]["output"]
                 .as_array()
                 .expect("completed Responses output should be an array");
-            assert_eq!(output.len(), 2, "reasoning and message items are required");
+            assert_eq!(
+                output.len(),
+                3,
+                "reasoning, native tool, and message items are required"
+            );
             assert_eq!(output[0]["type"], "reasoning");
             assert_eq!(
                 output[0]["summary"][0],
@@ -348,12 +394,22 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                     "text": "Reasoning survives adapters"
                 })
             );
-            assert_eq!(output[1]["type"], "message");
+            assert_eq!(output[1]["type"], "web_search_call");
+            assert_eq!(output[1]["id"], "ws_1");
+            assert_eq!(output[1]["action"]["query"], "adapter citations");
+            assert_eq!(output[2]["type"], "message");
             assert_eq!(
-                output[1]["content"],
+                output[2]["content"],
                 json!([{
                     "type": "output_text",
-                    "text": "streamed through adapters"
+                    "text": "streamed through adapters",
+                    "annotations": [{
+                        "type": "url_citation",
+                        "start_index": 0,
+                        "end_index": 8,
+                        "title": "Adapter source",
+                        "url": "https://example.test/source"
+                    }]
                 }])
             );
             assert_eq!(
@@ -407,7 +463,8 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                     serde_json::to_vec(&json!({
                         "model": "auto",
                         "input": "non-stream responses",
-                        "stream": false
+                        "stream": false,
+                        "tool_choice": null
                     }))
                     .unwrap(),
                 ))
@@ -424,12 +481,21 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
         response_json["output"][0]["summary"][0]["text"],
         "Reasoning survives adapters"
     );
-    assert_eq!(response_json["output"][1]["type"], "message");
+    assert_eq!(response_json["output"][1]["type"], "web_search_call");
+    assert_eq!(response_json["output"][1]["id"], "ws_1");
+    assert_eq!(response_json["output"][2]["type"], "message");
     assert_eq!(
-        response_json["output"][1]["content"],
+        response_json["output"][2]["content"],
         json!([{
             "type": "output_text",
-            "text": "streamed through adapters"
+            "text": "streamed through adapters",
+            "annotations": [{
+                "type": "url_citation",
+                "start_index": 0,
+                "end_index": 8,
+                "title": "Adapter source",
+                "url": "https://example.test/source"
+            }]
         }])
     );
     assert_eq!(
@@ -443,18 +509,29 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
 
     let requests = upstream.received_requests().await.unwrap();
     assert!(requests.iter().all(|request| {
-        serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["stream"] == false
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        body["stream"] == false
+            && body.get("__ccr_responses_request").is_none()
+            && body.get("__ccr_responses_output").is_none()
+            && body["model"] != "spoofed"
+            && !body
+                .get("tool_choice")
+                .is_some_and(|choice| choice.is_null())
     }));
     assert!(requests.iter().any(|request| {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
         body["tools"] == json!([{"type": "web_search", "search_context_size": "low"}])
             && body["tool_choice"] == json!({"type": "web_search"})
+            && body["text"]["format"]["type"] == "json_schema"
+            && body["text"]["format"]["name"] == "answer"
             && body["input"].as_array().is_some_and(|items| {
                 items.iter().any(|item| {
                     item["role"] == "user"
                         && item["content"].as_array().is_some_and(|content| {
                             content.iter().any(|part| {
                                 part["type"] == "input_text" && part["text"] == "stream responses"
+                            }) && content.iter().any(|part| {
+                                part["type"] == "input_file" && part["file_id"] == "file_123"
                             })
                         })
                 })

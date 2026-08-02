@@ -610,6 +610,10 @@ pub(super) async fn try_request_via_openai_protocol(
     // frontend) and no transformers need to modify it, reuse the original body
     // directly with only a model-name swap.  This eliminates the wasteful
     // OpenAI → Anthropic → deserialize → translate → OpenAI round-trip.
+    let preserve_responses_output = openai_passthrough_body
+        .as_ref()
+        .and_then(|body| body.get(super::RESPONSES_REQUEST_PASSTHROUGH_KEY))
+        .is_some();
     let (mut openai_request_value, stream_flag) = if let Some(mut body) = openai_passthrough_body {
         // Swap model name to the backend's expected value.
         if let Some(obj) = body.as_object_mut() {
@@ -641,7 +645,7 @@ pub(super) async fn try_request_via_openai_protocol(
     };
     if provider.protocol != ProviderProtocol::Responses {
         if let Some(object) = openai_request_value.as_object_mut() {
-            object.remove(super::RESPONSES_REASONING_PASSTHROUGH_KEY);
+            object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
         }
     }
     let (request_value, stream_flag) = if provider.protocol == ProviderProtocol::Responses {
@@ -837,8 +841,15 @@ pub(super) async fn try_request_via_openai_protocol(
             serde_json::from_slice::<serde_json::Value>(&body)
                 .map_err(|error| TryRequestError::Other(error.into()))
                 .and_then(|response_value| {
-                    responses_response_to_openai_chat(&response_value, model_name)
-                        .map_err(TryRequestError::Other)
+                    let mut converted =
+                        responses_response_to_openai_chat(&response_value, model_name)
+                            .map_err(TryRequestError::Other)?;
+                    if preserve_responses_output {
+                        if let Some(output) = response_value.get("output") {
+                            converted[super::RESPONSES_OUTPUT_PASSTHROUGH_KEY] = output.clone();
+                        }
+                    }
+                    Ok(converted)
                 })
                 .and_then(|openai_value| {
                     serde_json::to_vec(&openai_value)
@@ -905,11 +916,14 @@ pub(super) async fn try_request_via_openai_protocol(
             // Translate to Anthropic format.
             let mut anthropic_resp =
                 translate_response_openai_to_anthropic(openai_resp, model_name);
-            if render_refusal_as_anthropic_text && anthropic_resp.content.is_empty() {
-                if let Some(refusal) = anthropic_resp.refusal.take() {
-                    anthropic_resp
-                        .content
-                        .push(AnthropicContentBlock::Text { text: refusal });
+            if render_refusal_as_anthropic_text {
+                let refusal = anthropic_resp.refusal.take();
+                if anthropic_resp.content.is_empty() {
+                    if let Some(refusal) = refusal {
+                        anthropic_resp
+                            .content
+                            .push(AnthropicContentBlock::Text { text: refusal });
+                    }
                 }
             }
 
