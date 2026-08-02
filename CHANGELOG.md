@@ -53,7 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indices and empty initial items before replayed deltas, queued streams retain
   their non-terminal event type, and explicit null continuation IDs are omitted.
   The native-envelope error bypass is restricted to actual Responses providers,
-  so Chat-protocol HTTP-200 error bodies still trigger tier fallback.
+  so Chat-protocol HTTP-200 error bodies still trigger tier fallback. Replayed
+  pseudo-stream deltas carry their preserved item IDs and output indices, and
+  function-call arguments stream after an empty initial item.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 
