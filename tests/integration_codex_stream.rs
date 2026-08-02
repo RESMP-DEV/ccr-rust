@@ -347,11 +347,16 @@ async fn test_anthropic_stream_emits_first_assistant_delta_before_completion() {
     assert!(!first_text.contains("[DONE]"));
 
     release_tail.notify_one();
-    let mut rest = String::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.unwrap();
-        rest.push_str(std::str::from_utf8(&chunk).unwrap());
-    }
+    let rest = timeout(Duration::from_secs(5), async {
+        let mut rest = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            rest.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+        rest
+    })
+    .await
+    .expect("stream should complete after the upstream tail is released");
     let full_stream = format!("{first_text}{rest}");
 
     let assistant_index = full_stream
