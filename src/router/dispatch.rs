@@ -869,11 +869,17 @@ pub(super) async fn try_request_via_openai_protocol(
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
             // Record usage from the response.
             if let Some(ref usage) = openai_resp.usage {
+                let cache_read_tokens = usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.get("cached_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default();
                 record_usage(
                     tier_name,
                     usage.prompt_tokens,
                     usage.completion_tokens,
-                    0, // OpenAI doesn't have cache fields in the same way
+                    cache_read_tokens,
                     0,
                 );
                 verify_token_usage(tier_name, local_estimate, usage.prompt_tokens);

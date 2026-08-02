@@ -402,6 +402,11 @@ impl Frontend for CodexFrontend {
                         message["reasoning_content"] = Value::String(rc.to_string());
                     }
                 }
+                if let Some(refusal) = obj.get("refusal").and_then(|v| v.as_str()) {
+                    if !refusal.is_empty() {
+                        message["refusal"] = Value::String(refusal.to_string());
+                    }
+                }
             }
         }
 

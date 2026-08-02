@@ -41,25 +41,29 @@ fn response_created_at(created_at: Option<&Value>) -> i64 {
         .unwrap_or_default()
 }
 
-fn response_content_blocks(content: &Value, role: &str) -> Vec<Value> {
+fn response_content_blocks(content: &Value, role: &str) -> Result<Vec<Value>> {
     let text_type = if role == "assistant" {
         "output_text"
     } else {
         "input_text"
     };
     match content {
-        Value::String(text) if text.is_empty() => Vec::new(),
-        Value::String(text) => vec![json!({"type": text_type, "text": text})],
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| {
+        Value::String(text) if text.is_empty() => Ok(Vec::new()),
+        Value::String(text) => Ok(vec![json!({"type": text_type, "text": text})]),
+        Value::Array(items) => {
+            let mut blocks = Vec::new();
+            for item in items {
                 let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
-                match item_type {
-                    "text" | "input_text" | "output_text" => item
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .filter(|text| !text.is_empty())
-                        .map(|text| json!({"type": text_type, "text": text})),
+                let block = match item_type {
+                    "text" | "input_text" | "output_text" => {
+                        let text = item.get("text").ok_or_else(|| {
+                            anyhow!("Responses text content block is missing 'text'")
+                        })?;
+                        let text = text.as_str().ok_or_else(|| {
+                            anyhow!("Responses text content block requires string 'text'")
+                        })?;
+                        (!text.is_empty()).then(|| json!({"type": text_type, "text": text}))
+                    }
                     "image_url" => item
                         .get("image_url")
                         .and_then(|image| {
@@ -70,11 +74,15 @@ fn response_content_blocks(content: &Value, role: &str) -> Vec<Value> {
                         .map(|image_url| json!({"type": "input_image", "image_url": image_url})),
                     "input_image" => Some(item.clone()),
                     _ => None,
+                };
+                if let Some(block) = block {
+                    blocks.push(block);
                 }
-            })
-            .collect(),
-        Value::Null => Vec::new(),
-        other => vec![json!({"type": text_type, "text": other.to_string()})],
+            }
+            Ok(blocks)
+        }
+        Value::Null => Ok(Vec::new()),
+        other => Ok(vec![json!({"type": text_type, "text": other.to_string()})]),
     }
 }
 
@@ -139,6 +147,7 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
         let content = message
             .get("content")
             .map(|value| response_content_blocks(value, role))
+            .transpose()?
             .unwrap_or_default();
         if !content.is_empty() {
             input.push(json!({"role": role, "content": content}));
@@ -190,16 +199,6 @@ fn response_text(response: &Value) -> String {
     let mut text = String::new();
     if let Some(output) = response.get("output").and_then(Value::as_array) {
         for item in output {
-            if item.get("type").and_then(Value::as_str) == Some("refusal") {
-                if let Some(value) = item
-                    .get("refusal")
-                    .or_else(|| item.get("text"))
-                    .and_then(Value::as_str)
-                {
-                    text.push_str(value);
-                }
-                continue;
-            }
             if item.get("type").and_then(Value::as_str) != Some("message") {
                 continue;
             }
@@ -207,13 +206,9 @@ fn response_text(response: &Value) -> String {
                 for part in content {
                     if matches!(
                         part.get("type").and_then(Value::as_str),
-                        Some("output_text" | "text" | "refusal")
+                        Some("output_text" | "text")
                     ) {
-                        if let Some(value) = part
-                            .get("text")
-                            .or_else(|| part.get("refusal"))
-                            .and_then(Value::as_str)
-                        {
+                        if let Some(value) = part.get("text").and_then(Value::as_str) {
                             text.push_str(value);
                         }
                     }
@@ -230,6 +225,41 @@ fn response_text(response: &Value) -> String {
     } else {
         text
     }
+}
+
+fn response_refusal_text(response: &Value) -> String {
+    let mut refusal = String::new();
+    if let Some(output) = response.get("output").and_then(Value::as_array) {
+        for item in output {
+            if item.get("type").and_then(Value::as_str) == Some("refusal") {
+                if let Some(value) = item
+                    .get("refusal")
+                    .or_else(|| item.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    refusal.push_str(value);
+                }
+                continue;
+            }
+            if item.get("type").and_then(Value::as_str) != Some("message") {
+                continue;
+            }
+            if let Some(content) = item.get("content").and_then(Value::as_array) {
+                for part in content {
+                    if part.get("type").and_then(Value::as_str) == Some("refusal") {
+                        if let Some(value) = part
+                            .get("refusal")
+                            .or_else(|| part.get("text"))
+                            .and_then(Value::as_str)
+                        {
+                            refusal.push_str(value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    refusal
 }
 
 fn response_reasoning_text(response: &Value) -> String {
@@ -291,9 +321,10 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("Responses provider payload is missing output"))?;
     let text = response_text(response);
+    let refusal = response_refusal_text(response);
     let reasoning = response_reasoning_text(response);
     let tool_calls = response_tool_calls(response);
-    if output.is_empty() && text.is_empty() && tool_calls.is_empty() {
+    if output.is_empty() && text.is_empty() && refusal.is_empty() && tool_calls.is_empty() {
         return Err(anyhow!("Responses provider returned no output items"));
     }
 
@@ -306,6 +337,9 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
     }
     if !reasoning.is_empty() {
         message["reasoning_content"] = Value::String(reasoning);
+    }
+    if !refusal.is_empty() {
+        message["refusal"] = Value::String(refusal);
     }
     let incomplete_reason = response
         .get("incomplete_details")
@@ -429,6 +463,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_string_text_content_blocks() {
+        let request = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": {"unexpected": true}}]
+            }]
+        });
+
+        let error = openai_chat_request_to_responses(&request, "muse").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Responses text content block requires string 'text'"
+        );
+    }
+
+    #[test]
     fn converts_responses_text_and_usage_to_chat_shape() {
         let response = json!({
             "id": "resp_meta_1",
@@ -532,8 +583,9 @@ mod tests {
 
         assert_eq!(converted["created"], 42);
         assert_eq!(converted["choices"][0]["finish_reason"], "content_filter");
+        assert!(converted["choices"][0]["message"]["content"].is_null());
         assert_eq!(
-            converted["choices"][0]["message"]["content"],
+            converted["choices"][0]["message"]["refusal"],
             "I cannot help with that."
         );
     }

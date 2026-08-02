@@ -181,6 +181,8 @@ pub struct OpenAIResponseMessage {
     #[serde(default, rename = "reasoning_content", alias = "reasoning")]
     pub reasoning_content: Option<String>,
     #[serde(default)]
+    pub refusal: Option<String>,
+    #[serde(default)]
     pub tool_calls: Option<Vec<OpenAIToolCall>>,
 }
 
@@ -285,6 +287,9 @@ pub struct AnthropicResponse {
     /// Serialized back to OpenAI format instead of thinking blocks
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// OpenAI Responses refusal metadata carried through the internal Anthropic shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
