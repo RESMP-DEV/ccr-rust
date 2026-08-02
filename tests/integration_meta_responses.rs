@@ -467,7 +467,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                 "total_tokens": 12
             }
         })))
-        .expect(5)
+        .expect(6)
         .mount(&upstream)
         .await;
 
@@ -781,34 +781,46 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
     );
     assert_eq!(response_json["text"], json!({"format": {"type": "text"}}));
 
-    let computer_output = json!({
-        "type": "computer_screenshot",
-        "image_url": "data:image/png;base64,c2NyZWVuc2hvdA=="
-    });
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/responses")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&json!({
-                        "model": "auto",
-                        "previous_response_id": "resp_computer_previous",
-                        "input": [{
-                            "type": "computer_call_output",
-                            "call_id": "call_computer_1",
-                            "output": computer_output
-                        }],
-                        "stream": false
-                    }))
+    let continuation_requests = [
+        json!({
+            "model": "auto",
+            "previous_response_id": "resp_computer_previous",
+            "input": [{
+                "type": "computer_call_output",
+                "call_id": "call_computer_1",
+                "output": {
+                    "type": "computer_screenshot",
+                    "image_url": "data:image/png;base64,c2NyZWVuc2hvdA=="
+                }
+            }],
+            "stream": false
+        }),
+        json!({
+            "model": "auto",
+            "previous_response_id": "resp_shell_previous",
+            "input": [{
+                "type": "local_shell_call_output",
+                "id": "call_shell_1",
+                "output": "{\"stdout\":\"done\"}"
+            }],
+            "stream": false
+        }),
+    ];
+    for request in &continuation_requests {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(request).unwrap()))
                     .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     let requests = upstream.received_requests().await.unwrap();
     assert!(requests.iter().all(|request| {
@@ -841,16 +853,13 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                 })
             })
     }));
-    assert!(requests.iter().any(|request| {
-        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        body["previous_response_id"] == "resp_computer_previous"
-            && body["input"]
-                == json!([{
-                    "type": "computer_call_output",
-                    "call_id": "call_computer_1",
-                    "output": computer_output
-                }])
-    }));
+    for continuation in continuation_requests {
+        assert!(requests.iter().any(|request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            body["previous_response_id"] == continuation["previous_response_id"]
+                && body["input"] == continuation["input"]
+        }));
+    }
     assert!(requests.iter().any(|request| {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
         body["text"]["format"]
