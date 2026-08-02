@@ -544,15 +544,23 @@ pub(super) fn responses_request_to_openai_chat_request(
                         "content": content
                     }));
                 }
-                "function_call_output" | "custom_tool_call_output" | "computer_call_output" => {
+                "function_call_output"
+                | "custom_tool_call_output"
+                | "computer_call_output"
+                | "local_shell_call_output"
+                | "shell_call_output"
+                | "apply_patch_call_output"
+                | "mcp_approval_response" => {
                     let call_id = item
                         .get("call_id")
                         .and_then(|v| v.as_str())
+                        .or_else(|| item.get("id").and_then(|v| v.as_str()))
+                        .or_else(|| item.get("approval_request_id").and_then(|v| v.as_str()))
                         .unwrap_or("call_unknown");
                     let output = item
                         .get("output")
                         .map(normalize_tool_output)
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| item.to_string());
                     messages.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -1685,33 +1693,86 @@ mod tests {
     }
 
     #[test]
-    fn accepts_native_computer_call_outputs_for_passthrough() {
-        let output = serde_json::json!({
-            "type": "computer_screenshot",
-            "image_url": "data:image/png;base64,c2NyZWVuc2hvdA=="
-        });
-        let request = serde_json::json!({
-            "model": "auto",
-            "previous_response_id": "resp_previous",
-            "input": [{
-                "type": "computer_call_output",
-                "call_id": "call_computer_1",
-                "output": output
-            }]
-        });
+    fn accepts_native_continuation_results_for_passthrough() {
+        let cases = [
+            (
+                "call_function",
+                serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": "call_function",
+                    "output": "function result"
+                }),
+            ),
+            (
+                "call_custom",
+                serde_json::json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom",
+                    "output": "custom result"
+                }),
+            ),
+            (
+                "call_computer",
+                serde_json::json!({
+                    "type": "computer_call_output",
+                    "call_id": "call_computer",
+                    "output": {
+                        "type": "computer_screenshot",
+                        "image_url": "data:image/png;base64,c2NyZWVuc2hvdA=="
+                    }
+                }),
+            ),
+            (
+                "call_local_shell",
+                serde_json::json!({
+                    "type": "local_shell_call_output",
+                    "id": "call_local_shell",
+                    "output": "{\"stdout\":\"done\"}"
+                }),
+            ),
+            (
+                "call_shell",
+                serde_json::json!({
+                    "type": "shell_call_output",
+                    "call_id": "call_shell",
+                    "output": [{"stdout": "done", "outcome": {"type": "exit", "exit_code": 0}}]
+                }),
+            ),
+            (
+                "call_patch",
+                serde_json::json!({
+                    "type": "apply_patch_call_output",
+                    "call_id": "call_patch",
+                    "status": "completed"
+                }),
+            ),
+            (
+                "approval_1",
+                serde_json::json!({
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "approval_1",
+                    "approve": true
+                }),
+            ),
+        ];
 
-        let converted = responses_request_to_openai_chat_request(&request).unwrap();
+        for (call_id, input) in cases {
+            let request = serde_json::json!({
+                "model": "auto",
+                "previous_response_id": "resp_previous",
+                "input": [input]
+            });
 
-        assert_eq!(converted["messages"][0]["role"], "tool");
-        assert_eq!(converted["messages"][0]["tool_call_id"], "call_computer_1");
-        let normalized_output: serde_json::Value = serde_json::from_str(
-            converted["messages"][0]["content"]
+            let converted = responses_request_to_openai_chat_request(&request).unwrap();
+
+            assert_eq!(converted["messages"][0]["role"], "tool");
+            assert_eq!(converted["messages"][0]["tool_call_id"], call_id);
+            assert!(!converted["messages"][0]["content"]
                 .as_str()
-                .expect("computer output should have a Chat-compatible representation"),
-        )
-        .unwrap();
-        assert_eq!(normalized_output, output);
-        assert_eq!(converted["previous_response_id"], "resp_previous");
+                .expect("continuation result should have a Chat-compatible representation")
+                .is_empty());
+            assert_eq!(converted["previous_response_id"], "resp_previous");
+        }
     }
 
     #[test]
