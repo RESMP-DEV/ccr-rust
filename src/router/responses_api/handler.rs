@@ -117,6 +117,17 @@ mod tests {
             invalid.unwrap_err(),
             "responses request 'input' must be text or an array"
         );
+
+        let reasoning = responses_request_to_openai_chat_request(&json!({
+            "model": "test",
+            "input": "think carefully",
+            "reasoning": {"effort": "high", "summary": "detailed"}
+        }))
+        .unwrap();
+        assert_eq!(
+            reasoning["reasoning"],
+            json!({"effort": "high", "summary": "detailed"})
+        );
     }
 
     #[test]

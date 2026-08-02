@@ -184,6 +184,11 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
             body[key] = value.clone();
         }
     }
+    if let Some(reasoning) = request.get("reasoning") {
+        body["reasoning"] = reasoning.clone();
+    } else if let Some(reasoning_effort) = request.get("reasoning_effort") {
+        body["reasoning"] = json!({"effort": reasoning_effort});
+    }
     if let Some(tools) = request.get("tools").and_then(Value::as_array) {
         body["tools"] = Value::Array(tools.iter().filter_map(responses_tool).collect());
     }
@@ -380,7 +385,7 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
         openai_usage["completion_tokens_details"] = details.clone();
     }
 
-    Ok(json!({
+    let mut converted = json!({
         "id": response.get("id").and_then(Value::as_str).unwrap_or("resp_unknown"),
         "object": "chat.completion",
         "created": response_created_at(response.get("created_at")),
@@ -391,7 +396,14 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
             "finish_reason": finish_reason
         }],
         "usage": openai_usage
-    }))
+    });
+    if let Some(status) = response.get("status").and_then(Value::as_str) {
+        converted["response_status"] = Value::String(status.to_string());
+    }
+    if let Some(incomplete_details) = response.get("incomplete_details") {
+        converted["incomplete_details"] = incomplete_details.clone();
+    }
+    Ok(converted)
 }
 
 #[cfg(test)]
@@ -404,6 +416,7 @@ mod tests {
             "model": "meta-muse,muse-spark-1.1",
             "messages": [{"role": "user", "content": "Write a haiku"}],
             "max_completion_tokens": 64,
+            "reasoning_effort": "high",
             "stream": true
         });
 
@@ -412,6 +425,7 @@ mod tests {
         assert_eq!(converted["model"], "muse-spark-1.1");
         assert_eq!(converted["stream"], false);
         assert_eq!(converted["max_output_tokens"], 64);
+        assert_eq!(converted["reasoning"], json!({"effort": "high"}));
         assert_eq!(converted["input"][0]["role"], "user");
         assert_eq!(converted["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(converted["input"][0]["content"][0]["text"], "Write a haiku");
@@ -583,6 +597,11 @@ mod tests {
 
         assert_eq!(converted["created"], 42);
         assert_eq!(converted["choices"][0]["finish_reason"], "content_filter");
+        assert_eq!(converted["response_status"], "incomplete");
+        assert_eq!(
+            converted["incomplete_details"],
+            json!({"reason": "content_filter"})
+        );
         assert!(converted["choices"][0]["message"]["content"].is_null());
         assert_eq!(
             converted["choices"][0]["message"]["refusal"],

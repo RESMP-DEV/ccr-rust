@@ -97,6 +97,15 @@ pub(super) fn anthropic_response_to_internal(
     if let Some(refusal) = response.refusal {
         extra_data.insert("refusal".to_string(), serde_json::Value::String(refusal));
     }
+    if let Some(response_status) = response.response_status {
+        extra_data.insert(
+            "response_status".to_string(),
+            serde_json::Value::String(response_status),
+        );
+    }
+    if let Some(incomplete_details) = response.incomplete_details {
+        extra_data.insert("incomplete_details".to_string(), incomplete_details);
+    }
 
     crate::frontend::InternalResponse {
         id: response.id,

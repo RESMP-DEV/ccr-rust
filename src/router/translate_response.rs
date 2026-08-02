@@ -28,6 +28,8 @@ pub(super) fn translate_response_openai_to_anthropic(
         .choices
         .first()
         .and_then(|choice| choice.message.refusal.clone());
+    let response_status = openai_resp.response_status.clone();
+    let incomplete_details = openai_resp.incomplete_details.clone();
 
     let content = if let Some(choice) = openai_resp.choices.first() {
         let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
@@ -144,6 +146,8 @@ pub(super) fn translate_response_openai_to_anthropic(
         }),
         reasoning_content,
         refusal,
+        response_status,
+        incomplete_details,
     }
 }
 

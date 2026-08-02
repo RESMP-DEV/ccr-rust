@@ -162,6 +162,10 @@ pub struct OpenAIResponse {
     pub model: String,
     pub choices: Vec<OpenAIChoice>,
     pub usage: Option<OpenAIUsage>,
+    #[serde(default)]
+    pub response_status: Option<String>,
+    #[serde(default)]
+    pub incomplete_details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,6 +294,12 @@ pub struct AnthropicResponse {
     /// OpenAI Responses refusal metadata carried through the internal Anthropic shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
+    /// Original Responses API terminal status carried through the adapter pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_status: Option<String>,
+    /// Original Responses API incomplete metadata carried through the adapter pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -453,3 +453,120 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
         })
     }));
 }
+
+#[tokio::test]
+async fn meta_muse_preserves_reasoning_refusal_and_incomplete_status() {
+    if !localhost_bind_available() {
+        eprintln!("Skipping test: localhost bind unavailable");
+        return;
+    }
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "resp_meta_refusal",
+            "object": "response",
+            "created_at": 45,
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+            "model": "muse-spark-1.1",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "refusal",
+                    "refusal": "I cannot help with that."
+                }]
+            }],
+            "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+        })))
+        .expect(2)
+        .mount(&upstream)
+        .await;
+
+    let config_json = json!({
+        "Providers": [{
+            "name": "meta-muse",
+            "api_base_url": upstream.uri(),
+            "api_key": "meta-test-key",
+            "models": ["muse-spark-1.1"],
+            "protocol": "responses",
+            "tier_name": "ccr-meta-muse"
+        }],
+        "Router": {
+            "default": "meta-muse,muse-spark-1.1",
+            "tiers": ["meta-muse,muse-spark-1.1"]
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    for stream in [false, true] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "model": "auto",
+                            "input": "refuse this",
+                            "reasoning": {"effort": "high", "summary": "detailed"},
+                            "stream": stream
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        if stream {
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            let events = sse_json_events(&text).expect("Responses SSE data should be valid JSON");
+            let incomplete = events
+                .iter()
+                .find(|event| event["type"] == "response.incomplete")
+                .expect("Responses stream should preserve incomplete status");
+            assert_eq!(
+                incomplete["response"]["output"][0]["content"][0],
+                json!({
+                    "type": "refusal",
+                    "refusal": "I cannot help with that."
+                })
+            );
+            assert_eq!(
+                incomplete["response"]["incomplete_details"],
+                json!({"reason": "content_filter"})
+            );
+        } else {
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["status"], "incomplete");
+            assert_eq!(
+                payload["incomplete_details"],
+                json!({"reason": "content_filter"})
+            );
+            assert_eq!(
+                payload["output"][0]["content"][0],
+                json!({
+                    "type": "refusal",
+                    "refusal": "I cannot help with that."
+                })
+            );
+        }
+    }
+
+    let requests = upstream.received_requests().await.unwrap();
+    assert!(requests.iter().all(|request| {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        body["reasoning"] == json!({"effort": "high", "summary": "detailed"})
+    }));
+}
