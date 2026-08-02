@@ -8,7 +8,7 @@ targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Vulnerabilities are denied by default. Limit unmaintained advisories to
 # workspace crates; cargo-audit reports transitive maintenance warnings.
 unmaintained = "workspace"
-# Update the advisory database on every check
+# Fetch advisory databases with the Git CLI instead of gix
 git-fetch-with-cli = true
 
 [licenses]

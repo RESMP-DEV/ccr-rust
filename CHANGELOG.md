@@ -66,14 +66,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Rust dependency security refresh** — Updated `quinn-proto`,
   `crossbeam-epoch`, `anyhow`, and `memmap2` to patched releases and added a
-  SHA-pinned RustSec audit job so future vulnerable lockfile changes fail CI.
+  SHA-pinned, fork-safe RustSec audit job so future vulnerable lockfile changes
+  fail CI without granting third-party actions write access.
   Migrated the direct HTTP client to `reqwest` 0.12, removing the unmaintained
   `rustls-pemfile` dependency from the resolved graph.
   Updated the `cargo-deny` policy for the current schema, reviewed license and
   Git-source allowances, made path/Git dependency versions explicit, and made
   CI validate and use the checked-in lockfile for every dependency-sensitive
-  job. Release tags now run the same RustSec audit before any platform build,
-  and release builds remain locked to that audited dependency graph.
+  job. CI and release tags enforce both `cargo-audit` and `cargo-deny` before
+  any platform build, and release builds remain locked to that audited
+  dependency graph.
 - **Authenticated native MCP daemon** — `mcp-daemon` now requires a bearer token
   from `--auth-token` or `CCR_MCP_AUTH_TOKEN`, compares presented credentials in
   constant time, and protects both `/health` and `/mcp`.
