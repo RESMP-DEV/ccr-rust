@@ -435,6 +435,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             "tools": [{"type": "web_search", "search_context_size": "low"}],
             "text": {"format": {"type": "text"}},
             "output": [{
+                "id": "rs_native",
                 "type": "reasoning",
                 "summary": [{"type": "summary_text", "text": "Reasoning survives adapters"}]
             }, {
@@ -443,6 +444,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                 "status": "completed",
                 "action": {"type": "search", "query": "adapter citations"}
             }, {
+                "id": "msg_native",
                 "type": "message",
                 "role": "assistant",
                 "content": [{
@@ -613,6 +615,20 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                     _ => assert_eq!(added[output_index]["item"], *item),
                 }
             }
+            let reasoning_delta = events
+                .iter()
+                .find(|event| event["type"] == "response.reasoning_text.delta")
+                .expect("reasoning delta should be replayed with item identity");
+            assert_eq!(reasoning_delta["output_index"], 0);
+            assert_eq!(reasoning_delta["item_id"], "rs_native");
+            assert_eq!(reasoning_delta["content_index"], 0);
+            let output_text_delta = events
+                .iter()
+                .find(|event| event["type"] == "response.output_text.delta")
+                .expect("output text delta should be replayed with item identity");
+            assert_eq!(output_text_delta["output_index"], 2);
+            assert_eq!(output_text_delta["item_id"], "msg_native");
+            assert_eq!(output_text_delta["content_index"], 0);
             assert_eq!(output[0]["type"], "reasoning");
             assert_eq!(
                 output[0]["summary"][0],

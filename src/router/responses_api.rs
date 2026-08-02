@@ -872,6 +872,73 @@ fn initial_responses_output_item(item: &serde_json::Value) -> serde_json::Value 
     initial
 }
 
+#[derive(Clone)]
+struct ResponseOutputItemIdentity {
+    output_index: usize,
+    item_id: Option<String>,
+    content_index: Option<usize>,
+}
+
+fn response_output_item_identity(
+    response: &serde_json::Value,
+    item_type: &str,
+    occurrence: usize,
+    content_type: Option<&str>,
+) -> Option<ResponseOutputItemIdentity> {
+    let (output_index, item) = response
+        .get("output")?
+        .as_array()?
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.get("type").and_then(|value| value.as_str()) == Some(item_type))
+        .nth(occurrence)?;
+    let content_index = content_type.map(|content_type| {
+        item.get("content")
+            .and_then(|content| content.as_array())
+            .and_then(|content| {
+                content.iter().position(|part| {
+                    part.get("type").and_then(|value| value.as_str()) == Some(content_type)
+                })
+            })
+            .unwrap_or(0)
+    });
+    Some(ResponseOutputItemIdentity {
+        output_index,
+        item_id: item
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        content_index,
+    })
+}
+
+fn append_response_delta(
+    output: &mut String,
+    event_type: &str,
+    delta: &str,
+    identity: Option<ResponseOutputItemIdentity>,
+) {
+    let Some(identity) = identity else {
+        return;
+    };
+    let mut event = serde_json::json!({
+        "type": event_type,
+        "delta": delta,
+        "output_index": identity.output_index
+    });
+    if let Some(item_id) = identity.item_id {
+        event["item_id"] = serde_json::Value::String(item_id);
+    }
+    if let Some(content_index) = identity.content_index {
+        event["content_index"] = serde_json::json!(content_index);
+    }
+    output.push_str("event: ");
+    output.push_str(event_type);
+    output.push_str("\ndata: ");
+    output.push_str(&event.to_string());
+    output.push_str("\n\n");
+}
+
 fn add_reasoning_output_item(
     output: &mut String,
     response_id: &str,
@@ -908,8 +975,10 @@ fn convert_sse_payload_to_responses(
     #[derive(Default)]
     struct ToolAccum {
         id: String,
+        item_id: Option<String>,
         name: String,
         arguments: String,
+        emitted_arguments_len: usize,
         added: bool,
         output_index: Option<usize>,
     }
@@ -1072,13 +1141,19 @@ fn convert_sse_payload_to_responses(
                 }
 
                 message_text.push_str(text);
-                let delta_event = serde_json::json!({
-                    "type": "response.output_text.delta",
-                    "delta": text
-                });
-                output.push_str("event: response.output_text.delta\ndata: ");
-                output.push_str(&delta_event.to_string());
-                output.push_str("\n\n");
+                let identity = preserved_response
+                    .as_ref()
+                    .and_then(|response| {
+                        response_output_item_identity(response, "message", 0, Some("output_text"))
+                    })
+                    .or_else(|| {
+                        message_output_index.map(|output_index| ResponseOutputItemIdentity {
+                            output_index,
+                            item_id: Some(format!("msg_{}", response_id)),
+                            content_index: Some(0),
+                        })
+                    });
+                append_response_delta(&mut output, "response.output_text.delta", text, identity);
             }
 
             if let Some(reasoning) = delta
@@ -1098,14 +1173,29 @@ fn convert_sse_payload_to_responses(
                     reasoning_item_added = true;
                 }
                 reasoning_text.push_str(reasoning);
-                let delta_event = serde_json::json!({
-                    "type": "response.reasoning_text.delta",
-                    "delta": reasoning,
-                    "content_index": 0
-                });
-                output.push_str("event: response.reasoning_text.delta\ndata: ");
-                output.push_str(&delta_event.to_string());
-                output.push_str("\n\n");
+                let identity = preserved_response
+                    .as_ref()
+                    .and_then(|response| {
+                        response_output_item_identity(
+                            response,
+                            "reasoning",
+                            0,
+                            Some("reasoning_text"),
+                        )
+                    })
+                    .or_else(|| {
+                        reasoning_output_index.map(|output_index| ResponseOutputItemIdentity {
+                            output_index,
+                            item_id: Some(format!("rs_{}", response_id)),
+                            content_index: Some(0),
+                        })
+                    });
+                append_response_delta(
+                    &mut output,
+                    "response.reasoning_text.delta",
+                    reasoning,
+                    identity,
+                );
             }
 
             if let Some(refusal) = delta
@@ -1135,13 +1225,19 @@ fn convert_sse_payload_to_responses(
                     message_item_added = true;
                 }
                 refusal_text.push_str(refusal);
-                let delta_event = serde_json::json!({
-                    "type": "response.refusal.delta",
-                    "delta": refusal
-                });
-                output.push_str("event: response.refusal.delta\ndata: ");
-                output.push_str(&delta_event.to_string());
-                output.push_str("\n\n");
+                let identity = preserved_response
+                    .as_ref()
+                    .and_then(|response| {
+                        response_output_item_identity(response, "message", 0, Some("refusal"))
+                    })
+                    .or_else(|| {
+                        message_output_index.map(|output_index| ResponseOutputItemIdentity {
+                            output_index,
+                            item_id: Some(format!("msg_{}", response_id)),
+                            content_index: Some(0),
+                        })
+                    });
+                append_response_delta(&mut output, "response.refusal.delta", refusal, identity);
             }
 
             if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
@@ -1186,15 +1282,47 @@ fn convert_sse_payload_to_responses(
                                     "type": "function_call",
                                     "call_id": entry.id,
                                     "name": entry.name,
-                                    "arguments": entry.arguments
+                                    "arguments": ""
                                 }
                             });
                             output.push_str("event: response.output_item.added\ndata: ");
                             output.push_str(&added.to_string());
                             output.push_str("\n\n");
                             entry.output_index = Some(output_index);
+                            entry.item_id = Some(entry.id.clone());
+                        } else if let Some(identity) =
+                            preserved_response.as_ref().and_then(|response| {
+                                response_output_item_identity(
+                                    response,
+                                    "function_call",
+                                    index,
+                                    None,
+                                )
+                            })
+                        {
+                            entry.output_index = Some(identity.output_index);
+                            entry.item_id = identity.item_id;
                         }
                         entry.added = true;
+                    }
+
+                    if entry.added && entry.arguments.len() > entry.emitted_arguments_len {
+                        let delta = entry.arguments[entry.emitted_arguments_len..].to_string();
+                        entry.emitted_arguments_len = entry.arguments.len();
+                        let identity =
+                            entry
+                                .output_index
+                                .map(|output_index| ResponseOutputItemIdentity {
+                                    output_index,
+                                    item_id: entry.item_id.clone(),
+                                    content_index: None,
+                                });
+                        append_response_delta(
+                            &mut output,
+                            "response.function_call_arguments.delta",
+                            &delta,
+                            identity,
+                        );
                     }
                 }
             }
@@ -1235,13 +1363,31 @@ fn convert_sse_payload_to_responses(
                                 message_item_added = true;
                             }
                             message_text.push_str(text);
-                            let delta_event = serde_json::json!({
-                                "type": "response.output_text.delta",
-                                "delta": text
-                            });
-                            output.push_str("event: response.output_text.delta\ndata: ");
-                            output.push_str(&delta_event.to_string());
-                            output.push_str("\n\n");
+                            let identity = preserved_response
+                                .as_ref()
+                                .and_then(|response| {
+                                    response_output_item_identity(
+                                        response,
+                                        "message",
+                                        0,
+                                        Some("output_text"),
+                                    )
+                                })
+                                .or_else(|| {
+                                    message_output_index.map(|output_index| {
+                                        ResponseOutputItemIdentity {
+                                            output_index,
+                                            item_id: Some(format!("msg_{}", response_id)),
+                                            content_index: Some(0),
+                                        }
+                                    })
+                                });
+                            append_response_delta(
+                                &mut output,
+                                "response.output_text.delta",
+                                text,
+                                identity,
+                            );
                         }
                     }
                     if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
@@ -1258,14 +1404,31 @@ fn convert_sse_payload_to_responses(
                                 reasoning_item_added = true;
                             }
                             reasoning_text.push_str(thinking);
-                            let delta_event = serde_json::json!({
-                                "type": "response.reasoning_text.delta",
-                                "delta": thinking,
-                                "content_index": 0
-                            });
-                            output.push_str("event: response.reasoning_text.delta\ndata: ");
-                            output.push_str(&delta_event.to_string());
-                            output.push_str("\n\n");
+                            let identity = preserved_response
+                                .as_ref()
+                                .and_then(|response| {
+                                    response_output_item_identity(
+                                        response,
+                                        "reasoning",
+                                        0,
+                                        Some("reasoning_text"),
+                                    )
+                                })
+                                .or_else(|| {
+                                    reasoning_output_index.map(|output_index| {
+                                        ResponseOutputItemIdentity {
+                                            output_index,
+                                            item_id: Some(format!("rs_{}", response_id)),
+                                            content_index: Some(0),
+                                        }
+                                    })
+                                });
+                            append_response_delta(
+                                &mut output,
+                                "response.reasoning_text.delta",
+                                thinking,
+                                identity,
+                            );
                         }
                     }
                 }
@@ -1545,6 +1708,85 @@ mod tests {
                 "refusal": "I cannot help with that."
             })
         );
+    }
+
+    #[test]
+    fn preserved_pseudo_stream_deltas_identify_their_output_items() {
+        let preserved = serde_json::json!({
+            "id": "resp_native",
+            "object": "response",
+            "created_at": 42,
+            "status": "completed",
+            "model": "muse",
+            "output": [{
+                "id": "rs_native",
+                "type": "reasoning",
+                "content": [{"type": "reasoning_text", "text": "think"}],
+                "summary": []
+            }, {
+                "id": "fc_native",
+                "type": "function_call",
+                "call_id": "call_native",
+                "name": "lookup",
+                "arguments": "{\"q\":\"x\"}"
+            }, {
+                "id": "msg_native",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "answer"}]
+            }]
+        });
+        let chunks = [
+            serde_json::json!({
+                "id": "resp_native",
+                "object": "chat.completion.chunk",
+                "created": 42,
+                "model": "muse",
+                "choices": [{"index": 0, "delta": {"reasoning_content": "think"}}]
+            }),
+            serde_json::json!({
+                "id": "resp_native",
+                "object": "chat.completion.chunk",
+                "created": 42,
+                "model": "muse",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_native",
+                    "function": {"name": "lookup", "arguments": "{\"q\":\"x\"}"}
+                }]}}]
+            }),
+            serde_json::json!({
+                "id": "resp_native",
+                "object": "chat.completion.chunk",
+                "created": 42,
+                "model": "muse",
+                "choices": [{"index": 0, "delta": {"content": "answer"}}]
+            }),
+        ];
+        let mut payload = chunks
+            .iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect::<String>();
+        payload.push_str("data: [DONE]\n\n");
+
+        let converted = convert_sse_payload_to_responses(&payload, Some(&preserved));
+        let events = parse_sse_frames(&converted)
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .collect::<Vec<_>>();
+
+        for (event_type, output_index, item_id) in [
+            ("response.reasoning_text.delta", 0, "rs_native"),
+            ("response.function_call_arguments.delta", 1, "fc_native"),
+            ("response.output_text.delta", 2, "msg_native"),
+        ] {
+            let event = events
+                .iter()
+                .find(|event| event["type"] == event_type)
+                .unwrap_or_else(|| panic!("missing {event_type}"));
+            assert_eq!(event["output_index"], output_index);
+            assert_eq!(event["item_id"], item_id);
+        }
     }
 
     #[test]
