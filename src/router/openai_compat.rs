@@ -307,6 +307,8 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         let mut reasoning_tokens = None;
         let mut tool_indices = HashMap::new();
         let mut next_tool_index = 0;
+        let mut response_id = None;
+        let mut response_model = None;
 
         loop {
             tokio::select! {
@@ -357,6 +359,16 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                     .get("type")
                                     .and_then(serde_json::Value::as_str)
                                     .map(str::to_string);
+                                if event_kind.as_deref() == Some("message_start") {
+                                    response_id = event_json["message"]
+                                        .get("id")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_string);
+                                    response_model = event_json["message"]
+                                        .get("model")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_string);
+                                }
                                 let event_usage = match event_kind.as_deref() {
                                     Some("message_start") => Some(&event_json["message"]["usage"]),
                                     Some("message_delta" | "message_stop") => {
@@ -391,6 +403,13 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                         continue;
                                     }
                                 };
+
+                                if let Some(id) = response_id.as_deref() {
+                                    transformed["id"] = serde_json::Value::String(id.to_string());
+                                }
+                                if let Some(model) = response_model.as_deref() {
+                                    transformed["model"] = serde_json::Value::String(model.to_string());
+                                }
 
                                 if event_kind.as_deref() == Some("message_stop") && !sent_done {
                                     if let (Some(prompt), Some(completion)) =
@@ -509,6 +528,35 @@ mod tests {
         assert_eq!(output.matches("data: [DONE]").count(), 1);
         assert_eq!(output.matches("\"total_tokens\":3").count(), 1);
         assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn pseudo_stream_keeps_one_response_identity() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"resp_original\",\"model\":\"muse\",\"usage\":{\"input_tokens\":1}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\",\"usage\":{\"output_tokens\":1}}\n\n",
+        );
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let payload = String::from_utf8(bytes.to_vec()).unwrap();
+        let ids: Vec<_> = payload
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .map(|data| serde_json::from_str::<serde_json::Value>(data).unwrap()["id"].clone())
+            .collect();
+
+        assert!(!ids.is_empty());
+        assert!(ids.iter().all(|id| id == "resp_original"));
     }
 
     #[tokio::test]

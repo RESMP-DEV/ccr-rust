@@ -29,6 +29,8 @@ fn body_read_error_status(error: &(dyn std::error::Error + 'static)) -> StatusCo
 fn decode_error_status(error: &DecodeRequestBodyError) -> StatusCode {
     if error.is_payload_too_large() {
         StatusCode::PAYLOAD_TOO_LARGE
+    } else if matches!(error, DecodeRequestBodyError::UnsupportedEncoding(_)) {
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
     } else {
         StatusCode::BAD_REQUEST
     }
@@ -132,9 +134,21 @@ mod tests {
             "reasoning": {"effort": "high", "summary": "detailed"}
         }))
         .unwrap();
+        assert_eq!(reasoning["reasoning_effort"], "high");
+        assert!(reasoning.get("reasoning").is_none());
         assert_eq!(
-            reasoning["reasoning"],
+            reasoning[super::super::super::RESPONSES_REASONING_PASSTHROUGH_KEY],
             json!({"effort": "high", "summary": "detailed"})
+        );
+
+        let invalid_reasoning = responses_request_to_openai_chat_request(&json!({
+            "model": "test",
+            "input": "think carefully",
+            "reasoning": {"effort": 7}
+        }));
+        assert_eq!(
+            invalid_reasoning.unwrap_err(),
+            "responses request 'reasoning.effort' must be a string"
         );
     }
 
@@ -177,6 +191,22 @@ mod tests {
         assert!(
             error.contains("requires too much memory"),
             "unexpected zstd error: {error}"
+        );
+    }
+
+    #[test]
+    fn unsupported_content_encoding_maps_to_unsupported_media_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_ENCODING,
+            axum::http::HeaderValue::from_static("gzip"),
+        );
+
+        let error = decode_request_body(b"{}", &headers).unwrap_err();
+
+        assert_eq!(
+            decode_error_status(&error),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
     }
 

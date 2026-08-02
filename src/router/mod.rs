@@ -25,6 +25,8 @@ pub use responses_api::handle_responses;
 
 mod responses_protocol;
 
+const RESPONSES_REASONING_PASSTHROUGH_KEY: &str = "__ccr_responses_reasoning";
+
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},

@@ -23,6 +23,7 @@ const MAX_RESPONSES_ZSTD_WINDOW_LOG: u32 = 24;
 #[derive(Debug)]
 pub(super) enum DecodeRequestBodyError {
     PayloadTooLarge(String),
+    UnsupportedEncoding(String),
     Invalid(String),
 }
 
@@ -40,7 +41,9 @@ impl DecodeRequestBodyError {
 impl std::fmt::Display for DecodeRequestBodyError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PayloadTooLarge(message) | Self::Invalid(message) => formatter.write_str(message),
+            Self::PayloadTooLarge(message)
+            | Self::UnsupportedEncoding(message)
+            | Self::Invalid(message) => formatter.write_str(message),
         }
     }
 }
@@ -130,7 +133,7 @@ pub(super) fn decode_request_body(
         return Ok(decoded);
     }
 
-    Err(DecodeRequestBodyError::Invalid(format!(
+    Err(DecodeRequestBodyError::UnsupportedEncoding(format!(
         "Unsupported content-encoding '{}'",
         content_encoding
     )))
@@ -580,8 +583,13 @@ pub(super) fn responses_request_to_openai_chat_request(
         // without breaking Anthropic-protocol providers.
         request["max_completion_tokens"] = max_tokens;
     }
-    if let Some(reasoning) = body.get("reasoning").cloned() {
-        request["reasoning"] = reasoning;
+    if let Some(reasoning) = body.get("reasoning").filter(|value| !value.is_null()) {
+        let effort = reasoning
+            .get("effort")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "responses request 'reasoning.effort' must be a string".to_string())?;
+        request["reasoning_effort"] = serde_json::Value::String(effort.to_string());
+        request[super::RESPONSES_REASONING_PASSTHROUGH_KEY] = reasoning.clone();
     }
     if let Some(previous_response_id) = body.get("previous_response_id").cloned() {
         request["previous_response_id"] = previous_response_id;
@@ -813,8 +821,10 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         };
 
         // OpenAI chunk metadata
-        if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
-            response_id = id.to_string();
+        if !created_sent {
+            if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
+                response_id = id.to_string();
+            }
         }
         if let Some(ts) = chunk.get("created").and_then(|v| v.as_i64()) {
             created_at = ts;
@@ -825,7 +835,10 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         if let Some(status) = chunk.get("response_status").and_then(|v| v.as_str()) {
             response_status = status.to_string();
         }
-        if let Some(details) = chunk.get("incomplete_details") {
+        if let Some(details) = chunk
+            .get("incomplete_details")
+            .filter(|value| !value.is_null())
+        {
             incomplete_details = Some(details.clone());
         }
 
@@ -1149,10 +1162,12 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         output.push_str("\n\n");
     }
 
-    let terminal_type = if response_status == "incomplete" {
-        "response.incomplete"
-    } else {
-        "response.completed"
+    let terminal_type = match response_status.as_str() {
+        "completed" => "response.completed",
+        "incomplete" => "response.incomplete",
+        "failed" => "response.failed",
+        "cancelled" => "response.cancelled",
+        _ => "response.incomplete",
     };
     let mut terminal_response = serde_json::json!({
         "id": response_id,
@@ -1251,5 +1266,41 @@ mod tests {
                 "refusal": "I cannot help with that."
             })
         );
+    }
+
+    #[test]
+    fn pseudo_stream_keeps_initial_response_id_and_terminal_status() {
+        for (status, terminal_type) in [
+            ("failed", "response.failed"),
+            ("cancelled", "response.cancelled"),
+        ] {
+            let payload = format!(
+                concat!(
+                    "data: {{\"id\":\"resp_original\",\"object\":\"chat.completion.chunk\",",
+                    "\"created\":42,\"model\":\"muse\",\"choices\":[{{\"index\":0,",
+                    "\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\n",
+                    "data: {{\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",",
+                    "\"created\":42,\"model\":\"muse\",\"response_status\":\"{}\",",
+                    "\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"done\"}},",
+                    "\"finish_reason\":\"stop\"}}]}}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+                status
+            );
+
+            let converted = convert_sse_payload_to_responses(&payload);
+            let frames = parse_sse_frames(&converted);
+            let created: serde_json::Value = serde_json::from_str(&frames[0].1).unwrap();
+            let terminal = frames
+                .iter()
+                .find(|(event, _)| event.as_deref() == Some(terminal_type))
+                .unwrap();
+            let terminal: serde_json::Value = serde_json::from_str(&terminal.1).unwrap();
+
+            assert_eq!(created["response"]["id"], "resp_original");
+            assert_eq!(terminal["response"]["id"], "resp_original");
+            assert_eq!(terminal["response"]["status"], status);
+            assert_eq!(terminal["response"]["output"][0]["id"], "msg_resp_original");
+        }
     }
 }
