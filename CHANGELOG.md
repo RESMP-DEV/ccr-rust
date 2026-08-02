@@ -70,7 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Migrated the direct HTTP client to `reqwest` 0.12, removing the unmaintained
   `rustls-pemfile` dependency from the resolved graph.
   Updated the `cargo-deny` policy for the current schema, reviewed license and
-  Git-source allowances, and made path/Git dependency versions explicit.
+  Git-source allowances, made path/Git dependency versions explicit, and made
+  CI validate and use the checked-in lockfile for every dependency-sensitive job.
 - **Authenticated native MCP daemon** — `mcp-daemon` now requires a bearer token
   from `--auth-token` or `CCR_MCP_AUTH_TOKEN`, compares presented credentials in
   constant time, and protects both `/health` and `/mcp`.
