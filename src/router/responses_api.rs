@@ -937,7 +937,7 @@ fn unique_response_output_item_identity(
             .filter(|(_, part)| {
                 part.get("type").and_then(|value| value.as_str()) == Some(content_type)
             });
-        let first = matching_content.next().map(|(index, _)| index).unwrap_or(0);
+        let first = matching_content.next().map(|(index, _)| index)?;
         if matching_content.next().is_some() {
             return None;
         }
@@ -1888,6 +1888,46 @@ mod tests {
                 .expect("exact preserved terminal event should remain");
             assert_eq!(completed["response"], preserved);
         }
+    }
+
+    #[test]
+    fn preserved_pseudo_stream_suppresses_flattened_reasoning_summaries() {
+        let preserved = serde_json::json!({
+            "id": "resp_native",
+            "object": "response",
+            "created_at": 42,
+            "status": "completed",
+            "model": "muse",
+            "output": [{
+                "id": "rs_summaries",
+                "type": "reasoning",
+                "summary": [
+                    {"type": "summary_text", "text": "first"},
+                    {"type": "summary_text", "text": "second"}
+                ]
+            }]
+        });
+        let payload = concat!(
+            "data: {\"id\":\"resp_native\",\"object\":\"chat.completion.chunk\",",
+            "\"created\":42,\"model\":\"muse\",\"choices\":[{\"index\":0,",
+            "\"delta\":{\"reasoning_content\":\"first\\n\\nsecond\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let converted = convert_sse_payload_to_responses(payload, Some(&preserved));
+        let events = parse_sse_frames(&converted)
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .collect::<Vec<_>>();
+
+        assert!(!events
+            .iter()
+            .any(|event| event["type"] == "response.reasoning_text.delta"));
+        let completed = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .expect("exact preserved terminal event should remain");
+        assert_eq!(completed["response"], preserved);
     }
 
     #[test]
