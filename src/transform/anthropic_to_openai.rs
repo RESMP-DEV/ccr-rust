@@ -336,6 +336,10 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
         }
         "content_block_start" => {
             // Start of a content block
+            let block_index = anthropic_event
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let content_block = anthropic_event
                 .get("content_block")
                 .cloned()
@@ -363,7 +367,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
 
                     serde_json::json!({
                         "tool_calls": [{
-                            "index": 0,
+                            "index": block_index,
                             "id": id,
                             "type": "function",
                             "function": {
@@ -390,6 +394,10 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
         }
         "content_block_delta" => {
             // Delta within a content block
+            let block_index = anthropic_event
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let delta = anthropic_event
                 .get("delta")
                 .cloned()
@@ -403,7 +411,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 // Tool use partial JSON
                 serde_json::json!({
                     "tool_calls": [{
-                        "index": 0,
+                        "index": block_index,
                         "function": {
                             "arguments": partial_json
                         }
@@ -721,7 +729,30 @@ mod tests {
         let tool_calls = result["choices"][0]["delta"]["tool_calls"]
             .as_array()
             .unwrap();
+        assert_eq!(tool_calls[0]["index"], 1);
         assert_eq!(tool_calls[0]["function"]["arguments"], "{\"a\": 1}");
+    }
+
+    #[test]
+    fn test_transform_streaming_tool_use_start_preserves_block_index() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_event = serde_json::json!({
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_second",
+                "name": "second_tool",
+                "input": {}
+            }
+        });
+
+        let result = transformer.transform_response(anthropic_event).unwrap();
+        let tool_call = &result["choices"][0]["delta"]["tool_calls"][0];
+
+        assert_eq!(tool_call["index"], 2);
+        assert_eq!(tool_call["id"], "toolu_second");
+        assert_eq!(tool_call["function"]["name"], "second_tool");
     }
 
     #[test]

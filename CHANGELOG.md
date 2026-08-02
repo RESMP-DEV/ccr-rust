@@ -20,8 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   duplicate terminal stream events, preserve non-object `error` metadata, and
   remove stale entity headers when JSON responses are rewritten as SSE. String
   request input and reasoning summaries now also survive the complete
-  Responses-client pseudo-streaming path. The optional sindexer integration is
-  pinned to its reviewed task-aware embedding-prefix release on `main`.
+  Responses-client pseudo-streaming path. Reasoning remains a distinct Responses
+  output item, and parallel streamed tool calls retain their original indices.
+  The optional sindexer integration is pinned to its reviewed task-aware
+  embedding-prefix release on `main`.
 
 ### Added
 

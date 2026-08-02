@@ -37,6 +37,15 @@ fn localhost_bind_available() -> bool {
     std::net::TcpListener::bind("127.0.0.1:0").is_ok()
 }
 
+fn sse_json_events(payload: &str) -> Vec<serde_json::Value> {
+    payload
+        .split("\n\n")
+        .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+        .filter(|data| *data != "[DONE]")
+        .filter_map(|data| serde_json::from_str(data).ok())
+        .collect()
+}
+
 #[tokio::test]
 async fn meta_muse_uses_responses_endpoint_and_returns_anthropic_json() {
     if !localhost_bind_available() {
@@ -242,7 +251,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             }],
             "usage": {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12}
         })))
-        .expect(2)
+        .expect(3)
         .mount(&upstream)
         .await;
 
@@ -301,15 +310,86 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("streamed through adapters"));
         assert!(text.contains("Reasoning survives adapters"));
+
+        if uri == "/v1/responses" {
+            let events = sse_json_events(&text);
+            let completed = events
+                .iter()
+                .find(|event| event["type"] == "response.completed")
+                .expect("Responses stream should contain response.completed");
+            let output = completed["response"]["output"]
+                .as_array()
+                .expect("completed Responses output should be an array");
+            assert_eq!(output[0]["type"], "reasoning");
+            assert_eq!(
+                output[0]["summary"][0],
+                json!({
+                    "type": "summary_text",
+                    "text": "Reasoning survives adapters"
+                })
+            );
+            assert_eq!(output[1]["type"], "message");
+            assert_eq!(
+                output[1]["content"],
+                json!([{
+                    "type": "output_text",
+                    "text": "streamed through adapters"
+                }])
+            );
+        }
     }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "auto",
+                        "input": "non-stream responses",
+                        "stream": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response_json["output"][0]["type"], "reasoning");
+    assert_eq!(
+        response_json["output"][0]["summary"][0]["text"],
+        "Reasoning survives adapters"
+    );
+    assert_eq!(response_json["output"][1]["type"], "message");
+    assert_eq!(
+        response_json["output"][1]["content"],
+        json!([{
+            "type": "output_text",
+            "text": "streamed through adapters"
+        }])
+    );
 
     let requests = upstream.received_requests().await.unwrap();
     assert!(requests.iter().all(|request| {
         serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["stream"] == false
     }));
     assert!(requests.iter().any(|request| {
-        serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["input"]
-            .to_string()
-            .contains("stream responses")
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        body["input"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["role"] == "user"
+                    && item["content"].as_array().is_some_and(|content| {
+                        content.iter().any(|part| {
+                            part["type"] == "input_text" && part["text"] == "stream responses"
+                        })
+                    })
+            })
+        })
     }));
 }
