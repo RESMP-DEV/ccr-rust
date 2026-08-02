@@ -20,6 +20,33 @@ pub use handler::handle_responses;
 pub(super) const MAX_RESPONSES_BODY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RESPONSES_ZSTD_WINDOW_LOG: u32 = 24;
 
+#[derive(Debug)]
+pub(super) enum DecodeRequestBodyError {
+    PayloadTooLarge(String),
+    Invalid(String),
+}
+
+impl DecodeRequestBodyError {
+    #[cfg(test)]
+    fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+
+    pub(super) fn is_payload_too_large(&self) -> bool {
+        matches!(self, Self::PayloadTooLarge(_))
+    }
+}
+
+impl std::fmt::Display for DecodeRequestBodyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PayloadTooLarge(message) | Self::Invalid(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for DecodeRequestBodyError {}
+
 fn parse_sse_frames(payload: &str) -> Vec<(Option<String>, String)> {
     let mut frames = Vec::new();
     let normalized = payload.replace("\r\n", "\n");
@@ -53,7 +80,10 @@ fn looks_like_sse_payload(payload: &str) -> bool {
     trimmed.starts_with("event:") || trimmed.starts_with("data:")
 }
 
-pub(super) fn decode_request_body(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, String> {
+pub(super) fn decode_request_body(
+    bytes: &[u8],
+    headers: &HeaderMap,
+) -> Result<Vec<u8>, DecodeRequestBodyError> {
     let content_encoding = headers
         .get(axum::http::header::CONTENT_ENCODING)
         .and_then(|v| v.to_str().ok())
@@ -66,29 +96,44 @@ pub(super) fn decode_request_body(bytes: &[u8], headers: &HeaderMap) -> Result<V
     }
 
     if content_encoding.contains("zstd") || content_encoding.contains("zst") {
-        let mut decoder = zstd::stream::read::Decoder::new(std::io::Cursor::new(bytes))
-            .map_err(|e| format!("Failed to decode zstd request body: {}", e))?;
+        let mut decoder =
+            zstd::stream::read::Decoder::new(std::io::Cursor::new(bytes)).map_err(|e| {
+                DecodeRequestBodyError::Invalid(format!(
+                    "Failed to decode zstd request body: {}",
+                    e
+                ))
+            })?;
         decoder
             .window_log_max(MAX_RESPONSES_ZSTD_WINDOW_LOG)
-            .map_err(|e| format!("Failed to bound zstd request window: {}", e))?;
+            .map_err(|e| {
+                DecodeRequestBodyError::Invalid(format!(
+                    "Failed to bound zstd request window: {}",
+                    e
+                ))
+            })?;
         let mut decoded = Vec::new();
         decoder
             .take((MAX_RESPONSES_BODY_BYTES + 1) as u64)
             .read_to_end(&mut decoded)
-            .map_err(|e| format!("Failed to decode zstd request body: {}", e))?;
+            .map_err(|e| {
+                DecodeRequestBodyError::Invalid(format!(
+                    "Failed to decode zstd request body: {}",
+                    e
+                ))
+            })?;
         if decoded.len() > MAX_RESPONSES_BODY_BYTES {
-            return Err(format!(
+            return Err(DecodeRequestBodyError::PayloadTooLarge(format!(
                 "Decoded request body exceeds {} bytes",
                 MAX_RESPONSES_BODY_BYTES
-            ));
+            )));
         }
         return Ok(decoded);
     }
 
-    Err(format!(
+    Err(DecodeRequestBodyError::Invalid(format!(
         "Unsupported content-encoding '{}'",
         content_encoding
-    ))
+    )))
 }
 
 pub(super) fn parse_json_payload(bytes: &[u8]) -> Result<serde_json::Value, String> {
