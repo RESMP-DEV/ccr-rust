@@ -329,6 +329,20 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
         .get("output_tokens")
         .and_then(Value::as_u64)
         .unwrap_or_default();
+    let mut openai_usage = json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": usage
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(prompt_tokens.saturating_add(completion_tokens))
+    });
+    if let Some(details) = usage.get("input_tokens_details") {
+        openai_usage["prompt_tokens_details"] = details.clone();
+    }
+    if let Some(details) = usage.get("output_tokens_details") {
+        openai_usage["completion_tokens_details"] = details.clone();
+    }
 
     Ok(json!({
         "id": response.get("id").and_then(Value::as_str).unwrap_or("resp_unknown"),
@@ -340,14 +354,7 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
             "message": message,
             "finish_reason": finish_reason
         }],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": usage
-                .get("total_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(prompt_tokens.saturating_add(completion_tokens))
-        }
+        "usage": openai_usage
     }))
 }
 
@@ -443,7 +450,13 @@ mod tests {
                     "content": [{"type": "output_text", "text": "AlphaHENG ready"}]
                 }
             ],
-            "usage": {"input_tokens": 11, "output_tokens": 3, "total_tokens": 14}
+            "usage": {
+                "input_tokens": 11,
+                "input_tokens_details": {"cached_tokens": 4},
+                "output_tokens": 3,
+                "output_tokens_details": {"reasoning_tokens": 2},
+                "total_tokens": 14
+            }
         });
 
         let converted = responses_response_to_openai_chat(&response, "muse-spark-1.1").unwrap();
@@ -459,6 +472,14 @@ mod tests {
         );
         assert_eq!(converted["usage"]["prompt_tokens"], 11);
         assert_eq!(converted["usage"]["completion_tokens"], 3);
+        assert_eq!(
+            converted["usage"]["prompt_tokens_details"]["cached_tokens"],
+            4
+        );
+        assert_eq!(
+            converted["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            2
+        );
     }
 
     #[test]

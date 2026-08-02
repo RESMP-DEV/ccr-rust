@@ -37,12 +37,19 @@ fn localhost_bind_available() -> bool {
     std::net::TcpListener::bind("127.0.0.1:0").is_ok()
 }
 
-fn sse_json_events(payload: &str) -> Vec<serde_json::Value> {
+fn sse_json_events(payload: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> {
     payload
         .split("\n\n")
-        .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
-        .filter(|data| *data != "[DONE]")
-        .filter_map(|data| serde_json::from_str(data).ok())
+        .filter_map(|frame| {
+            let data = frame
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(|line| line.strip_prefix(' ').unwrap_or(line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!data.is_empty() && data != "[DONE]").then_some(data)
+        })
+        .map(|data| serde_json::from_str(&data))
         .collect()
 }
 
@@ -249,7 +256,13 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "streamed through adapters"}]
             }],
-            "usage": {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12}
+            "usage": {
+                "input_tokens": 8,
+                "input_tokens_details": {"cached_tokens": 2},
+                "output_tokens": 4,
+                "output_tokens_details": {"reasoning_tokens": 3},
+                "total_tokens": 12
+            }
         })))
         .expect(3)
         .mount(&upstream)
@@ -312,7 +325,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
         assert!(text.contains("Reasoning survives adapters"));
 
         if uri == "/v1/responses" {
-            let events = sse_json_events(&text);
+            let events = sse_json_events(&text).expect("Responses SSE data should be valid JSON");
             let completed = events
                 .iter()
                 .find(|event| event["type"] == "response.completed")
@@ -320,6 +333,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             let output = completed["response"]["output"]
                 .as_array()
                 .expect("completed Responses output should be an array");
+            assert_eq!(output.len(), 2, "reasoning and message items are required");
             assert_eq!(output[0]["type"], "reasoning");
             assert_eq!(
                 output[0]["summary"][0],
@@ -335,6 +349,14 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                     "type": "output_text",
                     "text": "streamed through adapters"
                 }])
+            );
+            assert_eq!(
+                completed["response"]["usage"]["input_tokens_details"]["cached_tokens"],
+                2
+            );
+            assert_eq!(
+                completed["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
+                3
             );
         }
     }
@@ -373,6 +395,14 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             "type": "output_text",
             "text": "streamed through adapters"
         }])
+    );
+    assert_eq!(
+        response_json["usage"]["input_tokens_details"]["cached_tokens"],
+        2
+    );
+    assert_eq!(
+        response_json["usage"]["output_tokens_details"]["reasoning_tokens"],
+        3
     );
 
     let requests = upstream.received_requests().await.unwrap();

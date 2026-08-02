@@ -96,7 +96,14 @@ pub(super) fn anthropic_response_to_internal(
         usage: Some(crate::frontend::Usage {
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
-            input_tokens_details: None,
+            input_tokens_details: response
+                .usage
+                .cache_read_input_tokens
+                .map(|cached_tokens| serde_json::json!({"cached_tokens": cached_tokens})),
+            output_tokens_details: response
+                .usage
+                .reasoning_tokens
+                .map(|reasoning_tokens| serde_json::json!({"reasoning_tokens": reasoning_tokens})),
         }),
         extra_data: response
             .reasoning_content
@@ -238,6 +245,8 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         let mut sent_done = false;
         let mut prompt_tokens = None;
         let mut completion_tokens = None;
+        let mut cached_tokens = None;
+        let mut reasoning_tokens = None;
 
         loop {
             tokio::select! {
@@ -282,39 +291,30 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                     .get("type")
                                     .and_then(serde_json::Value::as_str)
                                     .map(str::to_string);
-                                match event_kind.as_deref() {
-                                    Some("message_start") => {
-                                        let usage = &event_json["message"]["usage"];
-                                        prompt_tokens = usage
-                                            .get("input_tokens")
-                                            .and_then(serde_json::Value::as_u64)
-                                            .or(prompt_tokens);
-                                        completion_tokens = usage
-                                            .get("output_tokens")
-                                            .and_then(serde_json::Value::as_u64)
-                                            .or(completion_tokens);
+                                let event_usage = match event_kind.as_deref() {
+                                    Some("message_start") => Some(&event_json["message"]["usage"]),
+                                    Some("message_delta" | "message_stop") => {
+                                        Some(&event_json["usage"])
                                     }
-                                    Some("message_delta") => {
-                                        prompt_tokens = event_json["usage"]
-                                            .get("input_tokens")
-                                            .and_then(serde_json::Value::as_u64)
-                                            .or(prompt_tokens);
-                                        completion_tokens = event_json["usage"]
-                                            .get("output_tokens")
-                                            .and_then(serde_json::Value::as_u64)
-                                            .or(completion_tokens);
-                                    }
-                                    Some("message_stop") => {
-                                        prompt_tokens = event_json["usage"]
-                                            .get("input_tokens")
-                                            .and_then(serde_json::Value::as_u64)
-                                            .or(prompt_tokens);
-                                        completion_tokens = event_json["usage"]
-                                            .get("output_tokens")
-                                            .and_then(serde_json::Value::as_u64)
-                                            .or(completion_tokens);
-                                    }
-                                    _ => {}
+                                    _ => None,
+                                };
+                                if let Some(event_usage) = event_usage {
+                                    prompt_tokens = event_usage
+                                        .get("input_tokens")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .or(prompt_tokens);
+                                    completion_tokens = event_usage
+                                        .get("output_tokens")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .or(completion_tokens);
+                                    cached_tokens = event_usage
+                                        .get("cache_read_input_tokens")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .or(cached_tokens);
+                                    reasoning_tokens = event_usage
+                                        .get("reasoning_tokens")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .or(reasoning_tokens);
                                 }
 
                                 let mut transformed: serde_json::Value = match transformer.transform_response(event_json) {
@@ -330,11 +330,22 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                     if let (Some(prompt), Some(completion)) =
                                         (prompt_tokens, completion_tokens)
                                     {
-                                        transformed["usage"] = serde_json::json!({
+                                        let mut usage = serde_json::json!({
                                             "prompt_tokens": prompt,
                                             "completion_tokens": completion,
                                             "total_tokens": prompt.saturating_add(completion)
                                         });
+                                        if let Some(cached) = cached_tokens {
+                                            usage["prompt_tokens_details"] = serde_json::json!({
+                                                "cached_tokens": cached
+                                            });
+                                        }
+                                        if let Some(reasoning) = reasoning_tokens {
+                                            usage["completion_tokens_details"] = serde_json::json!({
+                                                "reasoning_tokens": reasoning
+                                            });
+                                        }
+                                        transformed["usage"] = usage;
                                     }
                                 }
 

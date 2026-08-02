@@ -430,11 +430,18 @@ impl Frontend for CodexFrontend {
 
         // Add usage if available
         if let Some(usage) = &response.usage {
-            openai_response["usage"] = serde_json::json!({
+            let mut openai_usage = serde_json::json!({
                 "prompt_tokens": usage.input_tokens,
                 "completion_tokens": usage.output_tokens,
                 "total_tokens": usage.input_tokens + usage.output_tokens
             });
+            if let Some(details) = &usage.input_tokens_details {
+                openai_usage["prompt_tokens_details"] = details.clone();
+            }
+            if let Some(details) = &usage.output_tokens_details {
+                openai_usage["completion_tokens_details"] = details.clone();
+            }
+            openai_response["usage"] = openai_usage;
         }
 
         // Add extra data if present
@@ -836,6 +843,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 input_tokens_details: None,
+                output_tokens_details: None,
             }),
             extra_data: None,
         };

@@ -509,11 +509,22 @@ fn anthropic_usage_to_openai(usage: &Value) -> Value {
         .get("output_tokens")
         .and_then(Value::as_u64)
         .unwrap_or_default();
-    serde_json::json!({
+    let mut openai_usage = serde_json::json!({
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens.saturating_add(completion_tokens)
-    })
+    });
+    if let Some(cached_tokens) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
+        openai_usage["prompt_tokens_details"] = serde_json::json!({
+            "cached_tokens": cached_tokens
+        });
+    }
+    if let Some(reasoning_tokens) = usage.get("reasoning_tokens").and_then(Value::as_u64) {
+        openai_usage["completion_tokens_details"] = serde_json::json!({
+            "reasoning_tokens": reasoning_tokens
+        });
+    }
+    openai_usage
 }
 
 /// Get current Unix timestamp.

@@ -76,3 +76,6 @@ jobs:
 
       - name: Test
         run: cargo test --locked --all-targets --all-features
+
+      - name: Test documentation
+        run: cargo test --locked --doc --all-features

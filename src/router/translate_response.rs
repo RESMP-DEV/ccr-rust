@@ -106,9 +106,19 @@ pub(super) fn translate_response_openai_to_anthropic(
 
     let usage = openai_resp
         .usage
-        .map(|u| AnthropicUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
+        .map(|openai_usage| AnthropicUsage {
+            input_tokens: openai_usage.prompt_tokens,
+            output_tokens: openai_usage.completion_tokens,
+            cache_read_input_tokens: openai_usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(serde_json::Value::as_u64),
+            reasoning_tokens: openai_usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.get("reasoning_tokens"))
+                .and_then(serde_json::Value::as_u64),
         })
         .unwrap_or_default();
 
