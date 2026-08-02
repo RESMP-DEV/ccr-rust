@@ -467,7 +467,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                 "total_tokens": 12
             }
         })))
-        .expect(4)
+        .expect(5)
         .mount(&upstream)
         .await;
 
@@ -713,6 +713,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
     assert!(!native_stream.contains("Reasoning survives adapters"));
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -780,6 +781,35 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
     );
     assert_eq!(response_json["text"], json!({"format": {"type": "text"}}));
 
+    let computer_output = json!({
+        "type": "computer_screenshot",
+        "image_url": "data:image/png;base64,c2NyZWVuc2hvdA=="
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "auto",
+                        "previous_response_id": "resp_computer_previous",
+                        "input": [{
+                            "type": "computer_call_output",
+                            "call_id": "call_computer_1",
+                            "output": computer_output
+                        }],
+                        "stream": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
     let requests = upstream.received_requests().await.unwrap();
     assert!(requests.iter().all(|request| {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
@@ -810,6 +840,16 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                         })
                 })
             })
+    }));
+    assert!(requests.iter().any(|request| {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        body["previous_response_id"] == "resp_computer_previous"
+            && body["input"]
+                == json!([{
+                    "type": "computer_call_output",
+                    "call_id": "call_computer_1",
+                    "output": computer_output
+                }])
     }));
     assert!(requests.iter().any(|request| {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();

@@ -58,7 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   function-call arguments stream after an empty initial item. Ambiguous
   flattened deltas are suppressed when a native envelope has multiple matching
   items or content blocks, including summary-only reasoning, leaving exact
-  added/done/completed items authoritative.
+  added/done/completed items authoritative. Native computer-call continuation
+  outputs now pass pre-routing validation and reach Responses providers intact.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 

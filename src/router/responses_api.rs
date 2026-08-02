@@ -544,7 +544,7 @@ pub(super) fn responses_request_to_openai_chat_request(
                         "content": content
                     }));
                 }
-                "function_call_output" | "custom_tool_call_output" => {
+                "function_call_output" | "custom_tool_call_output" | "computer_call_output" => {
                     let call_id = item
                         .get("call_id")
                         .and_then(|v| v.as_str())
@@ -1682,6 +1682,36 @@ mod tests {
         let converted = responses_request_to_openai_chat_request(&request).unwrap();
 
         assert!(converted.get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn accepts_native_computer_call_outputs_for_passthrough() {
+        let output = serde_json::json!({
+            "type": "computer_screenshot",
+            "image_url": "data:image/png;base64,c2NyZWVuc2hvdA=="
+        });
+        let request = serde_json::json!({
+            "model": "auto",
+            "previous_response_id": "resp_previous",
+            "input": [{
+                "type": "computer_call_output",
+                "call_id": "call_computer_1",
+                "output": output
+            }]
+        });
+
+        let converted = responses_request_to_openai_chat_request(&request).unwrap();
+
+        assert_eq!(converted["messages"][0]["role"], "tool");
+        assert_eq!(converted["messages"][0]["tool_call_id"], "call_computer_1");
+        let normalized_output: serde_json::Value = serde_json::from_str(
+            converted["messages"][0]["content"]
+                .as_str()
+                .expect("computer output should have a Chat-compatible representation"),
+        )
+        .unwrap();
+        assert_eq!(normalized_output, output);
+        assert_eq!(converted["previous_response_id"], "resp_previous");
     }
 
     #[test]
