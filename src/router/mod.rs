@@ -640,6 +640,8 @@ mod tests {
                 prompt_tokens_details: None,
                 completion_tokens_details: None,
             }),
+            response_status: None,
+            incomplete_details: None,
         };
 
         let anthropic_resp =

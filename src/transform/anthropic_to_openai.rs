@@ -322,7 +322,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 .get("message")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            serde_json::json!({
+            let mut event = serde_json::json!({
                 "id": message.get("id").and_then(|v| v.as_str()).unwrap_or("chatcmpl-unknown"),
                 "object": "chat.completion.chunk",
                 "created": current_timestamp(),
@@ -332,7 +332,22 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                     "delta": {"role": "assistant"},
                     "finish_reason": null
                 }]
-            })
+            });
+            if let Some(refusal) = message
+                .get("refusal")
+                .and_then(|value| value.as_str())
+                .filter(|refusal| !refusal.is_empty())
+            {
+                event["choices"][0]["delta"]["refusal"] =
+                    serde_json::Value::String(refusal.to_string());
+            }
+            if let Some(status) = message.get("response_status") {
+                event["response_status"] = status.clone();
+            }
+            if let Some(incomplete_details) = message.get("incomplete_details") {
+                event["incomplete_details"] = incomplete_details.clone();
+            }
+            event
         }
         "content_block_start" => {
             // Start of a content block
@@ -674,6 +689,9 @@ mod tests {
                 "content": [],
                 "stop_reason": null,
                 "stop_sequence": null,
+                "refusal": "I cannot help with that.",
+                "response_status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"},
                 "usage": {"input_tokens": 10, "output_tokens": 1}
             }
         });
@@ -683,6 +701,15 @@ mod tests {
         assert_eq!(result["object"], "chat.completion.chunk");
         assert_eq!(result["id"], "msg_stream123");
         assert_eq!(result["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(
+            result["choices"][0]["delta"]["refusal"],
+            "I cannot help with that."
+        );
+        assert_eq!(result["response_status"], "incomplete");
+        assert_eq!(
+            result["incomplete_details"],
+            serde_json::json!({"reason": "content_filter"})
+        );
         assert!(result["choices"][0]["finish_reason"].is_null());
         assert!(result.get("usage").is_none());
     }

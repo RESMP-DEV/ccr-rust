@@ -286,15 +286,22 @@ fn openai_chat_completion_to_responses_json(openai: &serde_json::Value) -> serde
         .map(map_openai_usage_to_responses_usage)
         .unwrap_or_else(|| map_openai_usage_to_responses_usage(&serde_json::json!({})));
 
-    serde_json::json!({
+    let mut response = serde_json::json!({
         "id": response_id,
         "object": "response",
         "created_at": created_at,
-        "status": "completed",
+        "status": openai
+            .get("response_status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("completed"),
         "model": model,
         "output": output_items,
         "usage": usage
-    })
+    });
+    if let Some(incomplete_details) = openai.get("incomplete_details") {
+        response["incomplete_details"] = incomplete_details.clone();
+    }
+    response
 }
 
 fn responses_content_to_openai_content(content: &serde_json::Value) -> serde_json::Value {
@@ -528,6 +535,9 @@ pub(super) fn responses_request_to_openai_chat_request(
         // without breaking Anthropic-protocol providers.
         request["max_completion_tokens"] = max_tokens;
     }
+    if let Some(reasoning) = body.get("reasoning").cloned() {
+        request["reasoning"] = reasoning;
+    }
 
     Ok(request)
 }
@@ -737,7 +747,10 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
     let mut reasoning_item_added = false;
     let mut message_item_added = false;
     let mut message_text = String::new();
+    let mut refusal_text = String::new();
     let mut reasoning_text = String::new();
+    let mut response_status = "completed".to_string();
+    let mut incomplete_details = None;
     let mut tools: std::collections::BTreeMap<usize, ToolAccum> = std::collections::BTreeMap::new();
     let mut usage = map_openai_usage_to_responses_usage(&serde_json::json!({}));
 
@@ -760,6 +773,12 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         }
         if let Some(m) = chunk.get("model").and_then(|v| v.as_str()) {
             model = m.to_string();
+        }
+        if let Some(status) = chunk.get("response_status").and_then(|v| v.as_str()) {
+            response_status = status.to_string();
+        }
+        if let Some(details) = chunk.get("incomplete_details") {
+            incomplete_details = Some(details.clone());
         }
 
         // Anthropic message_start metadata fallback
@@ -854,6 +873,36 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
                     "content_index": 0
                 });
                 output.push_str("event: response.reasoning_text.delta\ndata: ");
+                output.push_str(&delta_event.to_string());
+                output.push_str("\n\n");
+            }
+
+            if let Some(refusal) = delta
+                .get("refusal")
+                .and_then(|v| v.as_str())
+                .filter(|refusal| !refusal.is_empty())
+            {
+                if !message_item_added {
+                    let added = serde_json::json!({
+                        "type": "response.output_item.added",
+                        "item": {
+                            "id": format!("msg_{}", response_id),
+                            "type": "message",
+                            "role": "assistant",
+                            "content": []
+                        }
+                    });
+                    output.push_str("event: response.output_item.added\ndata: ");
+                    output.push_str(&added.to_string());
+                    output.push_str("\n\n");
+                    message_item_added = true;
+                }
+                refusal_text.push_str(refusal);
+                let delta_event = serde_json::json!({
+                    "type": "response.refusal.delta",
+                    "delta": refusal
+                });
+                output.push_str("event: response.refusal.delta\ndata: ");
                 output.push_str(&delta_event.to_string());
                 output.push_str("\n\n");
             }
@@ -1002,6 +1051,12 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
                 "text": message_text
             }));
         }
+        if !refusal_text.is_empty() {
+            message_content.push(serde_json::json!({
+                "type": "refusal",
+                "refusal": refusal_text
+            }));
+        }
         let message_item = serde_json::json!({
             "id": format!("msg_{}", response_id),
             "type": "message",
@@ -1046,20 +1101,31 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
         output.push_str("\n\n");
     }
 
-    let completed = serde_json::json!({
-        "type": "response.completed",
-        "response": {
-            "id": response_id,
-            "object": "response",
-            "created_at": created_at,
-            "status": "completed",
-            "model": model,
-            "output": output_items,
-            "usage": usage
-        }
+    let terminal_type = if response_status == "incomplete" {
+        "response.incomplete"
+    } else {
+        "response.completed"
+    };
+    let mut terminal_response = serde_json::json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": response_status,
+        "model": model,
+        "output": output_items,
+        "usage": usage
     });
-    output.push_str("event: response.completed\ndata: ");
-    output.push_str(&completed.to_string());
+    if let Some(incomplete_details) = incomplete_details {
+        terminal_response["incomplete_details"] = incomplete_details;
+    }
+    let terminal = serde_json::json!({
+        "type": terminal_type,
+        "response": terminal_response
+    });
+    output.push_str("event: ");
+    output.push_str(terminal_type);
+    output.push_str("\ndata: ");
+    output.push_str(&terminal.to_string());
     output.push_str("\n\n");
 
     output
@@ -1076,6 +1142,8 @@ mod tests {
             "object": "chat.completion",
             "created": 42,
             "model": "muse",
+            "response_status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
             "choices": [{
                 "index": 0,
                 "message": {
@@ -1097,6 +1165,43 @@ mod tests {
         assert_eq!(
             response["output"][0]["content"][0]["refusal"],
             "I cannot help with that."
+        );
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(
+            response["incomplete_details"],
+            serde_json::json!({"reason": "content_filter"})
+        );
+    }
+
+    #[test]
+    fn pseudo_stream_preserves_refusal_and_incomplete_status() {
+        let payload = concat!(
+            "data: {\"id\":\"resp_refusal\",\"object\":\"chat.completion.chunk\",",
+            "\"created\":42,\"model\":\"muse\",\"response_status\":\"incomplete\",",
+            "\"incomplete_details\":{\"reason\":\"content_filter\"},",
+            "\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+            "\"refusal\":\"I cannot help with that.\"},\"finish_reason\":\"content_filter\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let converted = convert_sse_payload_to_responses(payload);
+        let terminal = parse_sse_frames(&converted)
+            .into_iter()
+            .find(|(event, _)| event.as_deref() == Some("response.incomplete"))
+            .expect("incomplete terminal event should be present");
+        let terminal: serde_json::Value = serde_json::from_str(&terminal.1).unwrap();
+
+        assert_eq!(terminal["response"]["status"], "incomplete");
+        assert_eq!(
+            terminal["response"]["incomplete_details"],
+            serde_json::json!({"reason": "content_filter"})
+        );
+        assert_eq!(
+            terminal["response"]["output"][0]["content"][0],
+            serde_json::json!({
+                "type": "refusal",
+                "refusal": "I cannot help with that."
+            })
         );
     }
 }

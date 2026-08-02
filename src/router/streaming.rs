@@ -612,6 +612,9 @@ fn emit_anthropic_sse_events(
             "model": resp.model,
             "stop_reason": null,
             "stop_sequence": null,
+            "refusal": resp.refusal,
+            "response_status": resp.response_status,
+            "incomplete_details": resp.incomplete_details,
             "usage": start_usage
         }
     });
@@ -882,6 +885,8 @@ mod tests {
             },
             reasoning_content: None,
             refusal: None,
+            response_status: None,
+            incomplete_details: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true);
@@ -938,6 +943,8 @@ mod tests {
             },
             reasoning_content: None,
             refusal: None,
+            response_status: None,
+            incomplete_details: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true);
@@ -976,6 +983,8 @@ mod tests {
             },
             reasoning_content: Some("unsigned summary".to_string()),
             refusal: None,
+            response_status: None,
+            incomplete_details: None,
         };
 
         let native_events = emit_anthropic_sse_events(&resp, false).join("");
@@ -992,6 +1001,29 @@ mod tests {
         };
         let whitespace_events = emit_anthropic_sse_events(&whitespace_resp, true).join("");
         assert!(!whitespace_events.contains("thinking_delta"));
+    }
+
+    #[test]
+    fn pseudo_stream_carries_responses_refusal_and_terminal_metadata() {
+        let resp = AnthropicResponse {
+            id: "msg_refusal".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "responses-model".to_string(),
+            stop_reason: Some("stop_sequence".to_string()),
+            usage: AnthropicUsage::default(),
+            reasoning_content: None,
+            refusal: Some("I cannot help with that.".to_string()),
+            response_status: Some("incomplete".to_string()),
+            incomplete_details: Some(serde_json::json!({"reason": "content_filter"})),
+        };
+
+        let events = emit_anthropic_sse_events(&resp, true).join("");
+
+        assert!(events.contains("I cannot help with that."));
+        assert!(events.contains("\"response_status\":\"incomplete\""));
+        assert!(events.contains("\"reason\":\"content_filter\""));
     }
 
     #[test]
@@ -1024,6 +1056,8 @@ mod tests {
             },
             reasoning_content: None,
             refusal: None,
+            response_status: None,
+            incomplete_details: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true);

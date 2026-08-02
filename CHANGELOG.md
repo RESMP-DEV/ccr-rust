@@ -24,8 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output item, parallel streamed tool calls retain their original indices, and
   cached/reasoning token details survive both adapter directions and cached
   input is included in operator usage metrics. Refusals remain typed Responses
-  refusal blocks instead of being flattened into ordinary answer text, and
-  malformed text blocks fail locally. Native
+  refusal blocks instead of being flattened into ordinary answer text,
+  reasoning controls reach Responses upstreams, incomplete terminal metadata
+  survives both response modes, and malformed text blocks fail locally. Native
   Anthropic pseudo-streams omit unsigned reasoning summaries, Responses request
   bodies and zstd windows are bounded, oversized bodies return HTTP 413, and
   malformed empty requests fail locally. Pseudo-stream tool calls use dense
