@@ -36,7 +36,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use tracing::{error, info, warn};
 
-use crate::frontend::detect_frontend;
+use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::{
     increment_active_requests, record_failure, record_pre_request_tokens,
     record_rate_limit_backoff, record_rate_limit_hit, record_request_duration_with_frontend,
@@ -330,7 +330,11 @@ pub async fn handle_messages(
                     // If client wanted streaming but we forced non-streaming for this provider,
                     // wrap the JSON response as pseudo-SSE so Claude CLI can parse it.
                     if client_wants_stream && forced_non_streaming {
-                        return streaming::wrap_json_response_as_sse(response).await;
+                        return streaming::wrap_json_response_as_sse(
+                            response,
+                            frontend == FrontendType::Codex,
+                        )
+                        .await;
                     }
 
                     return response;

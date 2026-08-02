@@ -354,7 +354,7 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                     return; // Receiver closed
                                 }
 
-                                if event_type.as_deref() == Some("message_stop") && !sent_done {
+                                if event_kind.as_deref() == Some("message_stop") && !sent_done {
                                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
                                     sent_done = true;
                                 }
@@ -442,6 +442,27 @@ mod tests {
 
         assert_eq!(output.matches("data: [DONE]").count(), 1);
         assert_eq!(output.matches("\"total_tokens\":3").count(), 1);
+        assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn json_only_message_stop_terminates_before_later_frames() {
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+            "data: {\"type\":\"message_stop\",\"usage\":{\"output_tokens\":2}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n",
+        );
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
+        assert!(!output.contains("late"));
         assert!(output.ends_with("data: [DONE]\n\n"));
     }
 }

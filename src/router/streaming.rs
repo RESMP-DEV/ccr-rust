@@ -577,14 +577,20 @@ pub async fn stream_anthropic_response_with_tracking(
 /// Emit a complete Anthropic response as a sequence of SSE events.
 ///
 /// Used when `forceNonStreaming` is true but the client requested `stream: true`.
-fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
+fn emit_anthropic_sse_events(
+    resp: &AnthropicResponse,
+    include_unsigned_reasoning: bool,
+) -> Vec<String> {
     let mut events = Vec::new();
-    let reasoning = resp.reasoning_content.as_deref().filter(|_| {
-        !resp
-            .content
-            .iter()
-            .any(|block| matches!(block, AnthropicContentBlock::Thinking { .. }))
-    });
+    let reasoning = include_unsigned_reasoning
+        .then_some(resp.reasoning_content.as_deref())
+        .flatten()
+        .filter(|_| {
+            !resp
+                .content
+                .iter()
+                .any(|block| matches!(block, AnthropicContentBlock::Thinking { .. }))
+        });
     let reasoning_offset = usize::from(reasoning.is_some());
 
     // message_start
@@ -756,7 +762,10 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
 /// Reads the response body, parses it as an `AnthropicResponse`, and re-emits it
 /// as SSE events that Claude CLI can parse. Falls through to the original response
 /// if parsing fails.
-pub(super) async fn wrap_json_response_as_sse(response: Response) -> Response {
+pub(super) async fn wrap_json_response_as_sse(
+    response: Response,
+    include_unsigned_reasoning: bool,
+) -> Response {
     let (mut parts, body) = response.into_parts();
 
     // Only wrap successful JSON responses
@@ -777,7 +786,7 @@ pub(super) async fn wrap_json_response_as_sse(response: Response) -> Response {
 
     // Try to parse as AnthropicResponse
     if let Ok(anthropic_resp) = serde_json::from_slice::<AnthropicResponse>(&bytes) {
-        let sse_events = emit_anthropic_sse_events(&anthropic_resp);
+        let sse_events = emit_anthropic_sse_events(&anthropic_resp, include_unsigned_reasoning);
         let sse_body = sse_events.join("");
         parts.headers.insert(
             axum::http::header::CONTENT_TYPE,
@@ -830,7 +839,7 @@ mod tests {
                 .insert(name, axum::http::HeaderValue::from_str(value).unwrap());
         }
 
-        let rewritten = wrap_json_response_as_sse(response).await;
+        let rewritten = wrap_json_response_as_sse(response, false).await;
 
         assert_eq!(
             rewritten.headers().get(axum::http::header::CONTENT_TYPE),
@@ -873,7 +882,7 @@ mod tests {
             reasoning_content: None,
         };
 
-        let events = emit_anthropic_sse_events(&resp);
+        let events = emit_anthropic_sse_events(&resp, true);
         let joined = events.join("");
 
         // Must contain message_start
@@ -928,7 +937,7 @@ mod tests {
             reasoning_content: None,
         };
 
-        let events = emit_anthropic_sse_events(&resp);
+        let events = emit_anthropic_sse_events(&resp, true);
         let joined = events.join("");
 
         assert!(joined.contains("thinking_delta"), "missing thinking_delta");
@@ -944,6 +953,34 @@ mod tests {
         assert!(joined.contains("text_delta"), "missing text_delta");
         assert!(joined.contains("\"cache_read_input_tokens\":7"));
         assert!(joined.contains("\"reasoning_tokens\":11"));
+    }
+
+    #[test]
+    fn unsigned_reasoning_is_only_emitted_for_openai_adapters() {
+        let resp = AnthropicResponse {
+            id: "msg_unsigned".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text {
+                text: "answer".to_string(),
+            }],
+            model: "responses-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            reasoning_content: Some("unsigned summary".to_string()),
+        };
+
+        let native_events = emit_anthropic_sse_events(&resp, false).join("");
+        assert!(!native_events.contains("thinking_delta"));
+        assert!(!native_events.contains("unsigned summary"));
+
+        let adapter_events = emit_anthropic_sse_events(&resp, true).join("");
+        assert!(adapter_events.contains("thinking_delta"));
+        assert!(adapter_events.contains("unsigned summary"));
     }
 
     #[test]
@@ -977,7 +1014,7 @@ mod tests {
             reasoning_content: None,
         };
 
-        let events = emit_anthropic_sse_events(&resp);
+        let events = emit_anthropic_sse_events(&resp, true);
         let joined = events.join("");
 
         // Both tool IDs must be present

@@ -22,7 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request input and reasoning summaries now also survive the complete
   Responses-client pseudo-streaming path. Reasoning remains a distinct Responses
   output item, parallel streamed tool calls retain their original indices, and
-  cached/reasoning token details survive both adapter directions.
+  cached/reasoning token details survive both adapter directions. Native
+  Anthropic pseudo-streams omit unsigned reasoning summaries, Responses request
+  bodies and decompression are bounded, and malformed empty requests fail locally.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 
