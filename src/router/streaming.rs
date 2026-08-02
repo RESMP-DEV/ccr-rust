@@ -585,6 +585,7 @@ fn emit_anthropic_sse_events(
     let reasoning = include_unsigned_reasoning
         .then_some(resp.reasoning_content.as_deref())
         .flatten()
+        .filter(|reasoning| !reasoning.trim().is_empty())
         .filter(|_| {
             !resp
                 .content
@@ -880,6 +881,7 @@ mod tests {
                 ..Default::default()
             },
             reasoning_content: None,
+            refusal: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true);
@@ -935,6 +937,7 @@ mod tests {
                 reasoning_tokens: Some(11),
             },
             reasoning_content: None,
+            refusal: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true);
@@ -972,6 +975,7 @@ mod tests {
                 ..Default::default()
             },
             reasoning_content: Some("unsigned summary".to_string()),
+            refusal: None,
         };
 
         let native_events = emit_anthropic_sse_events(&resp, false).join("");
@@ -981,6 +985,13 @@ mod tests {
         let adapter_events = emit_anthropic_sse_events(&resp, true).join("");
         assert!(adapter_events.contains("thinking_delta"));
         assert!(adapter_events.contains("unsigned summary"));
+
+        let whitespace_resp = AnthropicResponse {
+            reasoning_content: Some("  \n".to_string()),
+            ..resp
+        };
+        let whitespace_events = emit_anthropic_sse_events(&whitespace_resp, true).join("");
+        assert!(!whitespace_events.contains("thinking_delta"));
     }
 
     #[test]
@@ -1012,6 +1023,7 @@ mod tests {
                 ..Default::default()
             },
             reasoning_content: None,
+            refusal: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true);

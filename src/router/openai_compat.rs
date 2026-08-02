@@ -13,6 +13,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
+use std::collections::HashMap;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::error;
 
@@ -86,6 +87,17 @@ pub(super) fn anthropic_response_to_internal(
         })
         .collect();
 
+    let mut extra_data = serde_json::Map::new();
+    if let Some(reasoning_content) = response.reasoning_content {
+        extra_data.insert(
+            "reasoning_content".to_string(),
+            serde_json::Value::String(reasoning_content),
+        );
+    }
+    if let Some(refusal) = response.refusal {
+        extra_data.insert("refusal".to_string(), serde_json::Value::String(refusal));
+    }
+
     crate::frontend::InternalResponse {
         id: response.id,
         response_type: response.response_type,
@@ -105,9 +117,7 @@ pub(super) fn anthropic_response_to_internal(
                 .reasoning_tokens
                 .map(|reasoning_tokens| serde_json::json!({"reasoning_tokens": reasoning_tokens})),
         }),
-        extra_data: response
-            .reasoning_content
-            .map(|rc| serde_json::json!({ "reasoning_content": rc })),
+        extra_data: (!extra_data.is_empty()).then_some(serde_json::Value::Object(extra_data)),
     }
 }
 
@@ -184,6 +194,45 @@ async fn convert_anthropic_json_response_to_openai(response: Response) -> Respon
     Response::from_parts(parts, Body::from(serialized))
 }
 
+fn remap_anthropic_tool_call_index(
+    event: &mut serde_json::Value,
+    tool_indices: &mut HashMap<u64, u64>,
+    next_tool_index: &mut u64,
+) {
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    let block_index = event.get("index").and_then(serde_json::Value::as_u64);
+    let Some(block_index) = block_index else {
+        return;
+    };
+
+    let is_tool_start = event_type == Some("content_block_start")
+        && event
+            .get("content_block")
+            .and_then(|block| block.get("type"))
+            .and_then(serde_json::Value::as_str)
+            == Some("tool_use");
+    if is_tool_start {
+        let dense_index = *tool_indices.entry(block_index).or_insert_with(|| {
+            let index = *next_tool_index;
+            *next_tool_index += 1;
+            index
+        });
+        event["index"] = serde_json::json!(dense_index);
+        return;
+    }
+
+    let is_tool_delta = event_type == Some("content_block_delta")
+        && event
+            .get("delta")
+            .and_then(|delta| delta.get("partial_json"))
+            .is_some();
+    if is_tool_delta {
+        if let Some(dense_index) = tool_indices.get(&block_index) {
+            event["index"] = serde_json::json!(dense_index);
+        }
+    }
+}
+
 async fn convert_anthropic_stream_response_to_openai(response: Response) -> Response {
     let (mut parts, body) = response.into_parts();
 
@@ -247,6 +296,8 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         let mut completion_tokens = None;
         let mut cached_tokens = None;
         let mut reasoning_tokens = None;
+        let mut tool_indices = HashMap::new();
+        let mut next_tool_index = 0;
 
         loop {
             tokio::select! {
@@ -286,6 +337,12 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                         event_json["type"] = serde_json::Value::String(t.to_string());
                                     }
                                 }
+
+                                remap_anthropic_tool_call_index(
+                                    &mut event_json,
+                                    &mut tool_indices,
+                                    &mut next_tool_index,
+                                );
 
                                 let event_kind = event_json
                                     .get("type")
@@ -464,5 +521,34 @@ mod tests {
         assert_eq!(output.matches("data: [DONE]").count(), 1);
         assert!(!output.contains("late"));
         assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[test]
+    fn anthropic_content_indices_map_to_dense_tool_indices() {
+        let mut tool_indices = HashMap::new();
+        let mut next_tool_index = 0;
+        let mut first_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {"type": "tool_use", "id": "call_1"}
+        });
+        let mut first_delta = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 2,
+            "delta": {"type": "input_json_delta", "partial_json": "{}"}
+        });
+        let mut second_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 4,
+            "content_block": {"type": "tool_use", "id": "call_2"}
+        });
+
+        remap_anthropic_tool_call_index(&mut first_start, &mut tool_indices, &mut next_tool_index);
+        remap_anthropic_tool_call_index(&mut first_delta, &mut tool_indices, &mut next_tool_index);
+        remap_anthropic_tool_call_index(&mut second_start, &mut tool_indices, &mut next_tool_index);
+
+        assert_eq!(first_start["index"], 0);
+        assert_eq!(first_delta["index"], 0);
+        assert_eq!(second_start["index"], 1);
     }
 }

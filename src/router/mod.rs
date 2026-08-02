@@ -629,6 +629,7 @@ mod tests {
                     role: "assistant".to_string(),
                     content: Some(serde_json::Value::String("The answer is 42.".to_string())),
                     reasoning_content: Some("Let me think...".to_string()),
+                    refusal: None,
                     tool_calls: None,
                 },
                 finish_reason: Some("stop".to_string()),

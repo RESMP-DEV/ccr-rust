@@ -15,6 +15,17 @@ use super::{
 };
 use crate::router::{openai_compat::handle_chat_completions, AppState};
 
+fn body_read_error_status(error: &(dyn std::error::Error + 'static)) -> StatusCode {
+    if error
+        .source()
+        .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+    {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
 /// Handle OpenAI Responses API requests.
 pub async fn handle_responses(
     State(state): State<AppState>,
@@ -24,8 +35,9 @@ pub async fn handle_responses(
     let body_bytes = match to_bytes(body, MAX_RESPONSES_BODY_BYTES).await {
         Ok(bytes) => bytes,
         Err(err) => {
+            let status = body_read_error_status(&err);
             return (
-                StatusCode::BAD_REQUEST,
+                status,
                 Json(serde_json::json!({
                     "error": {
                         "message": format!("Failed to read request body: {}", err)
@@ -122,5 +134,44 @@ mod tests {
 
         let error = decode_request_body(&encoded, &headers).unwrap_err();
         assert!(error.contains("exceeds"));
+    }
+
+    #[test]
+    fn zstd_request_rejects_frames_above_window_limit() {
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1).unwrap();
+        encoder.include_contentsize(false).unwrap();
+        encoder.long_distance_matching(true).unwrap();
+        encoder
+            .window_log(super::super::MAX_RESPONSES_ZSTD_WINDOW_LOG + 1)
+            .unwrap();
+        std::io::Write::write_all(&mut encoder, b"small request").unwrap();
+        let encoded = encoder.finish().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_ENCODING,
+            axum::http::HeaderValue::from_static("zstd"),
+        );
+
+        let error = decode_request_body(&encoded, &headers).unwrap_err();
+
+        assert!(
+            error.contains("requires too much memory"),
+            "unexpected zstd error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_request_body_maps_to_payload_too_large() {
+        let error = to_bytes(
+            Body::from(vec![0_u8; MAX_RESPONSES_BODY_BYTES + 1]),
+            MAX_RESPONSES_BODY_BYTES,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            body_read_error_status(&error),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 }

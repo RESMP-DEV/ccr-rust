@@ -22,9 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request input and reasoning summaries now also survive the complete
   Responses-client pseudo-streaming path. Reasoning remains a distinct Responses
   output item, parallel streamed tool calls retain their original indices, and
-  cached/reasoning token details survive both adapter directions. Native
+  cached/reasoning token details survive both adapter directions and cached
+  input is included in operator usage metrics. Refusals remain typed Responses
+  refusal blocks instead of being flattened into ordinary answer text, and
+  malformed text blocks fail locally. Native
   Anthropic pseudo-streams omit unsigned reasoning summaries, Responses request
-  bodies and decompression are bounded, and malformed empty requests fail locally.
+  bodies and zstd windows are bounded, oversized bodies return HTTP 413, and
+  malformed empty requests fail locally. Pseudo-stream tool calls use dense
+  OpenAI indices even when internal text or reasoning blocks precede them.
+  Streaming regression coverage uses a deterministic upstream-tail gate rather
+  than a machine-load-sensitive wall-clock race.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 

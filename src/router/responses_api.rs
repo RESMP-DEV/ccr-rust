@@ -18,6 +18,7 @@ mod handler;
 pub use handler::handle_responses;
 
 pub(super) const MAX_RESPONSES_BODY_BYTES: usize = 10 * 1024 * 1024;
+const MAX_RESPONSES_ZSTD_WINDOW_LOG: u32 = 24;
 
 fn parse_sse_frames(payload: &str) -> Vec<(Option<String>, String)> {
     let mut frames = Vec::new();
@@ -65,8 +66,11 @@ pub(super) fn decode_request_body(bytes: &[u8], headers: &HeaderMap) -> Result<V
     }
 
     if content_encoding.contains("zstd") || content_encoding.contains("zst") {
-        let decoder = zstd::stream::read::Decoder::new(std::io::Cursor::new(bytes))
+        let mut decoder = zstd::stream::read::Decoder::new(std::io::Cursor::new(bytes))
             .map_err(|e| format!("Failed to decode zstd request body: {}", e))?;
+        decoder
+            .window_log_max(MAX_RESPONSES_ZSTD_WINDOW_LOG)
+            .map_err(|e| format!("Failed to bound zstd request window: {}", e))?;
         let mut decoded = Vec::new();
         decoder
             .take((MAX_RESPONSES_BODY_BYTES + 1) as u64)
@@ -228,6 +232,17 @@ fn openai_chat_completion_to_responses_json(openai: &serde_json::Value) -> serde
                 .filter(|reasoning| !reasoning.is_empty())
             {
                 output_items.push(responses_reasoning_item(response_id, reasoning));
+            }
+
+            if let Some(refusal) = message
+                .get("refusal")
+                .and_then(|v| v.as_str())
+                .filter(|refusal| !refusal.is_empty())
+            {
+                content_blocks.push(serde_json::json!({
+                    "type": "refusal",
+                    "refusal": refusal
+                }));
             }
 
             output_items.push(serde_json::json!({
@@ -1048,4 +1063,40 @@ fn convert_sse_payload_to_responses(payload: &str) -> String {
     output.push_str("\n\n");
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_refusal_serializes_as_responses_refusal_block() {
+        let openai = serde_json::json!({
+            "id": "resp_refusal",
+            "object": "chat.completion",
+            "created": 42,
+            "model": "muse",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "refusal": "I cannot help with that."
+                },
+                "finish_reason": "content_filter"
+            }]
+        });
+
+        let response = openai_chat_completion_to_responses_json(&openai);
+
+        assert_eq!(
+            response["output"][0]["content"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(response["output"][0]["content"][0]["type"], "refusal");
+        assert_eq!(
+            response["output"][0]["content"][0]["refusal"],
+            "I cannot help with that."
+        );
+    }
 }
