@@ -842,8 +842,12 @@ pub(super) async fn try_request_via_openai_protocol(
             serde_json::from_slice::<serde_json::Value>(&body)
                 .map_err(|error| TryRequestError::Other(error.into()))
                 .and_then(|response_value| {
-                    let converted = responses_response_to_openai_chat(&response_value, model_name)
-                        .map_err(TryRequestError::Other)?;
+                    let converted = responses_response_to_openai_chat(
+                        &response_value,
+                        model_name,
+                        preserve_responses_response,
+                    )
+                    .map_err(TryRequestError::Other)?;
                     if preserve_responses_response {
                         trusted_responses_response = Some(response_value);
                     }

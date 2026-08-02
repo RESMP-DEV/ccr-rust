@@ -157,6 +157,76 @@ async fn meta_muse_uses_responses_endpoint_and_returns_anthropic_json() {
 }
 
 #[tokio::test]
+async fn native_background_response_preserves_queued_empty_envelope() {
+    if !localhost_bind_available() {
+        eprintln!("Skipping test: localhost bind unavailable");
+        return;
+    }
+    let upstream = MockServer::start().await;
+    let queued_response = json!({
+        "id": "resp_background",
+        "object": "response",
+        "created_at": 45,
+        "status": "queued",
+        "background": true,
+        "model": "muse-spark-1.1",
+        "metadata": {"campaign": "background"},
+        "output": []
+    });
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(queued_response.clone()))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let config_json = json!({
+        "Providers": [{
+            "name": "meta-muse",
+            "api_base_url": upstream.uri(),
+            "api_key": "meta-test-key",
+            "models": ["muse-spark-1.1"],
+            "protocol": "responses",
+            "tier_name": "ccr-meta-muse"
+        }],
+        "Router": {
+            "default": "meta-muse,muse-spark-1.1",
+            "tiers": ["meta-muse,muse-spark-1.1"]
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+
+    let response = build_app(config)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "auto",
+                        "input": "run in the background",
+                        "background": true,
+                        "stream": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload, queued_response);
+}
+
+#[tokio::test]
 async fn meta_muse_wraps_completed_response_for_streaming_clients() {
     if !localhost_bind_available() {
         eprintln!("Skipping test: localhost bind unavailable");
