@@ -580,6 +580,16 @@ pub(super) fn build_anthropic_headers(
     Ok(headers)
 }
 
+fn should_preserve_responses_response(
+    protocol: ProviderProtocol,
+    openai_passthrough_body: Option<&serde_json::Value>,
+) -> bool {
+    protocol == ProviderProtocol::Responses
+        && openai_passthrough_body
+            .and_then(|body| body.get(super::RESPONSES_REQUEST_PASSTHROUGH_KEY))
+            .is_some()
+}
+
 pub(super) async fn try_request_via_openai_protocol(
     config: &Config,
     provider: &crate::config::Provider,
@@ -610,10 +620,8 @@ pub(super) async fn try_request_via_openai_protocol(
     // frontend) and no transformers need to modify it, reuse the original body
     // directly with only a model-name swap.  This eliminates the wasteful
     // OpenAI → Anthropic → deserialize → translate → OpenAI round-trip.
-    let preserve_responses_response = openai_passthrough_body
-        .as_ref()
-        .and_then(|body| body.get(super::RESPONSES_REQUEST_PASSTHROUGH_KEY))
-        .is_some();
+    let preserve_responses_response =
+        should_preserve_responses_response(provider.protocol, openai_passthrough_body.as_ref());
     let (mut openai_request_value, stream_flag) = if let Some(mut body) = openai_passthrough_body {
         // Swap model name to the backend's expected value.
         if let Some(obj) = body.as_object_mut() {
@@ -1382,6 +1390,26 @@ mod tests {
             assert!(check_body_for_embedded_error(body, "test-tier").is_ok());
             assert!(embedded_stream_error(std::str::from_utf8(body).unwrap()).is_none());
         }
+    }
+
+    #[test]
+    fn native_response_preservation_requires_responses_provider() {
+        let mut body = serde_json::json!({});
+        body[super::super::RESPONSES_REQUEST_PASSTHROUGH_KEY] =
+            serde_json::json!({"input": "test"});
+
+        assert!(should_preserve_responses_response(
+            ProviderProtocol::Responses,
+            Some(&body)
+        ));
+        assert!(!should_preserve_responses_response(
+            ProviderProtocol::Openai,
+            Some(&body)
+        ));
+        assert!(!should_preserve_responses_response(
+            ProviderProtocol::Anthropic,
+            Some(&body)
+        ));
     }
 
     #[test]
