@@ -823,18 +823,20 @@ pub(super) async fn try_request_via_openai_protocol(
 
         // Check for embedded error in 200 body BEFORE recording success,
         // otherwise a failed request corrupts tier rate-limit state.
-        if let Err(error) = check_body_for_embedded_error(&body, tier_name) {
-            let body_str = String::from_utf8_lossy(&raw_body);
-            persist_debug_capture(
-                debug_capture.as_ref(),
-                capture_builder,
-                resp_status,
-                &body_str,
-                captured_headers,
-                Some(error.to_string()),
-            )
-            .await;
-            return Err(error);
+        if !preserve_responses_response {
+            if let Err(error) = check_body_for_embedded_error(&body, tier_name) {
+                let body_str = String::from_utf8_lossy(&raw_body);
+                persist_debug_capture(
+                    debug_capture.as_ref(),
+                    capture_builder,
+                    resp_status,
+                    &body_str,
+                    captured_headers,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
+            }
         }
 
         let mut trusted_responses_response = None;

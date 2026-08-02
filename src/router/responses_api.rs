@@ -668,7 +668,11 @@ pub(super) fn responses_request_to_openai_chat_request(
         };
         request["reasoning_effort"] = serde_json::Value::String(effort.to_string());
     }
-    if let Some(previous_response_id) = body.get("previous_response_id").cloned() {
+    if let Some(previous_response_id) = body
+        .get("previous_response_id")
+        .filter(|value| !value.is_null())
+        .cloned()
+    {
         request["previous_response_id"] = previous_response_id;
     }
     Ok(request)
@@ -852,13 +856,38 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
     Response::from_parts(parts, Body::from(output))
 }
 
-fn add_reasoning_output_item(output: &mut String, response_id: &str, added: &mut bool) {
+fn initial_responses_output_item(item: &serde_json::Value) -> serde_json::Value {
+    let mut initial = item.clone();
+    match item.get("type").and_then(|value| value.as_str()) {
+        Some("message") => initial["content"] = serde_json::json!([]),
+        Some("reasoning") => {
+            initial["summary"] = serde_json::json!([]);
+            if initial.get("content").is_some() {
+                initial["content"] = serde_json::json!([]);
+            }
+        }
+        Some("function_call") => initial["arguments"] = serde_json::json!(""),
+        _ => {}
+    }
+    initial
+}
+
+fn add_reasoning_output_item(
+    output: &mut String,
+    response_id: &str,
+    added: &mut bool,
+    output_index: &mut Option<usize>,
+    next_output_index: &mut usize,
+) {
     if *added {
         return;
     }
 
+    let index = *next_output_index;
+    *next_output_index += 1;
     let event = serde_json::json!({
         "type": "response.output_item.added",
+        "output_index": index,
         "item": {
             "id": format!("rs_{}", response_id),
             "type": "reasoning",
@@ -869,6 +898,7 @@ fn add_reasoning_output_item(output: &mut String, response_id: &str, added: &mut
     output.push_str(&event.to_string());
     output.push_str("\n\n");
     *added = true;
+    *output_index = Some(index);
 }
 
 fn convert_sse_payload_to_responses(
@@ -881,6 +911,7 @@ fn convert_sse_payload_to_responses(
         name: String,
         arguments: String,
         added: bool,
+        output_index: Option<usize>,
     }
 
     let mut output = String::new();
@@ -892,7 +923,10 @@ fn convert_sse_payload_to_responses(
     let mut model = "unknown".to_string();
     let mut created_sent = false;
     let mut reasoning_item_added = false;
+    let mut reasoning_output_index = None;
     let mut message_item_added = false;
+    let mut message_output_index = None;
+    let mut next_output_index = 0;
     let mut message_text = String::new();
     let mut refusal_text = String::new();
     let mut reasoning_text = String::new();
@@ -991,7 +1025,7 @@ fn convert_sse_payload_to_responses(
                     let added = serde_json::json!({
                         "type": "response.output_item.added",
                         "output_index": output_index,
-                        "item": item
+                        "item": initial_responses_output_item(item)
                     });
                     output.push_str("event: response.output_item.added\ndata: ");
                     output.push_str(&added.to_string());
@@ -1017,8 +1051,11 @@ fn convert_sse_payload_to_responses(
             if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
                 if !message_item_added {
                     if preserved_response.is_none() {
+                        let output_index = next_output_index;
+                        next_output_index += 1;
                         let added = serde_json::json!({
                             "type": "response.output_item.added",
+                            "output_index": output_index,
                             "item": {
                                 "id": format!("msg_{}", response_id),
                                 "type": "message",
@@ -1029,6 +1066,7 @@ fn convert_sse_payload_to_responses(
                         output.push_str("event: response.output_item.added\ndata: ");
                         output.push_str(&added.to_string());
                         output.push_str("\n\n");
+                        message_output_index = Some(output_index);
                     }
                     message_item_added = true;
                 }
@@ -1049,7 +1087,13 @@ fn convert_sse_payload_to_responses(
                 .filter(|reasoning| !reasoning.is_empty())
             {
                 if preserved_response.is_none() {
-                    add_reasoning_output_item(&mut output, &response_id, &mut reasoning_item_added);
+                    add_reasoning_output_item(
+                        &mut output,
+                        &response_id,
+                        &mut reasoning_item_added,
+                        &mut reasoning_output_index,
+                        &mut next_output_index,
+                    );
                 } else {
                     reasoning_item_added = true;
                 }
@@ -1071,8 +1115,11 @@ fn convert_sse_payload_to_responses(
             {
                 if !message_item_added {
                     if preserved_response.is_none() {
+                        let output_index = next_output_index;
+                        next_output_index += 1;
                         let added = serde_json::json!({
                             "type": "response.output_item.added",
+                            "output_index": output_index,
                             "item": {
                                 "id": format!("msg_{}", response_id),
                                 "type": "message",
@@ -1083,6 +1130,7 @@ fn convert_sse_payload_to_responses(
                         output.push_str("event: response.output_item.added\ndata: ");
                         output.push_str(&added.to_string());
                         output.push_str("\n\n");
+                        message_output_index = Some(output_index);
                     }
                     message_item_added = true;
                 }
@@ -1128,8 +1176,11 @@ fn convert_sse_payload_to_responses(
                             entry.name = "tool".to_string();
                         }
                         if preserved_response.is_none() {
+                            let output_index = next_output_index;
+                            next_output_index += 1;
                             let added = serde_json::json!({
                                 "type": "response.output_item.added",
+                                "output_index": output_index,
                                 "item": {
                                     "id": entry.id,
                                     "type": "function_call",
@@ -1141,6 +1192,7 @@ fn convert_sse_payload_to_responses(
                             output.push_str("event: response.output_item.added\ndata: ");
                             output.push_str(&added.to_string());
                             output.push_str("\n\n");
+                            entry.output_index = Some(output_index);
                         }
                         entry.added = true;
                     }
@@ -1163,8 +1215,11 @@ fn convert_sse_payload_to_responses(
                         if !text.is_empty() {
                             if !message_item_added {
                                 if preserved_response.is_none() {
+                                    let output_index = next_output_index;
+                                    next_output_index += 1;
                                     let added = serde_json::json!({
                                         "type": "response.output_item.added",
+                                        "output_index": output_index,
                                         "item": {
                                             "id": format!("msg_{}", response_id),
                                             "type": "message",
@@ -1175,6 +1230,7 @@ fn convert_sse_payload_to_responses(
                                     output.push_str("event: response.output_item.added\ndata: ");
                                     output.push_str(&added.to_string());
                                     output.push_str("\n\n");
+                                    message_output_index = Some(output_index);
                                 }
                                 message_item_added = true;
                             }
@@ -1195,6 +1251,8 @@ fn convert_sse_payload_to_responses(
                                     &mut output,
                                     &response_id,
                                     &mut reasoning_item_added,
+                                    &mut reasoning_output_index,
+                                    &mut next_output_index,
                                 );
                             } else {
                                 reasoning_item_added = true;
@@ -1226,13 +1284,16 @@ fn convert_sse_payload_to_responses(
         }
     }
 
-    let mut output_items = Vec::new();
+    let mut indexed_output_items = Vec::new();
 
     if preserved_response.is_none() && !reasoning_text.is_empty() {
         let reasoning_item = responses_reasoning_item(&response_id, &reasoning_text);
-        output_items.push(reasoning_item.clone());
+        let output_index =
+            reasoning_output_index.expect("generated reasoning output must have an added event");
+        indexed_output_items.push((output_index, reasoning_item.clone()));
         let done = serde_json::json!({
             "type": "response.output_item.done",
+            "output_index": output_index,
             "item": reasoning_item
         });
         output.push_str("event: response.output_item.done\ndata: ");
@@ -1260,9 +1321,12 @@ fn convert_sse_payload_to_responses(
             "role": "assistant",
             "content": message_content
         });
-        output_items.push(message_item.clone());
+        let output_index =
+            message_output_index.expect("generated message output must have an added event");
+        indexed_output_items.push((output_index, message_item.clone()));
         let done = serde_json::json!({
             "type": "response.output_item.done",
+            "output_index": output_index,
             "item": message_item
         });
         output.push_str("event: response.output_item.done\ndata: ");
@@ -1288,15 +1352,43 @@ fn convert_sse_payload_to_responses(
             "name": name,
             "arguments": tool.arguments
         });
-        output_items.push(item.clone());
+        let output_index = if let Some(output_index) = tool.output_index {
+            output_index
+        } else {
+            let output_index = next_output_index;
+            next_output_index += 1;
+            let added = serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": {
+                    "id": call_id,
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": ""
+                }
+            });
+            output.push_str("event: response.output_item.added\ndata: ");
+            output.push_str(&added.to_string());
+            output.push_str("\n\n");
+            output_index
+        };
+        indexed_output_items.push((output_index, item.clone()));
         let done = serde_json::json!({
             "type": "response.output_item.done",
+            "output_index": output_index,
             "item": item
         });
         output.push_str("event: response.output_item.done\ndata: ");
         output.push_str(&done.to_string());
         output.push_str("\n\n");
     }
+
+    indexed_output_items.sort_by_key(|(output_index, _)| *output_index);
+    let mut output_items = indexed_output_items
+        .into_iter()
+        .map(|(_, item)| item)
+        .collect::<Vec<_>>();
 
     if let Some(items) = preserved_response
         .as_ref()
@@ -1317,6 +1409,8 @@ fn convert_sse_payload_to_responses(
     }
 
     let terminal_type = match response_status.as_str() {
+        "queued" => "response.queued",
+        "in_progress" => "response.in_progress",
         "completed" => "response.completed",
         "incomplete" => "response.incomplete",
         "failed" => "response.failed",
@@ -1368,6 +1462,19 @@ mod tests {
         let error = responses_request_to_openai_chat_request(&request).unwrap_err();
 
         assert_eq!(error, "responses request 'reasoning' must be an object");
+    }
+
+    #[test]
+    fn drops_null_previous_response_id() {
+        let request = serde_json::json!({
+            "model": "auto",
+            "input": "Continue",
+            "previous_response_id": null
+        });
+
+        let converted = responses_request_to_openai_chat_request(&request).unwrap();
+
+        assert!(converted.get("previous_response_id").is_none());
     }
 
     #[test]
