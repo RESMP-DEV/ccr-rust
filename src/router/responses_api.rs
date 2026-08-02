@@ -912,6 +912,49 @@ fn response_output_item_identity(
     })
 }
 
+fn unique_response_output_item_identity(
+    response: &serde_json::Value,
+    item_type: &str,
+    content_type: Option<&str>,
+) -> Option<ResponseOutputItemIdentity> {
+    let mut matching_items = response
+        .get("output")?
+        .as_array()?
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.get("type").and_then(|value| value.as_str()) == Some(item_type));
+    let (output_index, item) = matching_items.next()?;
+    if matching_items.next().is_some() {
+        return None;
+    }
+    let content_index = if let Some(content_type) = content_type {
+        let mut matching_content = item
+            .get("content")
+            .and_then(|content| content.as_array())
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, part)| {
+                part.get("type").and_then(|value| value.as_str()) == Some(content_type)
+            });
+        let first = matching_content.next().map(|(index, _)| index).unwrap_or(0);
+        if matching_content.next().is_some() {
+            return None;
+        }
+        Some(first)
+    } else {
+        None
+    };
+    Some(ResponseOutputItemIdentity {
+        output_index,
+        item_id: item
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        content_index,
+    })
+}
+
 fn append_response_delta(
     output: &mut String,
     event_type: &str,
@@ -1144,7 +1187,11 @@ fn convert_sse_payload_to_responses(
                 let identity = preserved_response
                     .as_ref()
                     .and_then(|response| {
-                        response_output_item_identity(response, "message", 0, Some("output_text"))
+                        unique_response_output_item_identity(
+                            response,
+                            "message",
+                            Some("output_text"),
+                        )
                     })
                     .or_else(|| {
                         message_output_index.map(|output_index| ResponseOutputItemIdentity {
@@ -1176,10 +1223,9 @@ fn convert_sse_payload_to_responses(
                 let identity = preserved_response
                     .as_ref()
                     .and_then(|response| {
-                        response_output_item_identity(
+                        unique_response_output_item_identity(
                             response,
                             "reasoning",
-                            0,
                             Some("reasoning_text"),
                         )
                     })
@@ -1228,7 +1274,7 @@ fn convert_sse_payload_to_responses(
                 let identity = preserved_response
                     .as_ref()
                     .and_then(|response| {
-                        response_output_item_identity(response, "message", 0, Some("refusal"))
+                        unique_response_output_item_identity(response, "message", Some("refusal"))
                     })
                     .or_else(|| {
                         message_output_index.map(|output_index| ResponseOutputItemIdentity {
@@ -1366,10 +1412,9 @@ fn convert_sse_payload_to_responses(
                             let identity = preserved_response
                                 .as_ref()
                                 .and_then(|response| {
-                                    response_output_item_identity(
+                                    unique_response_output_item_identity(
                                         response,
                                         "message",
-                                        0,
                                         Some("output_text"),
                                     )
                                 })
@@ -1407,10 +1452,9 @@ fn convert_sse_payload_to_responses(
                             let identity = preserved_response
                                 .as_ref()
                                 .and_then(|response| {
-                                    response_output_item_identity(
+                                    unique_response_output_item_identity(
                                         response,
                                         "reasoning",
-                                        0,
                                         Some("reasoning_text"),
                                     )
                                 })
@@ -1786,6 +1830,63 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {event_type}"));
             assert_eq!(event["output_index"], output_index);
             assert_eq!(event["item_id"], item_id);
+        }
+    }
+
+    #[test]
+    fn preserved_pseudo_stream_suppresses_ambiguous_flattened_text_deltas() {
+        let ambiguous_outputs = [
+            serde_json::json!([{
+                "id": "msg_first",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "first"}]
+            }, {
+                "id": "msg_second",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "second"}]
+            }]),
+            serde_json::json!([{
+                "id": "msg_multi_content",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "first"},
+                    {"type": "output_text", "text": "second"}
+                ]
+            }]),
+        ];
+        let payload = concat!(
+            "data: {\"id\":\"resp_native\",\"object\":\"chat.completion.chunk\",",
+            "\"created\":42,\"model\":\"muse\",\"choices\":[{\"index\":0,",
+            "\"delta\":{\"content\":\"first\\n\\nsecond\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        for output in ambiguous_outputs {
+            let preserved = serde_json::json!({
+                "id": "resp_native",
+                "object": "response",
+                "created_at": 42,
+                "status": "completed",
+                "model": "muse",
+                "output": output
+            });
+            let converted = convert_sse_payload_to_responses(payload, Some(&preserved));
+            let events = parse_sse_frames(&converted)
+                .into_iter()
+                .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+                .collect::<Vec<_>>();
+
+            assert!(!events
+                .iter()
+                .any(|event| event["type"] == "response.output_text.delta"));
+            let completed = events
+                .iter()
+                .find(|event| event["type"] == "response.completed")
+                .expect("exact preserved terminal event should remain");
+            assert_eq!(completed["response"], preserved);
         }
     }
 
