@@ -209,8 +209,9 @@ pub struct OpenAIUsage {
     #[serde(default)]
     pub completion_tokens: u64,
     #[serde(default)]
-    #[allow(dead_code)]
     pub prompt_tokens_details: Option<serde_json::Value>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<serde_json::Value>,
 }
 
 /// OpenAI streaming response chunk.
@@ -305,6 +306,10 @@ pub enum AnthropicContentBlock {
 pub struct AnthropicUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
 }
 
 /// Anthropic streaming event types.

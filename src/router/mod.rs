@@ -633,6 +633,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 20,
                 prompt_tokens_details: None,
+                completion_tokens_details: None,
             }),
         };
 

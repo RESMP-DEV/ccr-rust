@@ -218,6 +218,7 @@ pub async fn stream_response_translated(
             Some(AnthropicUsage {
                 input_tokens,
                 output_tokens,
+                ..Default::default()
             })
         } else {
             // Estimate from accumulated content if no usage reported
@@ -225,6 +226,7 @@ pub async fn stream_response_translated(
             Some(AnthropicUsage {
                 input_tokens,
                 output_tokens: estimated_output as u64,
+                ..Default::default()
             })
         };
 
@@ -586,6 +588,13 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
     let reasoning_offset = usize::from(reasoning.is_some());
 
     // message_start
+    let mut start_usage = serde_json::json!({
+        "input_tokens": resp.usage.input_tokens,
+        "output_tokens": 0
+    });
+    if let Some(cached_tokens) = resp.usage.cache_read_input_tokens {
+        start_usage["cache_read_input_tokens"] = serde_json::json!(cached_tokens);
+    }
     let start_msg = serde_json::json!({
         "type": "message_start",
         "message": {
@@ -596,10 +605,7 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
             "model": resp.model,
             "stop_reason": null,
             "stop_sequence": null,
-            "usage": {
-                "input_tokens": resp.usage.input_tokens,
-                "output_tokens": 0
-            }
+            "usage": start_usage
         }
     });
     events.push(format!("event: message_start\ndata: {}\n\n", start_msg));
@@ -722,15 +728,19 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
     }
 
     // message_delta
+    let mut delta_usage = serde_json::json!({
+        "output_tokens": resp.usage.output_tokens
+    });
+    if let Some(reasoning_tokens) = resp.usage.reasoning_tokens {
+        delta_usage["reasoning_tokens"] = serde_json::json!(reasoning_tokens);
+    }
     let msg_delta = serde_json::json!({
         "type": "message_delta",
         "delta": {
             "stop_reason": resp.stop_reason,
             "stop_sequence": null
         },
-        "usage": {
-            "output_tokens": resp.usage.output_tokens
-        }
+        "usage": delta_usage
     });
     events.push(format!("event: message_delta\ndata: {}\n\n", msg_delta));
 
@@ -858,6 +868,7 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 100,
                 output_tokens: 20,
+                ..Default::default()
             },
             reasoning_content: None,
         };
@@ -911,6 +922,8 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 50,
                 output_tokens: 30,
+                cache_read_input_tokens: Some(7),
+                reasoning_tokens: Some(11),
             },
             reasoning_content: None,
         };
@@ -929,6 +942,8 @@ mod tests {
         );
         assert!(joined.contains("sig123"), "missing signature content");
         assert!(joined.contains("text_delta"), "missing text_delta");
+        assert!(joined.contains("\"cache_read_input_tokens\":7"));
+        assert!(joined.contains("\"reasoning_tokens\":11"));
     }
 
     #[test]
@@ -957,6 +972,7 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 100,
                 output_tokens: 40,
+                ..Default::default()
             },
             reasoning_content: None,
         };
