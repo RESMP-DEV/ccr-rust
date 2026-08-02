@@ -282,6 +282,7 @@ pub async fn handle_messages(
                 ratelimit_tracker: state.ratelimit_tracker.clone(),
                 debug_capture: state.debug_capture.clone(),
                 openai_passthrough_body: request.openai_passthrough_body.as_ref(),
+                render_refusal_as_anthropic_text: frontend == FrontendType::ClaudeCode,
             })
             .await
             {

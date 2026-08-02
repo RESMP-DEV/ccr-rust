@@ -480,7 +480,7 @@ async fn meta_muse_preserves_reasoning_refusal_and_incomplete_status() {
             }],
             "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
         })))
-        .expect(2)
+        .expect(4)
         .mount(&upstream)
         .await;
 
@@ -518,6 +518,7 @@ async fn meta_muse_preserves_reasoning_refusal_and_incomplete_status() {
                             "model": "auto",
                             "input": "refuse this",
                             "reasoning": {"effort": "high", "summary": "detailed"},
+                            "previous_response_id": "resp_previous",
                             "stream": stream
                         }))
                         .unwrap(),
@@ -564,9 +565,56 @@ async fn meta_muse_preserves_reasoning_refusal_and_incomplete_status() {
         }
     }
 
+    for stream in [false, true] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("anthropic-version", "2023-06-01")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "model": "auto",
+                            "max_tokens": 64,
+                            "messages": [{"role": "user", "content": "refuse this"}],
+                            "stream": stream
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        if stream {
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            assert!(text.contains("I cannot help with that."));
+            assert!(text.contains("text_delta"));
+        } else {
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                payload["content"][0],
+                json!({"type": "text", "text": "I cannot help with that."})
+            );
+        }
+    }
+
     let requests = upstream.received_requests().await.unwrap();
-    assert!(requests.iter().all(|request| {
+    let continued_requests = requests
+        .iter()
+        .filter(|request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            body.get("previous_response_id").is_some()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(continued_requests.len(), 2);
+    assert!(continued_requests.iter().all(|request| {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
         body["reasoning"] == json!({"effort": "high", "summary": "detailed"})
+            && body["previous_response_id"] == "resp_previous"
     }));
 }

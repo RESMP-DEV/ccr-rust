@@ -189,6 +189,9 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
     } else if let Some(reasoning_effort) = request.get("reasoning_effort") {
         body["reasoning"] = json!({"effort": reasoning_effort});
     }
+    if let Some(previous_response_id) = request.get("previous_response_id") {
+        body["previous_response_id"] = previous_response_id.clone();
+    }
     if let Some(tools) = request.get("tools").and_then(Value::as_array) {
         body["tools"] = Value::Array(tools.iter().filter_map(responses_tool).collect());
     }
