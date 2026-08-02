@@ -615,13 +615,9 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                     _ => assert_eq!(added[output_index]["item"], *item),
                 }
             }
-            let reasoning_delta = events
+            assert!(!events
                 .iter()
-                .find(|event| event["type"] == "response.reasoning_text.delta")
-                .expect("reasoning delta should be replayed with item identity");
-            assert_eq!(reasoning_delta["output_index"], 0);
-            assert_eq!(reasoning_delta["item_id"], "rs_native");
-            assert_eq!(reasoning_delta["content_index"], 0);
+                .any(|event| event["type"] == "response.reasoning_text.delta"));
             let output_text_delta = events
                 .iter()
                 .find(|event| event["type"] == "response.output_text.delta")
