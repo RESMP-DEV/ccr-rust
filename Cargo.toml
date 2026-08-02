@@ -24,7 +24,7 @@ env_logger = "0.11"
 flate2 = "1.0"
 futures = "0.3"
 gp-routing = { version = "0.1.0", path = "vendor/gp-routing", optional = true }
-sindexer = { version = "0.1.0", git = "https://github.com/RESMP-DEV/rust_sindexer.git", rev = "b7c8d998732b8325b59aa2ca9fbde643c898da78", default-features = false, optional = true }
+sindexer = { version = "0.1.0", git = "https://github.com/RESMP-DEV/rust_sindexer.git", rev = "d87cf842c08605e98a9d3df48306640f0e567ca7", default-features = false, optional = true }
 hex = "0.4"
 humantime = "2"
 jsonschema = "0.29"
