@@ -264,7 +264,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                 "total_tokens": 12
             }
         })))
-        .expect(3)
+        .expect(4)
         .mount(&upstream)
         .await;
 
@@ -360,6 +360,36 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             );
         }
     }
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("anthropic-version", "2023-06-01")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "auto",
+                        "messages": [{"role": "user", "content": "native stream"}],
+                        "max_tokens": 256,
+                        "stream": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let native_stream = String::from_utf8(body.to_vec()).unwrap();
+    assert!(native_stream.contains("streamed through adapters"));
+    assert!(!native_stream.contains("thinking_delta"));
+    assert!(!native_stream.contains("Reasoning survives adapters"));
 
     let response = app
         .oneshot(

@@ -48,6 +48,7 @@ fn response_content_blocks(content: &Value, role: &str) -> Vec<Value> {
         "input_text"
     };
     match content {
+        Value::String(text) if text.is_empty() => Vec::new(),
         Value::String(text) => vec![json!({"type": text_type, "text": text})],
         Value::Array(items) => items
             .iter()
@@ -56,7 +57,8 @@ fn response_content_blocks(content: &Value, role: &str) -> Vec<Value> {
                 match item_type {
                     "text" | "input_text" | "output_text" => item
                         .get("text")
-                        .cloned()
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
                         .map(|text| json!({"type": text_type, "text": text})),
                     "image_url" => item
                         .get("image_url")
@@ -391,7 +393,7 @@ mod tests {
                     {"type": "image_url", "image_url": {}},
                     {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}
                 ]},
-                {"role": "assistant", "tool_calls": [{
+                {"role": "assistant", "content": "", "tool_calls": [{
                     "id": "call_1",
                     "type": "function",
                     "function": {"name": "flat", "arguments": ""}

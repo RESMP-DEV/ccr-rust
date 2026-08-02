@@ -10,11 +10,14 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use std::io::Read;
 use tracing::error;
 
 mod handler;
 
 pub use handler::handle_responses;
+
+pub(super) const MAX_RESPONSES_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 fn parse_sse_frames(payload: &str) -> Vec<(Option<String>, String)> {
     let mut frames = Vec::new();
@@ -62,8 +65,20 @@ pub(super) fn decode_request_body(bytes: &[u8], headers: &HeaderMap) -> Result<V
     }
 
     if content_encoding.contains("zstd") || content_encoding.contains("zst") {
-        return zstd::stream::decode_all(std::io::Cursor::new(bytes))
-            .map_err(|e| format!("Failed to decode zstd request body: {}", e));
+        let decoder = zstd::stream::read::Decoder::new(std::io::Cursor::new(bytes))
+            .map_err(|e| format!("Failed to decode zstd request body: {}", e))?;
+        let mut decoded = Vec::new();
+        decoder
+            .take((MAX_RESPONSES_BODY_BYTES + 1) as u64)
+            .read_to_end(&mut decoded)
+            .map_err(|e| format!("Failed to decode zstd request body: {}", e))?;
+        if decoded.len() > MAX_RESPONSES_BODY_BYTES {
+            return Err(format!(
+                "Decoded request body exceeds {} bytes",
+                MAX_RESPONSES_BODY_BYTES
+            ));
+        }
+        return Ok(decoded);
     }
 
     Err(format!(
@@ -348,6 +363,14 @@ pub(super) fn responses_request_to_openai_chat_request(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "responses request requires 'model'".to_string())?;
 
+    match body.get("input") {
+        None => {}
+        Some(input) if input.is_string() || input.is_array() => {}
+        Some(_) => {
+            return Err("responses request 'input' must be text or an array".to_string());
+        }
+    }
+
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
     if let Some(instructions) = body.get("instructions").and_then(|v| v.as_str()) {
@@ -460,11 +483,8 @@ pub(super) fn responses_request_to_openai_chat_request(
             }
         }
     }
-    if body
-        .get("input")
-        .is_some_and(|input| !input.is_string() && !input.is_array())
-    {
-        return Err("responses request 'input' must be text or an array".to_string());
+    if messages.is_empty() {
+        return Err("responses request requires 'input' or 'instructions'".to_string());
     }
 
     let mut request = serde_json::json!({
