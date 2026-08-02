@@ -341,10 +341,17 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 event["choices"][0]["delta"]["refusal"] =
                     serde_json::Value::String(refusal.to_string());
             }
-            if let Some(status) = message.get("response_status") {
-                event["response_status"] = status.clone();
+            if let Some(status) = message
+                .get("response_status")
+                .and_then(|value| value.as_str())
+                .filter(|status| !status.is_empty())
+            {
+                event["response_status"] = serde_json::Value::String(status.to_string());
             }
-            if let Some(incomplete_details) = message.get("incomplete_details") {
+            if let Some(incomplete_details) = message
+                .get("incomplete_details")
+                .filter(|value| !value.is_null())
+            {
                 event["incomplete_details"] = incomplete_details.clone();
             }
             event
@@ -712,6 +719,27 @@ mod tests {
         );
         assert!(result["choices"][0]["finish_reason"].is_null());
         assert!(result.get("usage").is_none());
+    }
+
+    #[test]
+    fn test_transform_streaming_message_start_omits_null_metadata() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_event = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_stream123",
+                "model": "claude-sonnet-4-6",
+                "refusal": null,
+                "response_status": null,
+                "incomplete_details": null
+            }
+        });
+
+        let result = transformer.transform_response(anthropic_event).unwrap();
+
+        assert!(result["choices"][0]["delta"].get("refusal").is_none());
+        assert!(result.get("response_status").is_none());
+        assert!(result.get("incomplete_details").is_none());
     }
 
     #[test]

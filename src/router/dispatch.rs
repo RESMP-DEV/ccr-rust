@@ -610,7 +610,7 @@ pub(super) async fn try_request_via_openai_protocol(
     // frontend) and no transformers need to modify it, reuse the original body
     // directly with only a model-name swap.  This eliminates the wasteful
     // OpenAI → Anthropic → deserialize → translate → OpenAI round-trip.
-    let (openai_request_value, stream_flag) = if let Some(mut body) = openai_passthrough_body {
+    let (mut openai_request_value, stream_flag) = if let Some(mut body) = openai_passthrough_body {
         // Swap model name to the backend's expected value.
         if let Some(obj) = body.as_object_mut() {
             obj.insert(
@@ -639,6 +639,11 @@ pub(super) async fn try_request_via_openai_protocol(
             serde_json::to_value(&openai_request).map_err(|e| TryRequestError::Other(e.into()))?;
         (value, stream)
     };
+    if provider.protocol != ProviderProtocol::Responses {
+        if let Some(object) = openai_request_value.as_object_mut() {
+            object.remove(super::RESPONSES_REASONING_PASSTHROUGH_KEY);
+        }
+    }
     let (request_value, stream_flag) = if provider.protocol == ProviderProtocol::Responses {
         (
             openai_chat_request_to_responses(&openai_request_value, model_name)
@@ -901,10 +906,10 @@ pub(super) async fn try_request_via_openai_protocol(
             let mut anthropic_resp =
                 translate_response_openai_to_anthropic(openai_resp, model_name);
             if render_refusal_as_anthropic_text && anthropic_resp.content.is_empty() {
-                if let Some(refusal) = anthropic_resp.refusal.as_deref() {
-                    anthropic_resp.content.push(AnthropicContentBlock::Text {
-                        text: refusal.to_string(),
-                    });
+                if let Some(refusal) = anthropic_resp.refusal.take() {
+                    anthropic_resp
+                        .content
+                        .push(AnthropicContentBlock::Text { text: refusal });
                 }
             }
 

@@ -34,7 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed empty requests fail locally. Pseudo-stream tool calls use dense
   OpenAI indices even when internal text or reasoning blocks precede them.
   Streaming regression coverage uses a deterministic upstream-tail gate rather
-  than a machine-load-sensitive wall-clock race.
+  than a machine-load-sensitive wall-clock race. Same-protocol Responses routes
+  retain native tools and one response identity, reasoning controls are
+  validated and translated symmetrically, terminal event types preserve failed
+  and cancelled states, absent metadata is omitted instead of serialized as
+  `null`, and unsupported request encodings return HTTP 415.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 

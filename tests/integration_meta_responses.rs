@@ -300,7 +300,13 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
         ),
         (
             "/v1/responses",
-            json!({"model": "auto", "input": "stream responses", "stream": true}),
+            json!({
+                "model": "auto",
+                "input": "stream responses",
+                "stream": true,
+                "tools": [{"type": "web_search", "search_context_size": "low"}],
+                "tool_choice": {"type": "web_search"}
+            }),
         ),
     ] {
         let response = app
@@ -441,16 +447,18 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
     }));
     assert!(requests.iter().any(|request| {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        body["input"].as_array().is_some_and(|items| {
-            items.iter().any(|item| {
-                item["role"] == "user"
-                    && item["content"].as_array().is_some_and(|content| {
-                        content.iter().any(|part| {
-                            part["type"] == "input_text" && part["text"] == "stream responses"
+        body["tools"] == json!([{"type": "web_search", "search_context_size": "low"}])
+            && body["tool_choice"] == json!({"type": "web_search"})
+            && body["input"].as_array().is_some_and(|items| {
+                items.iter().any(|item| {
+                    item["role"] == "user"
+                        && item["content"].as_array().is_some_and(|content| {
+                            content.iter().any(|part| {
+                                part["type"] == "input_text" && part["text"] == "stream responses"
+                            })
                         })
-                    })
+                })
             })
-        })
     }));
 }
 
@@ -600,6 +608,7 @@ async fn meta_muse_preserves_reasoning_refusal_and_incomplete_status() {
                 payload["content"][0],
                 json!({"type": "text", "text": "I cannot help with that."})
             );
+            assert!(payload.get("refusal").is_none());
         }
     }
 

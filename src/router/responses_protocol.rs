@@ -88,7 +88,7 @@ fn response_content_blocks(content: &Value, role: &str) -> Result<Vec<Value>> {
 
 fn responses_tool(tool: &Value) -> Option<Value> {
     if tool.get("type").and_then(Value::as_str) != Some("function") {
-        return None;
+        return Some(tool.clone());
     }
     if tool.get("name").and_then(Value::as_str).is_some() {
         return Some(tool.clone());
@@ -105,7 +105,7 @@ fn responses_tool_choice(choice: &Value) -> Option<Value> {
         return Some(choice.clone());
     }
     if choice.get("type").and_then(Value::as_str) != Some("function") {
-        return None;
+        return Some(choice.clone());
     }
     if choice.get("name").and_then(Value::as_str).is_some() {
         return Some(choice.clone());
@@ -184,9 +184,19 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
             body[key] = value.clone();
         }
     }
-    if let Some(reasoning) = request.get("reasoning") {
+    if let Some(reasoning) = request
+        .get(super::RESPONSES_REASONING_PASSTHROUGH_KEY)
+        .or_else(|| request.get("reasoning"))
+        .filter(|value| !value.is_null())
+    {
         body["reasoning"] = reasoning.clone();
-    } else if let Some(reasoning_effort) = request.get("reasoning_effort") {
+    } else if let Some(reasoning_effort) = request
+        .get("reasoning_effort")
+        .filter(|value| !value.is_null())
+    {
+        let reasoning_effort = reasoning_effort
+            .as_str()
+            .ok_or_else(|| anyhow!("OpenAI reasoning_effort must be a string"))?;
         body["reasoning"] = json!({"effort": reasoning_effort});
     }
     if let Some(previous_response_id) = request.get("previous_response_id") {
@@ -403,7 +413,10 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
     if let Some(status) = response.get("status").and_then(Value::as_str) {
         converted["response_status"] = Value::String(status.to_string());
     }
-    if let Some(incomplete_details) = response.get("incomplete_details") {
+    if let Some(incomplete_details) = response
+        .get("incomplete_details")
+        .filter(|value| !value.is_null())
+    {
         converted["incomplete_details"] = incomplete_details.clone();
     }
     Ok(converted)
@@ -469,14 +482,63 @@ mod tests {
             converted["input"][1]["content"][0]["image_url"],
             "https://example.test/a.png"
         );
-        assert_eq!(converted["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(converted["tools"].as_array().unwrap().len(), 3);
         assert_eq!(converted["tools"][0]["name"], "flat");
         assert_eq!(converted["tools"][1]["name"], "nested");
+        assert_eq!(converted["tools"][2]["type"], "code_interpreter");
         assert_eq!(
             converted["tool_choice"],
             json!({"type": "function", "name": "nested"})
         );
         assert_eq!(converted["input"][2]["arguments"], "{}");
+    }
+
+    #[test]
+    fn reasoning_null_falls_back_to_valid_effort() {
+        let request = json!({
+            "messages": [{"role": "user", "content": "Think"}],
+            "reasoning": null,
+            "reasoning_effort": "medium"
+        });
+
+        let converted = openai_chat_request_to_responses(&request, "muse").unwrap();
+
+        assert_eq!(converted["reasoning"], json!({"effort": "medium"}));
+    }
+
+    #[test]
+    fn preserves_internal_responses_reasoning_object() {
+        let mut request = json!({
+            "messages": [{"role": "user", "content": "Think"}],
+            "reasoning_effort": "high"
+        });
+        request[super::super::RESPONSES_REASONING_PASSTHROUGH_KEY] =
+            json!({"effort": "high", "summary": "detailed"});
+
+        let converted = openai_chat_request_to_responses(&request, "muse").unwrap();
+
+        assert_eq!(
+            converted["reasoning"],
+            json!({"effort": "high", "summary": "detailed"})
+        );
+        assert!(converted
+            .get(super::super::RESPONSES_REASONING_PASSTHROUGH_KEY)
+            .is_none());
+    }
+
+    #[test]
+    fn rejects_non_string_reasoning_effort() {
+        let request = json!({
+            "messages": [{"role": "user", "content": "Think"}],
+            "reasoning_effort": {"unexpected": true}
+        });
+
+        let error = openai_chat_request_to_responses(&request, "muse").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "OpenAI reasoning_effort must be a string"
+        );
     }
 
     #[test]

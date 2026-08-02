@@ -602,21 +602,28 @@ fn emit_anthropic_sse_events(
     if let Some(cached_tokens) = resp.usage.cache_read_input_tokens {
         start_usage["cache_read_input_tokens"] = serde_json::json!(cached_tokens);
     }
+    let mut message = serde_json::json!({
+        "id": resp.id,
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "model": resp.model,
+        "stop_reason": null,
+        "stop_sequence": null,
+        "usage": start_usage
+    });
+    if let Some(refusal) = &resp.refusal {
+        message["refusal"] = serde_json::Value::String(refusal.clone());
+    }
+    if let Some(response_status) = &resp.response_status {
+        message["response_status"] = serde_json::Value::String(response_status.clone());
+    }
+    if let Some(incomplete_details) = &resp.incomplete_details {
+        message["incomplete_details"] = incomplete_details.clone();
+    }
     let start_msg = serde_json::json!({
         "type": "message_start",
-        "message": {
-            "id": resp.id,
-            "type": "message",
-            "role": "assistant",
-            "content": [],
-            "model": resp.model,
-            "stop_reason": null,
-            "stop_sequence": null,
-            "refusal": resp.refusal,
-            "response_status": resp.response_status,
-            "incomplete_details": resp.incomplete_details,
-            "usage": start_usage
-        }
+        "message": message
     });
     events.push(format!("event: message_start\ndata: {}\n\n", start_msg));
 
@@ -1001,6 +1008,35 @@ mod tests {
         };
         let whitespace_events = emit_anthropic_sse_events(&whitespace_resp, true).join("");
         assert!(!whitespace_events.contains("thinking_delta"));
+    }
+
+    #[test]
+    fn pseudo_stream_omits_absent_responses_metadata() {
+        let resp = AnthropicResponse {
+            id: "msg_plain".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "plain-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage::default(),
+            reasoning_content: None,
+            refusal: None,
+            response_status: None,
+            incomplete_details: None,
+        };
+
+        let first = emit_anthropic_sse_events(&resp, false)
+            .into_iter()
+            .next()
+            .unwrap();
+        let payload = first.split_once("data: ").unwrap().1.trim();
+        let event: serde_json::Value = serde_json::from_str(payload).unwrap();
+        let message = event["message"].as_object().unwrap();
+
+        assert!(!message.contains_key("refusal"));
+        assert!(!message.contains_key("response_status"));
+        assert!(!message.contains_key("incomplete_details"));
     }
 
     #[test]
