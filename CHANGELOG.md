@@ -55,7 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The native-envelope error bypass is restricted to actual Responses providers,
   so Chat-protocol HTTP-200 error bodies still trigger tier fallback. Replayed
   pseudo-stream deltas carry their preserved item IDs and output indices, and
-  function-call arguments stream after an empty initial item.
+  function-call arguments stream after an empty initial item. Ambiguous
+  flattened deltas are suppressed when a native envelope has multiple matching
+  items or content blocks, leaving exact added/done/completed items authoritative.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 
