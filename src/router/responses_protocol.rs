@@ -370,7 +370,11 @@ fn response_tool_calls(response: &Value) -> Vec<Value> {
 }
 
 /// Convert a completed Responses API payload to OpenAI Chat Completions JSON.
-pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -> Result<Value> {
+pub(super) fn responses_response_to_openai_chat(
+    response: &Value,
+    model: &str,
+    allow_empty_output: bool,
+) -> Result<Value> {
     if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
         return Err(anyhow!("Responses provider returned an error: {error}"));
     }
@@ -382,7 +386,12 @@ pub(super) fn responses_response_to_openai_chat(response: &Value, model: &str) -
     let refusal = response_refusal_text(response);
     let reasoning = response_reasoning_text(response);
     let tool_calls = response_tool_calls(response);
-    if output.is_empty() && text.is_empty() && refusal.is_empty() && tool_calls.is_empty() {
+    if !allow_empty_output
+        && output.is_empty()
+        && text.is_empty()
+        && refusal.is_empty()
+        && tool_calls.is_empty()
+    {
         return Err(anyhow!("Responses provider returned no output items"));
     }
 
@@ -695,7 +704,8 @@ mod tests {
             }
         });
 
-        let converted = responses_response_to_openai_chat(&response, "muse-spark-1.1").unwrap();
+        let converted =
+            responses_response_to_openai_chat(&response, "muse-spark-1.1", false).unwrap();
 
         assert_eq!(
             converted["choices"][0]["message"]["content"],
@@ -732,7 +742,8 @@ mod tests {
             }]
         });
 
-        let converted = responses_response_to_openai_chat(&response, "muse-spark-1.1").unwrap();
+        let converted =
+            responses_response_to_openai_chat(&response, "muse-spark-1.1", false).unwrap();
 
         assert_eq!(converted["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(
@@ -762,7 +773,7 @@ mod tests {
             }]
         });
 
-        let converted = responses_response_to_openai_chat(&response, "muse").unwrap();
+        let converted = responses_response_to_openai_chat(&response, "muse", false).unwrap();
 
         assert_eq!(converted["created"], 42);
         assert_eq!(converted["choices"][0]["finish_reason"], "content_filter");
@@ -789,8 +800,29 @@ mod tests {
             }]
         });
 
-        let converted = responses_response_to_openai_chat(&response, "muse").unwrap();
+        let converted = responses_response_to_openai_chat(&response, "muse", false).unwrap();
 
         assert_eq!(converted["created"], 1_785_587_696_i64);
+    }
+
+    #[test]
+    fn allows_empty_output_only_for_native_responses_passthrough() {
+        let response = json!({
+            "id": "resp_background",
+            "object": "response",
+            "status": "queued",
+            "model": "muse",
+            "output": []
+        });
+
+        let error = responses_response_to_openai_chat(&response, "muse", false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Responses provider returned no output items"
+        );
+
+        let converted = responses_response_to_openai_chat(&response, "muse", true).unwrap();
+        assert_eq!(converted["response_status"], "queued");
+        assert!(converted["choices"][0]["message"]["content"].is_null());
     }
 }

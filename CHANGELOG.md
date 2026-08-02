@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed reasoning objects are rejected locally. Trusted native envelopes
   travel through response extensions instead of client-visible JSON bridge
   fields, so neither callers nor upstream providers can inject internal state.
+  Native background Responses may remain queued or in progress with empty
+  output while their complete tracking envelope is returned unchanged; chat
+  adapters still reject unusable empty results.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 
