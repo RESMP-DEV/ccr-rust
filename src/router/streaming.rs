@@ -621,6 +621,9 @@ fn emit_anthropic_sse_events(
     if let Some(incomplete_details) = &resp.incomplete_details {
         message["incomplete_details"] = incomplete_details.clone();
     }
+    if let Some(responses_output) = &resp.responses_output {
+        message[super::RESPONSES_OUTPUT_PASSTHROUGH_KEY] = responses_output.clone();
+    }
     let start_msg = serde_json::json!({
         "type": "message_start",
         "message": message
@@ -894,6 +897,7 @@ mod tests {
             refusal: None,
             response_status: None,
             incomplete_details: None,
+            responses_output: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true);
@@ -952,6 +956,7 @@ mod tests {
             refusal: None,
             response_status: None,
             incomplete_details: None,
+            responses_output: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true);
@@ -992,6 +997,7 @@ mod tests {
             refusal: None,
             response_status: None,
             incomplete_details: None,
+            responses_output: None,
         };
 
         let native_events = emit_anthropic_sse_events(&resp, false).join("");
@@ -1024,6 +1030,7 @@ mod tests {
             refusal: None,
             response_status: None,
             incomplete_details: None,
+            responses_output: None,
         };
 
         let first = emit_anthropic_sse_events(&resp, false)
@@ -1053,6 +1060,7 @@ mod tests {
             refusal: Some("I cannot help with that.".to_string()),
             response_status: Some("incomplete".to_string()),
             incomplete_details: Some(serde_json::json!({"reason": "content_filter"})),
+            responses_output: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true).join("");
@@ -1094,6 +1102,7 @@ mod tests {
             refusal: None,
             response_status: None,
             incomplete_details: None,
+            responses_output: None,
         };
 
         let events = emit_anthropic_sse_events(&resp, true);

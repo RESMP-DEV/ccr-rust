@@ -87,7 +87,12 @@ fn response_content_blocks(content: &Value, role: &str) -> Result<Vec<Value>> {
 }
 
 fn responses_tool(tool: &Value) -> Option<Value> {
-    if tool.get("type").and_then(Value::as_str) != Some("function") {
+    let object = tool.as_object()?;
+    let tool_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|tool_type| !tool_type.is_empty())?;
+    if tool_type != "function" {
         return Some(tool.clone());
     }
     if tool.get("name").and_then(Value::as_str).is_some() {
@@ -104,7 +109,12 @@ fn responses_tool_choice(choice: &Value) -> Option<Value> {
     if choice.is_string() {
         return Some(choice.clone());
     }
-    if choice.get("type").and_then(Value::as_str) != Some("function") {
+    let object = choice.as_object()?;
+    let choice_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|choice_type| !choice_type.is_empty())?;
+    if choice_type != "function" {
         return Some(choice.clone());
     }
     if choice.get("name").and_then(Value::as_str).is_some() {
@@ -120,6 +130,21 @@ fn responses_tool_choice(choice: &Value) -> Option<Value> {
 
 /// Convert an OpenAI Chat Completions request into an upstream Responses request.
 pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> Result<Value> {
+    if let Some(native_request) = request
+        .get(super::RESPONSES_REQUEST_PASSTHROUGH_KEY)
+        .and_then(Value::as_object)
+    {
+        let mut body = Value::Object(native_request.clone());
+        body["model"] = Value::String(model.to_string());
+        body["stream"] = Value::Bool(false);
+        if body.get("tool_choice").is_some_and(Value::is_null) {
+            body.as_object_mut()
+                .expect("native Responses request is an object")
+                .remove("tool_choice");
+        }
+        return Ok(body);
+    }
+
     let messages = request
         .get("messages")
         .and_then(Value::as_array)
@@ -184,11 +209,7 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
             body[key] = value.clone();
         }
     }
-    if let Some(reasoning) = request
-        .get(super::RESPONSES_REASONING_PASSTHROUGH_KEY)
-        .or_else(|| request.get("reasoning"))
-        .filter(|value| !value.is_null())
-    {
+    if let Some(reasoning) = request.get("reasoning").filter(|value| !value.is_null()) {
         body["reasoning"] = reasoning.clone();
     } else if let Some(reasoning_effort) = request
         .get("reasoning_effort")
@@ -507,23 +528,50 @@ mod tests {
     }
 
     #[test]
-    fn preserves_internal_responses_reasoning_object() {
+    fn preserves_internal_responses_request() {
         let mut request = json!({
             "messages": [{"role": "user", "content": "Think"}],
             "reasoning_effort": "high"
         });
-        request[super::super::RESPONSES_REASONING_PASSTHROUGH_KEY] =
-            json!({"effort": "high", "summary": "detailed"});
+        request[super::super::RESPONSES_REQUEST_PASSTHROUGH_KEY] = json!({
+            "model": "auto",
+            "input": [{"role": "user", "content": [{
+                "type": "input_file",
+                "file_id": "file_123"
+            }]}],
+            "reasoning": {"effort": "high", "summary": "detailed"},
+            "text": {"format": {"type": "json_schema", "name": "answer"}},
+            "stream": true
+        });
 
         let converted = openai_chat_request_to_responses(&request, "muse").unwrap();
 
+        assert_eq!(converted["model"], "muse");
+        assert_eq!(converted["stream"], false);
+        assert_eq!(converted["input"][0]["content"][0]["type"], "input_file");
+        assert_eq!(converted["input"][0]["content"][0]["file_id"], "file_123");
         assert_eq!(
             converted["reasoning"],
             json!({"effort": "high", "summary": "detailed"})
         );
+        assert_eq!(converted["text"]["format"]["type"], "json_schema");
         assert!(converted
-            .get(super::super::RESPONSES_REASONING_PASSTHROUGH_KEY)
+            .get(super::super::RESPONSES_REQUEST_PASSTHROUGH_KEY)
             .is_none());
+    }
+
+    #[test]
+    fn drops_invalid_direct_chat_tools_and_choices() {
+        let request = json!({
+            "messages": [{"role": "user", "content": "Think"}],
+            "tools": [null, 7, {}, {"type": ""}, {"type": "web_search"}],
+            "tool_choice": null
+        });
+
+        let converted = openai_chat_request_to_responses(&request, "muse").unwrap();
+
+        assert_eq!(converted["tools"], json!([{"type": "web_search"}]));
+        assert!(converted.get("tool_choice").is_none());
     }
 
     #[test]

@@ -25,7 +25,8 @@ pub use responses_api::handle_responses;
 
 mod responses_protocol;
 
-const RESPONSES_REASONING_PASSTHROUGH_KEY: &str = "__ccr_responses_reasoning";
+const RESPONSES_REQUEST_PASSTHROUGH_KEY: &str = "__ccr_responses_request";
+const RESPONSES_OUTPUT_PASSTHROUGH_KEY: &str = "__ccr_responses_output";
 
 use axum::{
     extract::{Path, State},
@@ -645,6 +646,7 @@ mod tests {
             }),
             response_status: None,
             incomplete_details: None,
+            responses_output: None,
         };
 
         let anthropic_resp =

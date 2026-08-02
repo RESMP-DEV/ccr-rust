@@ -13,7 +13,7 @@ use super::{
     decode_request_body, parse_json_payload, responses_request_to_openai_chat_request,
     DecodeRequestBodyError, MAX_RESPONSES_BODY_BYTES,
 };
-use crate::router::{openai_compat::handle_chat_completions, AppState};
+use crate::router::{openai_compat::handle_responses_chat_completions, AppState};
 
 fn body_read_error_status(error: &(dyn std::error::Error + 'static)) -> StatusCode {
     if error
@@ -96,8 +96,13 @@ pub async fn handle_responses(
         }
     };
 
-    let openai_response =
-        handle_chat_completions(State(state), headers, Json(openai_chat_request)).await;
+    let openai_response = handle_responses_chat_completions(
+        State(state),
+        headers,
+        Json(openai_chat_request),
+        request_body,
+    )
+    .await;
 
     if stream_requested {
         convert_openai_stream_response_to_responses(openai_response).await
@@ -136,10 +141,13 @@ mod tests {
         .unwrap();
         assert_eq!(reasoning["reasoning_effort"], "high");
         assert!(reasoning.get("reasoning").is_none());
-        assert_eq!(
-            reasoning[super::super::super::RESPONSES_REASONING_PASSTHROUGH_KEY],
-            json!({"effort": "high", "summary": "detailed"})
-        );
+        let default_reasoning = responses_request_to_openai_chat_request(&json!({
+            "model": "test",
+            "input": "think carefully",
+            "reasoning": {"summary": "auto"}
+        }))
+        .unwrap();
+        assert_eq!(default_reasoning["reasoning_effort"], "medium");
 
         let invalid_reasoning = responses_request_to_openai_chat_request(&json!({
             "model": "test",
@@ -149,6 +157,47 @@ mod tests {
         assert_eq!(
             invalid_reasoning.unwrap_err(),
             "responses request 'reasoning.effort' must be a string"
+        );
+
+        for invalid_tools in [json!(null), json!({}), json!([null]), json!(["tool"])] {
+            let invalid = responses_request_to_openai_chat_request(&json!({
+                "model": "test",
+                "input": "use tools",
+                "tools": invalid_tools
+            }));
+            assert!(invalid.is_err());
+        }
+
+        for invalid_choice in [json!(""), json!(7), json!({}), json!({"type": ""})] {
+            let invalid = responses_request_to_openai_chat_request(&json!({
+                "model": "test",
+                "input": "use tools",
+                "tool_choice": invalid_choice
+            }));
+            assert_eq!(
+                invalid.unwrap_err(),
+                "responses request 'tool_choice' must be a non-empty string or typed object"
+            );
+        }
+
+        let invalid_function_tool = responses_request_to_openai_chat_request(&json!({
+            "model": "test",
+            "input": "use tools",
+            "tools": [{"type": "function", "name": ""}]
+        }));
+        assert_eq!(
+            invalid_function_tool.unwrap_err(),
+            "responses function tools require a non-empty string 'name'"
+        );
+
+        let invalid_function_choice = responses_request_to_openai_chat_request(&json!({
+            "model": "test",
+            "input": "use tools",
+            "tool_choice": {"type": "function"}
+        }));
+        assert_eq!(
+            invalid_function_choice.unwrap_err(),
+            "responses function tool choices require a non-empty string 'name'"
         );
     }
 
