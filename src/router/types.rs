@@ -166,8 +166,6 @@ pub struct OpenAIResponse {
     pub response_status: Option<String>,
     #[serde(default)]
     pub incomplete_details: Option<serde_json::Value>,
-    #[serde(default, rename = "__ccr_responses_output")]
-    pub responses_output: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -302,13 +300,6 @@ pub struct AnthropicResponse {
     /// Original Responses API incomplete metadata carried through the adapter pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incomplete_details: Option<serde_json::Value>,
-    /// Original output items retained only for an internal Responses-client bridge.
-    #[serde(
-        default,
-        rename = "__ccr_responses_output",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub responses_output: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

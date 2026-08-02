@@ -610,7 +610,7 @@ pub(super) async fn try_request_via_openai_protocol(
     // frontend) and no transformers need to modify it, reuse the original body
     // directly with only a model-name swap.  This eliminates the wasteful
     // OpenAI → Anthropic → deserialize → translate → OpenAI round-trip.
-    let preserve_responses_output = openai_passthrough_body
+    let preserve_responses_response = openai_passthrough_body
         .as_ref()
         .and_then(|body| body.get(super::RESPONSES_REQUEST_PASSTHROUGH_KEY))
         .is_some();
@@ -837,17 +837,15 @@ pub(super) async fn try_request_via_openai_protocol(
             return Err(error);
         }
 
+        let mut trusted_responses_response = None;
         let body_result = if provider.protocol == ProviderProtocol::Responses {
             serde_json::from_slice::<serde_json::Value>(&body)
                 .map_err(|error| TryRequestError::Other(error.into()))
                 .and_then(|response_value| {
-                    let mut converted =
-                        responses_response_to_openai_chat(&response_value, model_name)
-                            .map_err(TryRequestError::Other)?;
-                    if preserve_responses_output {
-                        if let Some(output) = response_value.get("output") {
-                            converted[super::RESPONSES_OUTPUT_PASSTHROUGH_KEY] = output.clone();
-                        }
+                    let converted = responses_response_to_openai_chat(&response_value, model_name)
+                        .map_err(TryRequestError::Other)?;
+                    if preserve_responses_response {
+                        trusted_responses_response = Some(response_value);
                     }
                     Ok(converted)
                 })
@@ -943,6 +941,11 @@ pub(super) async fn try_request_via_openai_protocol(
                 serde_json::to_vec(&final_resp).map_err(|e| TryRequestError::Other(e.into()))?;
 
             let mut response = (StatusCode::OK, response_body).into_response();
+            if let Some(trusted_response) = trusted_responses_response {
+                response
+                    .extensions_mut()
+                    .insert(super::TrustedResponsesResponse(trusted_response));
+            }
             insert_ccr_tier_header(&mut response, tier_name);
             return Ok(response);
         }

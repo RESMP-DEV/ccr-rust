@@ -26,7 +26,10 @@ pub use responses_api::handle_responses;
 mod responses_protocol;
 
 const RESPONSES_REQUEST_PASSTHROUGH_KEY: &str = "__ccr_responses_request";
-const RESPONSES_OUTPUT_PASSTHROUGH_KEY: &str = "__ccr_responses_output";
+const RESPONSES_RESPONSE_PASSTHROUGH_KEY: &str = "__ccr_responses_response";
+
+#[derive(Clone, Debug)]
+struct TrustedResponsesResponse(serde_json::Value);
 
 use axum::{
     extract::{Path, State},
@@ -646,7 +649,6 @@ mod tests {
             }),
             response_status: None,
             incomplete_details: None,
-            responses_output: None,
         };
 
         let anthropic_resp =

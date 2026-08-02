@@ -39,10 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validated and translated symmetrically, terminal event types preserve failed
   and cancelled states, absent metadata is omitted instead of serialized as
   `null`, and unsupported request encodings return HTTP 415.
-  Native Responses-to-Responses routing now also preserves file inputs,
-  structured-output schemas, native tool output items, and citation annotations;
-  invalid tool controls are rejected locally and internal bridge metadata cannot
-  be injected by ordinary Chat clients.
+  Native Responses-to-Responses routing now also preserves file inputs, the
+  complete upstream response envelope, native tool output items, citation
+  annotations, and exact pseudo-stream item events. Chat structured-output
+  schemas are translated to Responses `text.format`; invalid tool controls and
+  malformed reasoning objects are rejected locally. Trusted native envelopes
+  travel through response extensions instead of client-visible JSON bridge
+  fields, so neither callers nor upstream providers can inject internal state.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 

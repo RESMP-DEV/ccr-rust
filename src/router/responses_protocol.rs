@@ -128,6 +128,19 @@ fn responses_tool_choice(choice: &Value) -> Option<Value> {
     Some(Value::Object(converted))
 }
 
+fn responses_text_from_chat_format(response_format: &Value) -> Option<Value> {
+    let object = response_format.as_object()?;
+    let format_type = object.get("type")?.as_str()?;
+    let format = if format_type == "json_schema" {
+        let mut format = object.get("json_schema")?.as_object()?.clone();
+        format.insert("type".to_string(), Value::String("json_schema".to_string()));
+        Value::Object(format)
+    } else {
+        response_format.clone()
+    };
+    Some(json!({"format": format}))
+}
+
 /// Convert an OpenAI Chat Completions request into an upstream Responses request.
 pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> Result<Value> {
     if let Some(native_request) = request
@@ -208,6 +221,12 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
         if let Some(value) = request.get(key) {
             body[key] = value.clone();
         }
+    }
+    if let Some(text) = request
+        .get("response_format")
+        .and_then(responses_text_from_chat_format)
+    {
+        body["text"] = text;
     }
     if let Some(reasoning) = request.get("reasoning").filter(|value| !value.is_null()) {
         body["reasoning"] = reasoning.clone();
@@ -525,6 +544,43 @@ mod tests {
         let converted = openai_chat_request_to_responses(&request, "muse").unwrap();
 
         assert_eq!(converted["reasoning"], json!({"effort": "medium"}));
+    }
+
+    #[test]
+    fn maps_chat_json_schema_to_responses_text_format() {
+        let request = json!({
+            "messages": [{"role": "user", "content": "Return JSON"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                        "required": ["answer"],
+                        "additionalProperties": false
+                    },
+                    "strict": true
+                }
+            }
+        });
+
+        let converted = openai_chat_request_to_responses(&request, "muse").unwrap();
+
+        assert_eq!(
+            converted["text"]["format"],
+            json!({
+                "type": "json_schema",
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": false
+                },
+                "strict": true
+            })
+        );
     }
 
     #[test]
