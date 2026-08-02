@@ -239,7 +239,10 @@ pub(super) fn openai_chat_request_to_responses(request: &Value, model: &str) -> 
             .ok_or_else(|| anyhow!("OpenAI reasoning_effort must be a string"))?;
         body["reasoning"] = json!({"effort": reasoning_effort});
     }
-    if let Some(previous_response_id) = request.get("previous_response_id") {
+    if let Some(previous_response_id) = request
+        .get("previous_response_id")
+        .filter(|value| !value.is_null())
+    {
         body["previous_response_id"] = previous_response_id.clone();
     }
     if let Some(tools) = request.get("tools").and_then(Value::as_array) {
@@ -373,10 +376,12 @@ fn response_tool_calls(response: &Value) -> Vec<Value> {
 pub(super) fn responses_response_to_openai_chat(
     response: &Value,
     model: &str,
-    allow_empty_output: bool,
+    preserve_native_envelope: bool,
 ) -> Result<Value> {
-    if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
-        return Err(anyhow!("Responses provider returned an error: {error}"));
+    if !preserve_native_envelope {
+        if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
+            return Err(anyhow!("Responses provider returned an error: {error}"));
+        }
     }
     let output = response
         .get("output")
@@ -386,7 +391,7 @@ pub(super) fn responses_response_to_openai_chat(
     let refusal = response_refusal_text(response);
     let reasoning = response_reasoning_text(response);
     let tool_calls = response_tool_calls(response);
-    if !allow_empty_output
+    if !preserve_native_envelope
         && output.is_empty()
         && text.is_empty()
         && refusal.is_empty()
@@ -630,13 +635,15 @@ mod tests {
         let request = json!({
             "messages": [{"role": "user", "content": "Think"}],
             "tools": [null, 7, {}, {"type": ""}, {"type": "web_search"}],
-            "tool_choice": null
+            "tool_choice": null,
+            "previous_response_id": null
         });
 
         let converted = openai_chat_request_to_responses(&request, "muse").unwrap();
 
         assert_eq!(converted["tools"], json!([{"type": "web_search"}]));
         assert!(converted.get("tool_choice").is_none());
+        assert!(converted.get("previous_response_id").is_none());
     }
 
     #[test]
@@ -824,5 +831,25 @@ mod tests {
         let converted = responses_response_to_openai_chat(&response, "muse", true).unwrap();
         assert_eq!(converted["response_status"], "queued");
         assert!(converted["choices"][0]["message"]["content"].is_null());
+    }
+
+    #[test]
+    fn allows_failed_envelope_only_for_native_responses_passthrough() {
+        let response = json!({
+            "id": "resp_failed",
+            "object": "response",
+            "status": "failed",
+            "model": "muse",
+            "error": {"code": "upstream_error", "message": "failed"},
+            "output": []
+        });
+
+        let error = responses_response_to_openai_chat(&response, "muse", false).unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("Responses provider returned an error:"));
+
+        let converted = responses_response_to_openai_chat(&response, "muse", true).unwrap();
+        assert_eq!(converted["response_status"], "failed");
     }
 }

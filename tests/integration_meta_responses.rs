@@ -176,6 +176,110 @@ async fn native_background_response_preserves_queued_empty_envelope() {
     Mock::given(method("POST"))
         .and(path("/responses"))
         .respond_with(ResponseTemplate::new(200).set_body_json(queued_response.clone()))
+        .expect(2)
+        .mount(&upstream)
+        .await;
+
+    let config_json = json!({
+        "Providers": [{
+            "name": "meta-muse",
+            "api_base_url": upstream.uri(),
+            "api_key": "meta-test-key",
+            "models": ["muse-spark-1.1"],
+            "protocol": "responses",
+            "tier_name": "ccr-meta-muse"
+        }],
+        "Router": {
+            "default": "meta-muse,muse-spark-1.1",
+            "tiers": ["meta-muse,muse-spark-1.1"]
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+
+    let app = build_app(config);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "auto",
+                        "input": "run in the background",
+                        "background": true,
+                        "stream": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload, queued_response);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "auto",
+                        "input": "stream the background receipt",
+                        "background": true,
+                        "stream": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let events = sse_json_events(std::str::from_utf8(&body).unwrap()).unwrap();
+    let queued = events
+        .iter()
+        .find(|event| event["type"] == "response.queued")
+        .expect("queued stream event should preserve the pollable envelope");
+    assert_eq!(queued["response"], queued_response);
+    assert!(!events
+        .iter()
+        .any(|event| event["type"] == "response.incomplete"));
+}
+
+#[tokio::test]
+async fn native_failed_response_preserves_tracking_envelope() {
+    if !localhost_bind_available() {
+        eprintln!("Skipping test: localhost bind unavailable");
+        return;
+    }
+    let upstream = MockServer::start().await;
+    let failed_response = json!({
+        "id": "resp_failed",
+        "object": "response",
+        "created_at": 46,
+        "status": "failed",
+        "model": "muse-spark-1.1",
+        "error": {"code": "upstream_error", "message": "generation failed"},
+        "output": []
+    });
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(failed_response.clone()))
         .expect(1)
         .mount(&upstream)
         .await;
@@ -209,8 +313,7 @@ async fn native_background_response_preserves_queued_empty_envelope() {
                 .body(Body::from(
                     serde_json::to_vec(&json!({
                         "model": "auto",
-                        "input": "run in the background",
-                        "background": true,
+                        "input": "fail with a tracking receipt",
                         "stream": false
                     }))
                     .unwrap(),
@@ -223,7 +326,7 @@ async fn native_background_response_preserves_queued_empty_envelope() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload, queued_response);
+    assert_eq!(payload, failed_response);
 }
 
 #[tokio::test]
@@ -495,9 +598,20 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             assert_eq!(done.len(), output.len());
             for (output_index, item) in output.iter().enumerate() {
                 assert_eq!(added[output_index]["output_index"], output_index);
-                assert_eq!(added[output_index]["item"], *item);
                 assert_eq!(done[output_index]["output_index"], output_index);
                 assert_eq!(done[output_index]["item"], *item);
+                match item["type"].as_str() {
+                    Some("reasoning") => {
+                        assert_eq!(added[output_index]["item"]["summary"], json!([]));
+                    }
+                    Some("message") => {
+                        assert_eq!(added[output_index]["item"]["content"], json!([]));
+                    }
+                    Some("function_call") => {
+                        assert_eq!(added[output_index]["item"]["arguments"], "");
+                    }
+                    _ => assert_eq!(added[output_index]["item"], *item),
+                }
             }
             assert_eq!(output[0]["type"], "reasoning");
             assert_eq!(

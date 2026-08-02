@@ -48,7 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields, so neither callers nor upstream providers can inject internal state.
   Native background Responses may remain queued or in progress with empty
   output while their complete tracking envelope is returned unchanged; chat
-  adapters still reject unusable empty results.
+  adapters still reject unusable empty results. Native failed envelopes retain
+  their response identity and error receipt, pseudo-streams use stable output
+  indices and empty initial items before replayed deltas, queued streams retain
+  their non-terminal event type, and explicit null continuation IDs are omitted.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 

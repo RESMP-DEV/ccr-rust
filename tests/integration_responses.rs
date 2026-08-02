@@ -961,10 +961,21 @@ async fn test_responses_stream_complex_mixed_content_and_tools() {
         .expect("Tool 1 added");
     assert_eq!(tool1_added.data["item"]["name"], "calculator");
 
+    let added_events = events
+        .iter()
+        .filter(|event| event.event == "response.output_item.added")
+        .collect::<Vec<_>>();
+    assert!(added_events
+        .iter()
+        .all(|event| event.data["output_index"].as_u64().is_some()));
+
     let done_events: Vec<&SseEvent> = events
         .iter()
         .filter(|e| e.event == "response.output_item.done")
         .collect();
+    assert!(done_events
+        .iter()
+        .all(|event| event.data["output_index"].as_u64().is_some()));
 
     let done_debug: Vec<String> = done_events.iter().map(|e| e.data.to_string()).collect();
     assert!(
