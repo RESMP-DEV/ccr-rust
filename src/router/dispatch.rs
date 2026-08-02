@@ -306,6 +306,8 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) debug_capture: Option<Arc<DebugCapture>>,
     /// Original OpenAI request body for passthrough to OpenAI-compatible backends.
     pub(super) openai_passthrough_body: Option<&'a serde_json::Value>,
+    /// Render refusal-only Responses results as text for native Anthropic clients.
+    pub(super) render_refusal_as_anthropic_text: bool,
 }
 
 pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, TryRequestError> {
@@ -321,6 +323,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
         ratelimit_tracker,
         debug_capture,
         openai_passthrough_body,
+        render_refusal_as_anthropic_text,
     } = args;
     let provider = config.resolve_provider(tier).ok_or_else(|| {
         TryRequestError::Other(anyhow::anyhow!("Provider not found for tier: {}", tier))
@@ -367,6 +370,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     chain,
                     debug_capture,
                     openai_passthrough_body: effective_passthrough,
+                    render_refusal_as_anthropic_text,
                 },
             )
             .await
@@ -386,6 +390,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     chain,
                     debug_capture,
                     openai_passthrough_body: None,
+                    render_refusal_as_anthropic_text,
                 },
             )
             .await
@@ -405,6 +410,7 @@ pub(super) struct TryRequestProtocolArgs<'a> {
     pub(super) debug_capture: Option<Arc<DebugCapture>>,
     /// Original OpenAI body for direct passthrough (skips Anthropic round-trip).
     pub(super) openai_passthrough_body: Option<serde_json::Value>,
+    pub(super) render_refusal_as_anthropic_text: bool,
 }
 
 pub(super) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -590,6 +596,7 @@ pub(super) async fn try_request_via_openai_protocol(
         chain,
         debug_capture,
         openai_passthrough_body,
+        render_refusal_as_anthropic_text,
     } = args;
 
     let url = if provider.protocol == ProviderProtocol::Responses {
@@ -891,7 +898,15 @@ pub(super) async fn try_request_via_openai_protocol(
             }
 
             // Translate to Anthropic format.
-            let anthropic_resp = translate_response_openai_to_anthropic(openai_resp, model_name);
+            let mut anthropic_resp =
+                translate_response_openai_to_anthropic(openai_resp, model_name);
+            if render_refusal_as_anthropic_text && anthropic_resp.content.is_empty() {
+                if let Some(refusal) = anthropic_resp.refusal.as_deref() {
+                    anthropic_resp.content.push(AnthropicContentBlock::Text {
+                        text: refusal.to_string(),
+                    });
+                }
+            }
 
             // Apply response transformers if chain is not empty.
             let final_resp = if chain.is_empty() {
@@ -936,6 +951,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
         chain,
         debug_capture,
         openai_passthrough_body: _, // not used for Anthropic protocol
+        render_refusal_as_anthropic_text: _,
     } = args;
 
     let url = provider_anthropic_messages_url(provider);

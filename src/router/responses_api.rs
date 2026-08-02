@@ -583,6 +583,9 @@ pub(super) fn responses_request_to_openai_chat_request(
     if let Some(reasoning) = body.get("reasoning").cloned() {
         request["reasoning"] = reasoning;
     }
+    if let Some(previous_response_id) = body.get("previous_response_id").cloned() {
+        request["previous_response_id"] = previous_response_id;
+    }
 
     Ok(request)
 }
