@@ -577,6 +577,13 @@ pub async fn stream_anthropic_response_with_tracking(
 /// Used when `forceNonStreaming` is true but the client requested `stream: true`.
 fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
     let mut events = Vec::new();
+    let reasoning = resp.reasoning_content.as_deref().filter(|_| {
+        !resp
+            .content
+            .iter()
+            .any(|block| matches!(block, AnthropicContentBlock::Thinking { .. }))
+    });
+    let reasoning_offset = usize::from(reasoning.is_some());
 
     // message_start
     let start_msg = serde_json::json!({
@@ -597,8 +604,32 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
     });
     events.push(format!("event: message_start\ndata: {}\n\n", start_msg));
 
+    if let Some(reasoning) = reasoning {
+        let block_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""}
+        });
+        let delta = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": reasoning}
+        });
+        let block_stop = serde_json::json!({"type": "content_block_stop", "index": 0});
+        events.push(format!(
+            "event: content_block_start\ndata: {}\n\n",
+            block_start
+        ));
+        events.push(format!("event: content_block_delta\ndata: {}\n\n", delta));
+        events.push(format!(
+            "event: content_block_stop\ndata: {}\n\n",
+            block_stop
+        ));
+    }
+
     // Emit content blocks (text, tool_use, and thinking).
-    for (idx, block) in resp.content.iter().enumerate() {
+    for (content_idx, block) in resp.content.iter().enumerate() {
+        let idx = content_idx + reasoning_offset;
         match block {
             AnthropicContentBlock::Text { text } => {
                 // content_block_start

@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Responses and stream edge cases** — Normalize empty function arguments,
   preserve reasoning summaries, accept RFC 3339 response timestamps, ignore
   duplicate terminal stream events, preserve non-object `error` metadata, and
-  remove stale entity headers when JSON responses are rewritten as SSE.
+  remove stale entity headers when JSON responses are rewritten as SSE. String
+  request input and reasoning summaries now also survive the complete
+  Responses-client pseudo-streaming path. The optional sindexer integration is
+  pinned to its reviewed task-aware embedding-prefix release on `main`.
 
 ### Added
 

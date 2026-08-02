@@ -233,6 +233,9 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             "incomplete_details": null,
             "model": "muse-spark-1.1",
             "output": [{
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "Reasoning survives adapters"}]
+            }, {
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "streamed through adapters"}]
@@ -295,13 +298,18 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
         assert_eq!(response.headers()["content-type"], "text/event-stream");
         assert_eq!(response.headers()["x-ccr-tier"], "ccr-meta-muse");
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert!(String::from_utf8(body.to_vec())
-            .unwrap()
-            .contains("streamed through adapters"));
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("streamed through adapters"));
+        assert!(text.contains("Reasoning survives adapters"));
     }
 
     let requests = upstream.received_requests().await.unwrap();
     assert!(requests.iter().all(|request| {
         serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["stream"] == false
+    }));
+    assert!(requests.iter().any(|request| {
+        serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["input"]
+            .to_string()
+            .contains("stream responses")
     }));
 }

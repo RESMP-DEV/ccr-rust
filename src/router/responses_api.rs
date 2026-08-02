@@ -339,7 +339,14 @@ pub(super) fn responses_request_to_openai_chat_request(
         }
     }
 
-    if let Some(input_items) = body.get("input").and_then(|v| v.as_array()) {
+    if let Some(input) = body.get("input").and_then(|value| value.as_str()) {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": input
+        }));
+    }
+
+    if let Some(input_items) = body.get("input").and_then(|value| value.as_array()) {
         for item in input_items {
             let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match item_type {
@@ -432,6 +439,12 @@ pub(super) fn responses_request_to_openai_chat_request(
                 _ => {}
             }
         }
+    }
+    if body
+        .get("input")
+        .is_some_and(|input| !input.is_string() && !input.is_array())
+    {
+        return Err("responses request 'input' must be text or an array".to_string());
     }
 
     let mut request = serde_json::json!({
