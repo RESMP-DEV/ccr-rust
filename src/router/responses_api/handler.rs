@@ -11,7 +11,7 @@ use axum::{
 use super::{
     convert_openai_json_response_to_responses, convert_openai_stream_response_to_responses,
     decode_request_body, parse_json_payload, responses_request_to_openai_chat_request,
-    MAX_RESPONSES_BODY_BYTES,
+    DecodeRequestBodyError, MAX_RESPONSES_BODY_BYTES,
 };
 use crate::router::{openai_compat::handle_chat_completions, AppState};
 
@@ -20,6 +20,14 @@ fn body_read_error_status(error: &(dyn std::error::Error + 'static)) -> StatusCo
         .source()
         .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
     {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
+fn decode_error_status(error: &DecodeRequestBodyError) -> StatusCode {
+    if error.is_payload_too_large() {
         StatusCode::PAYLOAD_TOO_LARGE
     } else {
         StatusCode::BAD_REQUEST
@@ -52,8 +60,8 @@ pub async fn handle_responses(
         Ok(bytes) => bytes,
         Err(err) => {
             return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": {"message": err}})),
+                decode_error_status(&err),
+                Json(serde_json::json!({"error": {"message": err.to_string()}})),
             )
                 .into_response();
         }
@@ -145,6 +153,7 @@ mod tests {
 
         let error = decode_request_body(&encoded, &headers).unwrap_err();
         assert!(error.contains("exceeds"));
+        assert_eq!(decode_error_status(&error), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]
