@@ -354,9 +354,6 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
             {
                 event["incomplete_details"] = incomplete_details.clone();
             }
-            if let Some(responses_output) = message.get("__ccr_responses_output") {
-                event["__ccr_responses_output"] = responses_output.clone();
-            }
             event
         }
         "content_block_start" => {

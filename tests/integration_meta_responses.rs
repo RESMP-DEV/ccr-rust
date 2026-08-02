@@ -71,6 +71,12 @@ async fn meta_muse_uses_responses_endpoint_and_returns_anthropic_json() {
             "error": null,
             "incomplete_details": null,
             "model": "muse-spark-1.1",
+            "metadata": {"campaign": "native-envelope"},
+            "previous_response_id": "resp_previous",
+            "instructions": "Keep the native response envelope.",
+            "tools": [{"type": "web_search", "search_context_size": "low"}],
+            "text": {"format": {"type": "text"}},
+            "__ccr_responses_response": {"id": "provider-injected"},
             "output": [{
                 "type": "message",
                 "role": "assistant",
@@ -134,6 +140,8 @@ async fn meta_muse_uses_responses_endpoint_and_returns_anthropic_json() {
     assert_eq!(payload["content"][0]["text"], "Meta Muse is routed.");
     assert_eq!(payload["usage"]["input_tokens"], 9);
     assert_eq!(payload["usage"]["output_tokens"], 5);
+    assert!(payload.get("metadata").is_none());
+    assert!(payload.get("__ccr_responses_response").is_none());
 
     let requests = upstream.received_requests().await.unwrap();
     let upstream_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
@@ -248,6 +256,11 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             "error": null,
             "incomplete_details": null,
             "model": "muse-spark-1.1",
+            "metadata": {"campaign": "native-envelope"},
+            "previous_response_id": "resp_previous",
+            "instructions": "Keep the native response envelope.",
+            "tools": [{"type": "web_search", "search_context_size": "low"}],
+            "text": {"format": {"type": "text"}},
             "output": [{
                 "type": "reasoning",
                 "summary": [{"type": "summary_text", "text": "Reasoning survives adapters"}]
@@ -311,10 +324,24 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                 "model": "auto",
                 "messages": [{"role": "user", "content": "stream chat"}],
                 "stream": true,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "chat_answer",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"answer": {"type": "string"}},
+                            "required": ["answer"],
+                            "additionalProperties": false
+                        },
+                        "strict": true
+                    }
+                },
                 "__ccr_responses_request": {
                     "model": "spoofed",
                     "input": "do not forward this"
-                }
+                },
+                "__ccr_responses_response": {"id": "spoofed-response"}
             }),
         ),
         (
@@ -386,6 +413,22 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                 3,
                 "reasoning, native tool, and message items are required"
             );
+            let added = events
+                .iter()
+                .filter(|event| event["type"] == "response.output_item.added")
+                .collect::<Vec<_>>();
+            let done = events
+                .iter()
+                .filter(|event| event["type"] == "response.output_item.done")
+                .collect::<Vec<_>>();
+            assert_eq!(added.len(), output.len());
+            assert_eq!(done.len(), output.len());
+            for (output_index, item) in output.iter().enumerate() {
+                assert_eq!(added[output_index]["output_index"], output_index);
+                assert_eq!(added[output_index]["item"], *item);
+                assert_eq!(done[output_index]["output_index"], output_index);
+                assert_eq!(done[output_index]["item"], *item);
+            }
             assert_eq!(output[0]["type"], "reasoning");
             assert_eq!(
                 output[0]["summary"][0],
@@ -419,6 +462,26 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
             assert_eq!(
                 completed["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
                 3
+            );
+            assert_eq!(
+                completed["response"]["metadata"],
+                json!({"campaign": "native-envelope"})
+            );
+            assert_eq!(
+                completed["response"]["previous_response_id"],
+                "resp_previous"
+            );
+            assert_eq!(
+                completed["response"]["instructions"],
+                "Keep the native response envelope."
+            );
+            assert_eq!(
+                completed["response"]["tools"],
+                json!([{"type": "web_search", "search_context_size": "low"}])
+            );
+            assert_eq!(
+                completed["response"]["text"],
+                json!({"format": {"type": "text"}})
             );
         }
     }
@@ -506,6 +569,20 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
         response_json["usage"]["output_tokens_details"]["reasoning_tokens"],
         3
     );
+    assert_eq!(
+        response_json["metadata"],
+        json!({"campaign": "native-envelope"})
+    );
+    assert_eq!(response_json["previous_response_id"], "resp_previous");
+    assert_eq!(
+        response_json["instructions"],
+        "Keep the native response envelope."
+    );
+    assert_eq!(
+        response_json["tools"],
+        json!([{"type": "web_search", "search_context_size": "low"}])
+    );
+    assert_eq!(response_json["text"], json!({"format": {"type": "text"}}));
 
     let requests = upstream.received_requests().await.unwrap();
     assert!(requests.iter().all(|request| {
@@ -513,6 +590,7 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
         body["stream"] == false
             && body.get("__ccr_responses_request").is_none()
             && body.get("__ccr_responses_output").is_none()
+            && body.get("__ccr_responses_response").is_none()
             && body["model"] != "spoofed"
             && !body
                 .get("tool_choice")
@@ -535,6 +613,21 @@ async fn meta_muse_preserves_streaming_for_openai_frontends() {
                             })
                         })
                 })
+            })
+    }));
+    assert!(requests.iter().any(|request| {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        body["text"]["format"]
+            == json!({
+                "type": "json_schema",
+                "name": "chat_answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": false
+                },
+                "strict": true
             })
     }));
 }

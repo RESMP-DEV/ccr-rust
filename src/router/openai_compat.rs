@@ -106,13 +106,6 @@ pub(super) fn anthropic_response_to_internal(
     if let Some(incomplete_details) = response.incomplete_details {
         extra_data.insert("incomplete_details".to_string(), incomplete_details);
     }
-    if let Some(responses_output) = response.responses_output {
-        extra_data.insert(
-            super::RESPONSES_OUTPUT_PASSTHROUGH_KEY.to_string(),
-            responses_output,
-        );
-    }
-
     crate::frontend::InternalResponse {
         id: response.id,
         response_type: response.response_type,
@@ -483,7 +476,7 @@ async fn handle_chat_completions_inner(
 ) -> Response {
     if let Some(object) = request_body.as_object_mut() {
         object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
-        object.remove(super::RESPONSES_OUTPUT_PASSTHROUGH_KEY);
+        object.remove(super::RESPONSES_RESPONSE_PASSTHROUGH_KEY);
     }
 
     // Preserve the original OpenAI-formatted body for potential passthrough
@@ -492,7 +485,7 @@ async fn handle_chat_completions_inner(
     if let Some(mut native_responses_request) = native_responses_request {
         if let Some(object) = native_responses_request.as_object_mut() {
             object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
-            object.remove(super::RESPONSES_OUTPUT_PASSTHROUGH_KEY);
+            object.remove(super::RESPONSES_RESPONSE_PASSTHROUGH_KEY);
         }
         passthrough_body[super::RESPONSES_REQUEST_PASSTHROUGH_KEY] = native_responses_request;
     }
