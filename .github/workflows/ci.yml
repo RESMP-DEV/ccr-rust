@@ -32,7 +32,7 @@ jobs:
           tool: cargo-audit@0.22.2
 
       - name: Validate locked dependency graph
-        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
       - name: Audit Rust dependencies
         run: cargo audit --file Cargo.lock
