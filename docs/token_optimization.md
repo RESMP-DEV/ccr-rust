@@ -248,7 +248,7 @@ each tier reports its own `cache_read_tokens` and `cache_creation_tokens`:
 
 ```bash
 curl -s http://127.0.0.1:3456/v1/usage | \
-  jq '{total_cache_read_tokens, tiers: [.tiers[] | {tier, input_tokens, cache_read_tokens}]}'
+  jq '{total_cache_read_tokens, total_cache_creation_tokens, tiers: [.tiers[] | {tier, input_tokens, cache_read_tokens, cache_creation_tokens}]}'
 ```
 
 `input_tokens` counts the full prompt volume including the cached share, so
