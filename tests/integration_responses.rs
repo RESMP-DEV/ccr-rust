@@ -60,7 +60,10 @@ async fn start_gated_openai_stream_server(
                     if tx.send(Ok(Bytes::from(first))).await.is_err() {
                         return;
                     }
-                    tail_gate.notified().await;
+                    tokio::select! {
+                        _ = tail_gate.notified() => {}
+                        _ = tx.closed() => return,
+                    }
                     let tail = format!(
                         "data: {}\n\ndata: [DONE]\n\n",
                         json!({
@@ -742,9 +745,15 @@ async fn test_responses_stream_emits_delta_before_upstream_completion() {
     .await
     .expect("first translated delta should not wait for upstream EOF");
 
-    assert!(prefix.contains("event: response.output_text.delta"));
-    assert!(prefix.contains("\"delta\":\"first\""));
-    assert!(!prefix.contains("event: response.completed"));
+    let prefix_events = parse_sse_events(&prefix);
+    let first_delta = prefix_events
+        .iter()
+        .find(|event| event.event == "response.output_text.delta")
+        .expect("prefix should contain a translated text delta");
+    assert_eq!(first_delta.data["delta"], "first");
+    assert!(!prefix_events
+        .iter()
+        .any(|event| event.event == "response.completed"));
 
     tail_gate.notify_one();
     let suffix = timeout(Duration::from_secs(5), async {
@@ -759,8 +768,15 @@ async fn test_responses_stream_emits_delta_before_upstream_completion() {
     .await
     .expect("stream should complete after releasing the upstream tail");
 
-    assert!(suffix.contains("\"delta\":\" tail\""));
-    assert!(suffix.contains("event: response.completed"));
+    let suffix_events = parse_sse_events(&suffix);
+    let tail_delta = suffix_events
+        .iter()
+        .find(|event| event.event == "response.output_text.delta")
+        .expect("suffix should contain the released tail delta");
+    assert_eq!(tail_delta.data["delta"], " tail");
+    assert!(suffix_events
+        .iter()
+        .any(|event| event.event == "response.completed"));
 }
 
 #[tokio::test]
