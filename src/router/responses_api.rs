@@ -1209,17 +1209,29 @@ mod tests {
             "type": "message_start",
             "message": {"id": "resp_late", "model": "test-model"}
         });
+        let usage_only = serde_json::json!({
+            "id": "resp_original",
+            "object": "chat.completion.chunk",
+            "created": 42,
+            "model": "test-model",
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 4,
+                "total_tokens": 19
+            }
+        });
 
         converter.push_frame(None, &first.to_string());
         let empty_events = converter.push_frame(None, &empty.to_string());
         converter.push_frame(Some("message_start"), &late_message_start.to_string());
+        converter.push_frame(None, &usage_only.to_string());
         let terminal_events = converter.finish();
 
         assert!(!empty_events.contains("response.output_text.delta"));
         assert!(terminal_events.contains("\"id\":\"resp_original\""));
         assert!(!terminal_events.contains("resp_late"));
-        assert!(terminal_events.contains("\"input_tokens\":11"));
-        assert!(terminal_events.contains("\"output_tokens\":2"));
+        assert!(terminal_events.contains("\"input_tokens\":15"));
+        assert!(terminal_events.contains("\"output_tokens\":4"));
     }
 
     #[test]

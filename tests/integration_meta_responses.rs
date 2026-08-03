@@ -54,6 +54,61 @@ fn sse_json_events(payload: &str) -> Result<Vec<serde_json::Value>, serde_json::
 }
 
 #[tokio::test]
+async fn native_responses_rejects_transformers_before_upstream_dispatch() {
+    if !localhost_bind_available() {
+        eprintln!("Skipping test: localhost bind unavailable");
+        return;
+    }
+    let upstream = MockServer::start().await;
+    let config_json = json!({
+        "Providers": [{
+            "name": "meta-muse",
+            "api_base_url": upstream.uri(),
+            "api_key": "meta-test-key",
+            "models": ["muse-spark-1.1"],
+            "protocol": "responses",
+            "tier_name": "ccr-meta-muse",
+            "transformer": {"use": ["identity"]}
+        }],
+        "Router": {
+            "default": "meta-muse,muse-spark-1.1",
+            "tiers": ["meta-muse,muse-spark-1.1"]
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+    let request = json!({
+        "model": "auto",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_id": "file_123"}]
+        }],
+        "metadata": {"trace": "must-not-be-lost"},
+        "stream": false
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn meta_muse_uses_responses_endpoint_and_returns_anthropic_json() {
     if !localhost_bind_available() {
         eprintln!("Skipping test: localhost bind unavailable");

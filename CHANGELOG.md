@@ -68,7 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Anthropic translation. Anthropic-native tool-use frames become Responses
   function-call events, encoded upstream streams fail explicitly instead of
   corrupting translated bytes, and Chat fallbacks omit continuation identity
-  metadata from tool-result content.
+  metadata from tool-result content. Native Responses requests now fail an
+  incompatible transformed-provider route rather than silently dropping
+  Responses-only fields.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 
