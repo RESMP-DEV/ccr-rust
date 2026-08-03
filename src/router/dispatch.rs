@@ -133,16 +133,17 @@ fn embedded_stream_error(payload: &str) -> Option<(String, String)> {
 
     let candidate = json_candidate?;
     let json = serde_json::from_str::<serde_json::Value>(&candidate).ok()?;
-    json.get("error")?.as_object()?;
-
-    let msg = json["error"]["message"]
+    let error = json.get("error").filter(|error| !error.is_null())?;
+    let msg = error["message"]
         .as_str()
+        .or_else(|| error.as_str())
         .unwrap_or("Unknown error in stream body")
         .to_string();
-    let code = json["error"]["code"]
+    let code = error["code"]
         .as_str()
-        .unwrap_or("unknown")
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| error.get("code").map(serde_json::Value::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
     Some((code, msg))
 }
 
@@ -242,14 +243,19 @@ async fn check_stream_for_embedded_error(
 /// Check a non-streaming response body for an embedded error in a 200.
 fn check_body_for_embedded_error(body: &[u8], tier_name: &str) -> Result<(), TryRequestError> {
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
-        if json.get("error").is_some_and(serde_json::Value::is_object) {
-            let msg = json["error"]["message"]
+        if let Some(error) = json.get("error").filter(|error| !error.is_null()) {
+            let msg = error["message"]
                 .as_str()
+                .or_else(|| error.as_str())
                 .unwrap_or("Unknown error in response body");
-            let code = json["error"]["code"].as_str().unwrap_or("unknown");
+            let code = error["code"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| error.get("code").map(serde_json::Value::to_string))
+                .unwrap_or_else(|| "unknown".to_string());
             warn!(
                 tier = tier_name,
-                error_code = code,
+                error_code = %code,
                 "Provider returned error in 200 body: {}",
                 msg
             );
@@ -1400,15 +1406,17 @@ mod tests {
     }
 
     #[test]
-    fn non_object_error_metadata_is_not_an_embedded_error() {
+    fn every_non_null_error_value_is_an_embedded_error() {
         for body in [
-            br#"{"error":"none","output":[]}"#.as_slice(),
+            br#"{"error":"rate limited","output":[]}"#.as_slice(),
             br#"{"error":[],"output":[]}"#.as_slice(),
-            br#"{"error":null,"output":[]}"#.as_slice(),
         ] {
-            assert!(check_body_for_embedded_error(body, "test-tier").is_ok());
-            assert!(embedded_stream_error(std::str::from_utf8(body).unwrap()).is_none());
+            assert!(check_body_for_embedded_error(body, "test-tier").is_err());
+            assert!(embedded_stream_error(std::str::from_utf8(body).unwrap()).is_some());
         }
+        let null_error = br#"{"error":null,"output":[]}"#;
+        assert!(check_body_for_embedded_error(null_error, "test-tier").is_ok());
+        assert!(embedded_stream_error(std::str::from_utf8(null_error).unwrap()).is_none());
     }
 
     #[test]
