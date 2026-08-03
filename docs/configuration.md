@@ -118,21 +118,28 @@ Each provider entry configures an upstream API endpoint.
 | `api_base_url` | string | Yes | - | Full URL to the API endpoint. |
 | `api_key` | string | Yes | - | API key for authentication. |
 | `models` | array | Yes | - | List of model names available from this provider. |
-| `pricing` | object | No | - | Provider-default input/output prices in USD per million tokens. |
-| `model_pricing` | object | No | - | Model-keyed price overrides using the same two rate fields. |
+| `pricing` | object | No | - | Provider-default input/output prices in USD per million tokens, with optional cached-input rates. |
+| `model_pricing` | object | No | - | Model-keyed price overrides using the same rate fields. |
 | `transformer` | object | No | - | Request/response transformation configuration. |
 
 ### Provider and Model Pricing
 
 Pricing is optional. When configured, both `input_per_million_tokens` and
-`output_per_million_tokens` are required. A `model_pricing` entry overrides the
-provider default for that model:
+`output_per_million_tokens` are required. Two more rates are individually
+optional: `cache_read_per_million_tokens` (the discounted rate for cached
+input reads) and `cache_creation_per_million_tokens` (the surcharged rate for
+cache writes on providers that bill them). When a cached rate is unset, tokens
+in that class contribute nothing to the cost estimate: the reported cost stays
+an honest lower bound instead of billing cached traffic at the full input
+rate. A `model_pricing` entry overrides the provider default for that model:
 
 ```json
 {
   "pricing": {
     "input_per_million_tokens": 1.0,
-    "output_per_million_tokens": 4.0
+    "output_per_million_tokens": 4.0,
+    "cache_read_per_million_tokens": 0.1,
+    "cache_creation_per_million_tokens": 1.25
   },
   "model_pricing": {
     "premium-model": {

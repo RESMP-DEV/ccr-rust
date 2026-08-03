@@ -242,11 +242,17 @@ The `enhancetool` transformer is a built-in that runs on response processing:
 
 ### Verifying cache hits
 
-Check the `/v1/usage` endpoint for cache metrics:
+Check the `/v1/usage` endpoint for cache metrics. The summary carries
+aggregate `total_cache_read_tokens` and `total_cache_creation_tokens`, and
+each tier reports its own `cache_read_tokens` and `cache_creation_tokens`:
 
 ```bash
-curl -s http://127.0.0.1:3456/v1/usage | jq '.tiers[].cache_read_tokens'
+curl -s http://127.0.0.1:3456/v1/usage | \
+  jq '{total_cache_read_tokens, tiers: [.tiers[] | {tier, input_tokens, cache_read_tokens}]}'
 ```
+
+`input_tokens` counts the full prompt volume including the cached share, so
+the cache hit rate for a tier is `cache_read_tokens / input_tokens`.
 
 Or monitor via Prometheus metrics:
 
@@ -254,6 +260,12 @@ Or monitor via Prometheus metrics:
 - `ccr_cache_creation_tokens_total{tier}` — tokens used to populate cache
 
 A healthy caching setup shows `cache_read_tokens` growing faster than `cache_creation_tokens` over time.
+
+When a provider has pricing configured, cost estimates bill cache reads and
+cache writes at the optional `cache_read_per_million_tokens` and
+`cache_creation_per_million_tokens` rates (see
+[configuration.md](configuration.md)). Without a cached rate, those tokens
+contribute nothing to `cost_usd`, keeping the estimate a lower bound.
 
 ## Combining Features
 

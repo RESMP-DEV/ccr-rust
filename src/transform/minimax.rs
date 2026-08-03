@@ -9,7 +9,8 @@
 //! - Response M2.x: map `reasoning_details` -> `reasoning_content`
 //! - Response M3: preserve native `thinking` blocks, handle structured reasoning
 //! - Response: convert thinking-only Anthropic responses to text content
-//! - Response: normalize cache tokens in usage
+//! - Response: pass cache token fields through unmodified (usage recording
+//!   sums input and cache activity itself)
 //!
 //! Model capabilities:
 //! - MiniMax-M3: 1M context, multimodal, native Anthropic-style thinking blocks
@@ -217,40 +218,12 @@ impl Transformer for MinimaxTransformer {
             }
         }
 
-        // Normalize usage: MiniMax reports cached tokens separately
-        // Total input = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
-        if let Some(usage) = response.get_mut("usage") {
-            if let Some(obj) = usage.as_object_mut() {
-                let input = obj
-                    .get("input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let cache_creation = obj
-                    .get("cache_creation_input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let cache_read = obj
-                    .get("cache_read_input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-
-                let total_input = input + cache_creation + cache_read;
-                if total_input != input {
-                    trace!(
-                        "MiniMax usage normalized: {} + {} + {} = {} total input tokens",
-                        input,
-                        cache_creation,
-                        cache_read,
-                        total_input
-                    );
-                    obj.insert(
-                        "input_tokens".to_string(),
-                        Value::Number(total_input.into()),
-                    );
-                }
-            }
-        }
-
+        // Usage passes through untouched: MiniMax reports cached tokens in
+        // canonical Anthropic shape (`input_tokens` excludes cache activity),
+        // and usage recording sums input plus cache reads and writes itself.
+        // Folding the cache fields into `input_tokens` here would double-count
+        // the cached share in /v1/usage and break the wire contract for
+        // clients that sum the fields.
         trace!("MiniMax response transformed");
         Ok(response)
     }
@@ -428,9 +401,12 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_usage_normalizes_cache_tokens() {
+    fn test_transform_usage_preserves_cache_fields_unfolded() {
         let transformer = MinimaxTransformer;
-        // MiniMax reports cache tokens separately
+        // MiniMax reports cache tokens separately in canonical Anthropic
+        // shape. The transformer must not fold them into input_tokens:
+        // usage recording sums the fields itself, and folding here would
+        // double-count the cached share.
         let response = json!({
             "id": "msg_123",
             "type": "message",
@@ -447,9 +423,10 @@ mod tests {
         let transformed = transformer.transform_response(response).unwrap();
         let usage = &transformed["usage"];
 
-        // Total input should be 1 + 0 + 40161 = 40162
-        assert_eq!(usage["input_tokens"], 40162);
+        assert_eq!(usage["input_tokens"], 1);
         assert_eq!(usage["output_tokens"], 242);
+        assert_eq!(usage["cache_read_input_tokens"], 40161);
+        assert_eq!(usage["cache_creation_input_tokens"], 0);
     }
 
     #[test]

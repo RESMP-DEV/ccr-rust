@@ -13,7 +13,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Added
+
+- **Cached-input token accounting** — `/v1/usage` now reports aggregate
+  `total_cache_read_tokens` and `total_cache_creation_tokens` alongside the
+  existing per-tier cache splits, persisted across restarts like the other
+  totals. Pricing accepts optional `cache_read_per_million_tokens` and
+  `cache_creation_per_million_tokens` rates; cost estimates bill the cached
+  share at those rates when configured and at zero otherwise, so `cost_usd`
+  stays an honest lower bound instead of billing cached traffic at the full
+  input rate. Pre-request routing estimates still treat prompts as uncached
+  because the hit rate is unknown before dispatch; cached-prefix affinity as
+  a routing signal stays out until measured telemetry justifies it.
+
+### Changed
+
+- **Prompt-volume normalization for usage accounting** — recorded
+  `input_tokens` now always count the full prompt volume including cache
+  activity. Anthropic-protocol paths (non-streaming and streaming) add the
+  separately reported `cache_read_input_tokens` and
+  `cache_creation_input_tokens` back into the recorded input, and the
+  Anthropic stream tracker now reads `message_start`'s `message.usage`
+  (previously only top-level `usage`, which missed input and cache splits on
+  providers that omit them from `message_delta`). Passthrough responses keep
+  `cache_creation_input_tokens` for clients, the MiniMax transformer no
+  longer folds cache tokens into `input_tokens` (usage recording sums the
+  fields itself; folding would double-count), and token-drift verification
+  compares the pre-request estimate against the full raw prompt volume so
+  high cache-hit traffic no longer reads as false drift.
 
 - **Responses and stream edge cases** — Normalize empty function arguments,
   preserve reasoning summaries, accept RFC 3339 response timestamps, ignore

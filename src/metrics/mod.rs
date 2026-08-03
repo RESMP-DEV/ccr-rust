@@ -273,6 +273,8 @@ struct TokenDriftEntry {
 // Atomic counters for fast aggregate access without Prometheus iteration
 pub static TOTAL_INPUT_TOKENS: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_OUTPUT_TOKENS: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_CACHE_READ_TOKENS: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_CACHE_CREATION_TOKENS: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_FAILURES: AtomicU64 = AtomicU64::new(0);
 
@@ -598,6 +600,13 @@ pub fn record_pre_request_tokens(
 }
 
 /// Record token usage from a backend response.
+///
+/// `input_tokens` counts the full prompt-side volume, including any cached
+/// share: callers on Anthropic-style protocols (where `input_tokens` excludes
+/// cache activity) add `cache_read` and `cache_creation` back in before
+/// calling, while OpenAI-style `prompt_tokens` already include cached reads.
+/// `cache_read` and `cache_creation` are subsets of `input_tokens`, so cache
+/// hit rate is `cache_read / input_tokens`.
 pub fn record_usage(
     tier: &str,
     input_tokens: u64,
@@ -631,6 +640,7 @@ pub fn record_usage(
         CACHE_READ_TOKENS_TOTAL
             .with_label_values(&[tier])
             .inc_by(cache_read as f64);
+        TOTAL_CACHE_READ_TOKENS.fetch_add(cache_read, Ordering::Relaxed);
         persist_counter_inc(
             METRIC_CACHE_READ_TOKENS_TOTAL,
             &[("tier", tier)],
@@ -641,6 +651,7 @@ pub fn record_usage(
         CACHE_CREATION_TOKENS_TOTAL
             .with_label_values(&[tier])
             .inc_by(cache_creation as f64);
+        TOTAL_CACHE_CREATION_TOKENS.fetch_add(cache_creation, Ordering::Relaxed);
         persist_counter_inc(
             METRIC_CACHE_CREATION_TOKENS_TOTAL,
             &[("tier", tier)],

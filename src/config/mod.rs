@@ -419,6 +419,82 @@ mod tests {
     }
 
     #[test]
+    fn cached_rates_parse_and_discount_the_estimate() {
+        let p = parse_provider(
+            r#"{
+                "name": "cached-priced",
+                "api_base_url": "https://example.test/v1",
+                "api_key": "x",
+                "models": ["economy"],
+                "pricing": {
+                    "input_per_million_tokens": 3.0,
+                    "output_per_million_tokens": 15.0,
+                    "cache_read_per_million_tokens": 0.3,
+                    "cache_creation_per_million_tokens": 3.75
+                }
+            }"#,
+        );
+
+        let pricing = p.pricing_for_model("economy").expect("provider pricing");
+        assert_eq!(pricing.cache_read_per_million_tokens, Some(0.3));
+        assert_eq!(pricing.cache_creation_per_million_tokens, Some(3.75));
+
+        // 1M uncached * 3.0 + 100k out * 15.0 + 2M read * 0.3 + 400k created * 3.75
+        // = 3.0 + 1.5 + 0.6 + 1.5 = 6.6 USD.
+        let cost = pricing
+            .estimate_request_cost_usd_with_cache(1_000_000, 2_000_000, 400_000, 100_000)
+            .expect("valid pricing");
+        assert!((cost - 6.6).abs() < 1e-9, "got {cost}");
+    }
+
+    #[test]
+    fn unset_cached_rates_keep_estimates_a_lower_bound() {
+        let p = parse_provider(
+            r#"{
+                "name": "base-priced",
+                "api_base_url": "https://example.test/v1",
+                "api_key": "x",
+                "models": ["economy"],
+                "pricing": {
+                    "input_per_million_tokens": 1.0,
+                    "output_per_million_tokens": 2.0
+                }
+            }"#,
+        );
+
+        let pricing = p.pricing_for_model("economy").expect("provider pricing");
+        assert_eq!(pricing.cache_read_per_million_tokens, None);
+        assert_eq!(pricing.cache_creation_per_million_tokens, None);
+
+        // Cached tokens with no configured cached rate contribute nothing, so
+        // the estimate equals the uncached-only bill (a lower bound), and the
+        // legacy two-argument estimator matches the whole-prompt view.
+        let with_cache = pricing
+            .estimate_request_cost_usd_with_cache(500_000, 1_500_000, 250_000, 100_000)
+            .expect("valid pricing");
+        assert!((with_cache - 0.7).abs() < 1e-9, "got {with_cache}");
+        let uncached_only = pricing
+            .estimate_request_cost_usd(500_000, 100_000)
+            .expect("valid pricing");
+        assert!((with_cache - uncached_only).abs() < 1e-9);
+    }
+
+    #[test]
+    fn invalid_cached_rate_is_ignored_but_base_pricing_survives() {
+        let pricing = ModelPricing {
+            input_per_million_tokens: 1.0,
+            output_per_million_tokens: 2.0,
+            cache_read_per_million_tokens: Some(-1.0),
+            cache_creation_per_million_tokens: Some(f64::NAN),
+        };
+
+        let cost = pricing
+            .estimate_request_cost_usd_with_cache(1_000_000, 9_000_000, 9_000_000, 500_000)
+            .expect("base rates remain valid");
+        assert!((cost - 2.0).abs() < 1e-9, "got {cost}");
+    }
+
+    #[test]
     fn provider_with_transformer() {
         let p = parse_provider(
             r#"{
