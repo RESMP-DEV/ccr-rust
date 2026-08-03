@@ -122,8 +122,10 @@ impl ResponsesStreamConverter {
             || chunk.get("type").and_then(|value| value.as_str()) == Some("message_start")
         {
             if let Some(message) = chunk.get("message") {
-                if let Some(id) = message.get("id").and_then(|value| value.as_str()) {
-                    self.response_id = id.to_string();
+                if !self.created_sent {
+                    if let Some(id) = message.get("id").and_then(|value| value.as_str()) {
+                        self.response_id = id.to_string();
+                    }
                 }
                 if let Some(model) = message.get("model").and_then(|value| value.as_str()) {
                     self.model = model.to_string();
@@ -138,7 +140,7 @@ impl ResponsesStreamConverter {
         self.ensure_preserved_items(&mut output);
 
         if let Some(choices) = chunk.get("choices").and_then(|value| value.as_array()) {
-            if let Some(usage) = chunk.get("usage") {
+            if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
                 self.usage = map_openai_usage_to_responses_usage(usage);
             }
             if let Some(choice) = choices.first() {
@@ -277,7 +279,11 @@ impl ResponsesStreamConverter {
     fn push_openai_choice(&mut self, choice: &serde_json::Value, output: &mut String) {
         let delta = choice.get("delta").cloned().unwrap_or_default();
 
-        if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
+        if let Some(text) = delta
+            .get("content")
+            .and_then(|value| value.as_str())
+            .filter(|text| !text.is_empty())
+        {
             self.ensure_message_item(output);
             self.message_text.push_str(text);
             append_response_delta(
@@ -319,81 +325,147 @@ impl ResponsesStreamConverter {
                 .get("index")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0) as usize;
-            let entry = self.tools.entry(index).or_default();
-
-            if let Some(id) = tool_call.get("id").and_then(|value| value.as_str()) {
-                entry.id = id.to_string();
-            }
-            if let Some(name) = tool_call
-                .get("function")
-                .and_then(|function| function.get("name"))
-                .and_then(|value| value.as_str())
-            {
-                entry.name = name.to_string();
-            }
-            if let Some(arguments) = tool_call
-                .get("function")
-                .and_then(|function| function.get("arguments"))
-                .and_then(|value| value.as_str())
-            {
-                entry.arguments.push_str(arguments);
-            }
-
-            if !entry.added && (!entry.id.is_empty() || !entry.name.is_empty()) {
-                if entry.id.is_empty() {
-                    entry.id = format!("call_{index}");
+            let should_add = {
+                let entry = self.tools.entry(index).or_default();
+                if let Some(id) = tool_call.get("id").and_then(|value| value.as_str()) {
+                    entry.id = id.to_string();
                 }
-                if entry.name.is_empty() {
-                    entry.name = "tool".to_string();
-                }
-                if self.preserved_response.is_none() {
-                    let output_index = self.next_output_index;
-                    self.next_output_index += 1;
-                    let added = serde_json::json!({
-                        "type": "response.output_item.added",
-                        "output_index": output_index,
-                        "item": {
-                            "id": entry.id,
-                            "type": "function_call",
-                            "call_id": entry.id,
-                            "name": entry.name,
-                            "arguments": ""
-                        }
-                    });
-                    output.push_str("event: response.output_item.added\ndata: ");
-                    output.push_str(&added.to_string());
-                    output.push_str("\n\n");
-                    entry.output_index = Some(output_index);
-                    entry.item_id = Some(entry.id.clone());
-                } else if let Some(identity) =
-                    self.preserved_response.as_ref().and_then(|response| {
-                        response_output_item_identity(response, "function_call", index, None)
-                    })
+                if let Some(name) = tool_call
+                    .get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(|value| value.as_str())
                 {
-                    entry.output_index = Some(identity.output_index);
-                    entry.item_id = identity.item_id;
+                    entry.name = name.to_string();
                 }
-                entry.added = true;
+                if let Some(arguments) = tool_call
+                    .get("function")
+                    .and_then(|function| function.get("arguments"))
+                    .and_then(|value| value.as_str())
+                {
+                    entry.arguments.push_str(arguments);
+                }
+                !entry.added && (!entry.id.is_empty() || !entry.name.is_empty())
+            };
+            if should_add {
+                self.ensure_tool_item(index, output);
             }
-
-            if entry.added && entry.arguments.len() > entry.emitted_arguments_len {
-                let arguments = entry.arguments[entry.emitted_arguments_len..].to_string();
-                entry.emitted_arguments_len = entry.arguments.len();
-                let identity = entry
-                    .output_index
-                    .map(|output_index| ResponseOutputItemIdentity {
-                        output_index,
-                        item_id: entry.item_id.clone(),
-                        content_index: None,
-                    });
-                append_response_delta(
-                    output,
-                    "response.function_call_arguments.delta",
-                    &arguments,
-                    identity,
-                );
-            }
+            self.emit_pending_tool_arguments(index, output);
         }
+    }
+
+    fn ensure_tool_item(&mut self, index: usize, output: &mut String) {
+        let entry = self.tools.entry(index).or_default();
+        if entry.added {
+            return;
+        }
+        if entry.id.is_empty() {
+            entry.id = format!("call_{index}");
+        }
+        if entry.name.is_empty() {
+            entry.name = "tool".to_string();
+        }
+        if self.preserved_response.is_none() {
+            let output_index = self.next_output_index;
+            self.next_output_index += 1;
+            let added = serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": {
+                    "id": entry.id,
+                    "type": "function_call",
+                    "call_id": entry.id,
+                    "name": entry.name,
+                    "arguments": ""
+                }
+            });
+            output.push_str("event: response.output_item.added\ndata: ");
+            output.push_str(&added.to_string());
+            output.push_str("\n\n");
+            entry.output_index = Some(output_index);
+            entry.item_id = Some(entry.id.clone());
+        } else if let Some(identity) = self.preserved_response.as_ref().and_then(|response| {
+            response_output_item_identity(response, "function_call", index, None)
+        }) {
+            entry.output_index = Some(identity.output_index);
+            entry.item_id = identity.item_id;
+        }
+        entry.added = true;
+    }
+
+    fn emit_pending_tool_arguments(&mut self, index: usize, output: &mut String) {
+        let Some(entry) = self.tools.get_mut(&index) else {
+            return;
+        };
+        if !entry.added || entry.arguments.len() <= entry.emitted_arguments_len {
+            return;
+        }
+        let arguments = entry.arguments[entry.emitted_arguments_len..].to_string();
+        entry.emitted_arguments_len = entry.arguments.len();
+        let identity = entry
+            .output_index
+            .map(|output_index| ResponseOutputItemIdentity {
+                output_index,
+                item_id: entry.item_id.clone(),
+                content_index: None,
+            });
+        append_response_delta(
+            output,
+            "response.function_call_arguments.delta",
+            &arguments,
+            identity,
+        );
+    }
+
+    fn push_anthropic_tool_start(&mut self, chunk: &serde_json::Value, output: &mut String) {
+        let Some(block) = chunk.get("content_block") else {
+            return;
+        };
+        if block.get("type").and_then(|value| value.as_str()) != Some("tool_use") {
+            return;
+        }
+        let index = chunk
+            .get("index")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let entry = self.tools.entry(index).or_default();
+        if let Some(id) = block.get("id").and_then(|value| value.as_str()) {
+            entry.id = id.to_string();
+        }
+        if let Some(name) = block.get("name").and_then(|value| value.as_str()) {
+            entry.name = name.to_string();
+        }
+        if let Some(input) = block.get("input").filter(|input| {
+            !input.is_null() && !input.as_object().is_some_and(serde_json::Map::is_empty)
+        }) {
+            entry.arguments.push_str(&input.to_string());
+        }
+        self.ensure_tool_item(index, output);
+        self.emit_pending_tool_arguments(index, output);
+    }
+
+    fn push_anthropic_tool_delta(
+        &mut self,
+        chunk: &serde_json::Value,
+        delta: &serde_json::Value,
+        output: &mut String,
+    ) {
+        let Some(arguments) = delta
+            .get("partial_json")
+            .and_then(|value| value.as_str())
+            .filter(|arguments| !arguments.is_empty())
+        else {
+            return;
+        };
+        let index = chunk
+            .get("index")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        {
+            let entry = self.tools.entry(index).or_default();
+            entry.arguments.push_str(arguments);
+        }
+        self.ensure_tool_item(index, output);
+        self.emit_pending_tool_arguments(index, output);
     }
 
     fn push_anthropic_event(
@@ -403,10 +475,15 @@ impl ResponsesStreamConverter {
         output: &mut String,
     ) {
         match event_type {
+            Some("content_block_start") => self.push_anthropic_tool_start(chunk, output),
             Some("content_block_delta") => {
                 let Some(delta) = chunk.get("delta") else {
                     return;
                 };
+                if delta.get("type").and_then(|value| value.as_str()) == Some("input_json_delta") {
+                    self.push_anthropic_tool_delta(chunk, delta, output);
+                    return;
+                }
                 if let Some(text) = delta
                     .get("text")
                     .and_then(|value| value.as_str())
@@ -529,7 +606,7 @@ impl ResponsesStreamConverter {
         }
 
         indexed_output_items.sort_by_key(|(output_index, _)| *output_index);
-        let mut output_items = indexed_output_items
+        let output_items = indexed_output_items
             .into_iter()
             .map(|(_, item)| item)
             .collect::<Vec<_>>();
@@ -543,7 +620,6 @@ impl ResponsesStreamConverter {
             for (output_index, item) in items.iter().enumerate() {
                 append_output_item_done(&mut output, output_index, item);
             }
-            output_items = items.clone();
         }
 
         let terminal_type = match self.response_status.as_str() {

@@ -432,6 +432,17 @@ fn normalize_tool_output(output: &serde_json::Value) -> String {
     }
 }
 
+fn normalize_continuation_output(item: &serde_json::Value) -> String {
+    if let Some(output) = item.get("output") {
+        return normalize_tool_output(output);
+    }
+    let mut payload = item.as_object().cloned().unwrap_or_default();
+    for identity_field in ["type", "call_id", "id", "approval_request_id"] {
+        payload.remove(identity_field);
+    }
+    serde_json::Value::Object(payload).to_string()
+}
+
 fn normalize_responses_message_role(role: &str) -> &str {
     match role {
         // OpenAI Responses API `developer` role should be treated as `system`
@@ -564,10 +575,7 @@ pub(super) fn responses_request_to_openai_chat_request(
                         .or_else(|| item.get("id").and_then(|v| v.as_str()))
                         .or_else(|| item.get("approval_request_id").and_then(|v| v.as_str()))
                         .unwrap_or("call_unknown");
-                    let output = item
-                        .get("output")
-                        .map(normalize_tool_output)
-                        .unwrap_or_else(|| item.to_string());
+                    let output = normalize_continuation_output(item);
                     messages.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -845,6 +853,25 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
             axum::http::HeaderValue::from_static("text/event-stream"),
         );
         return Response::from_parts(parts, Body::from(output));
+    }
+
+    if let Some(content_encoding) = parts.headers.get(axum::http::header::CONTENT_ENCODING) {
+        let is_identity = content_encoding
+            .to_str()
+            .is_ok_and(|value| value.eq_ignore_ascii_case("identity"));
+        if !is_identity {
+            error!(
+                encoding = ?content_encoding,
+                "Responses stream adapter cannot translate an encoded upstream body"
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "Unsupported upstream stream content encoding"
+                })),
+            )
+                .into_response();
+        }
     }
 
     parts.headers.insert(
@@ -1147,6 +1174,107 @@ mod tests {
         assert!(terminal_events.contains("response.completed"));
     }
 
+    #[test]
+    fn incremental_stream_converter_keeps_identity_and_usage_stable() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let first = serde_json::json!({
+            "id": "resp_original",
+            "object": "chat.completion.chunk",
+            "created": 42,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "answer"},
+                "finish_reason": null
+            }],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 2,
+                "total_tokens": 13
+            }
+        });
+        let empty = serde_json::json!({
+            "id": "resp_original",
+            "object": "chat.completion.chunk",
+            "created": 42,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": ""},
+                "finish_reason": null
+            }],
+            "usage": null
+        });
+        let late_message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "resp_late", "model": "test-model"}
+        });
+
+        converter.push_frame(None, &first.to_string());
+        let empty_events = converter.push_frame(None, &empty.to_string());
+        converter.push_frame(Some("message_start"), &late_message_start.to_string());
+        let terminal_events = converter.finish();
+
+        assert!(!empty_events.contains("response.output_text.delta"));
+        assert!(terminal_events.contains("\"id\":\"resp_original\""));
+        assert!(!terminal_events.contains("resp_late"));
+        assert!(terminal_events.contains("\"input_tokens\":11"));
+        assert!(terminal_events.contains("\"output_tokens\":2"));
+    }
+
+    #[test]
+    fn incremental_stream_converter_handles_anthropic_tool_use() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_tools",
+                "model": "test-model",
+                "usage": {"input_tokens": 3, "output_tokens": 0}
+            }
+        });
+        let tool_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_weather",
+                "name": "weather",
+                "input": {}
+            }
+        });
+        let first_arguments = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"city\":\""}
+        });
+        let second_arguments = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "Paris\"}"}
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let added = converter.push_frame(Some("content_block_start"), &tool_start.to_string());
+        let first_delta =
+            converter.push_frame(Some("content_block_delta"), &first_arguments.to_string());
+        let second_delta =
+            converter.push_frame(Some("content_block_delta"), &second_arguments.to_string());
+        let terminal = converter.finish();
+
+        assert!(added.contains("response.output_item.added"));
+        assert!(added.contains("\"name\":\"weather\""));
+        assert!(first_delta.contains("response.function_call_arguments.delta"));
+        assert!(second_delta.contains("response.function_call_arguments.delta"));
+        let done = parse_sse_frames(&terminal)
+            .into_iter()
+            .find(|(event, _)| event.as_deref() == Some("response.output_item.done"))
+            .expect("tool stream should finish its output item");
+        let done: serde_json::Value = serde_json::from_str(&done.1).unwrap();
+        assert_eq!(done["item"]["id"], "toolu_weather");
+        assert_eq!(done["item"]["arguments"], "{\"city\":\"Paris\"}");
+    }
+
     #[tokio::test]
     async fn incremental_stream_failure_retains_active_response_id() {
         let first = format!(
@@ -1183,6 +1311,37 @@ mod tests {
         assert!(payload.contains("event: response.failed"));
         assert!(payload.contains("\"id\":\"resp_active\""));
         assert!(!payload.contains("resp_failed"));
+    }
+
+    #[tokio::test]
+    async fn responses_stream_rejects_encoded_upstream_body() {
+        let upstream = Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+            .header(axum::http::header::CONTENT_ENCODING, "gzip")
+            .body(Body::from("encoded bytes"))
+            .unwrap();
+
+        let adapted = convert_openai_stream_response_to_responses(upstream).await;
+
+        assert_eq!(adapted.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(adapted.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("Unsupported upstream stream content encoding")
+        );
+    }
+
+    #[test]
+    fn continuation_fallback_omits_identity_metadata() {
+        let item = serde_json::json!({
+            "type": "mcp_approval_response",
+            "approval_request_id": "approval_1",
+            "approve": true
+        });
+
+        assert_eq!(normalize_continuation_output(&item), "{\"approve\":true}");
     }
 
     #[test]
