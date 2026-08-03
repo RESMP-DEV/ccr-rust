@@ -212,7 +212,11 @@ async fn test_codex_stream_reassembles_fragmented_openai_sse_frames() {
                 "index": 0,
                 "delta": {},
                 "finish_reason": "stop"
-            }]
+            }],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 4
+            }
         })
     );
 
@@ -273,6 +277,26 @@ async fn test_codex_stream_reassembles_fragmented_openai_sse_frames() {
         .map(|frame| serde_json::from_str(frame).unwrap())
         .collect();
 
+    assert!(
+        json_events.iter().all(|event| event["choices"].is_array()),
+        "every OpenAI SSE frame must satisfy the OpenAI chunk contract: {json_events:?}"
+    );
+    assert!(
+        json_events
+            .iter()
+            .all(|event| event["type"].as_str() != Some("content_block_stop")),
+        "Anthropic lifecycle frames must not leak to OpenAI clients"
+    );
+    let terminal = json_events.last().expect("terminal OpenAI usage chunk");
+    assert!(
+        json_events[..json_events.len() - 1]
+            .iter()
+            .all(|event| event.get("usage").is_none()),
+        "usage must appear only on the terminal OpenAI chunk"
+    );
+    assert_eq!(terminal["choices"].as_array().unwrap().len(), 0);
+    assert_eq!(terminal["usage"]["prompt_tokens"], 12);
+    assert_eq!(terminal["usage"]["completion_tokens"], 4);
     assert!(
         json_events
             .iter()

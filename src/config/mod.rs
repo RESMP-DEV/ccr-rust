@@ -461,6 +461,20 @@ mod tests {
     }
 
     #[test]
+    fn provider_with_responses_protocol() {
+        let p = parse_provider(
+            r#"{
+                "name": "meta-muse",
+                "api_base_url": "https://api.meta.ai/v1",
+                "api_key": "meta-test",
+                "models": ["muse-spark-1.1"],
+                "protocol": "responses"
+            }"#,
+        );
+        assert_eq!(p.protocol, ProviderProtocol::Responses);
+    }
+
+    #[test]
     fn should_bypass_logic() {
         let t = parse_transformer(r#"{"use": ["anthropic"]}"#);
         assert!(t.should_bypass("anthropic", "some-model"));

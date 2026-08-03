@@ -72,6 +72,8 @@ pub async fn stream_response_translated(
         let mut accumulated_tool_calls: Vec<(String, String, String)> = Vec::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
+        let mut cache_read_input_tokens: Option<u64> = None;
+        let mut reasoning_tokens: Option<u64> = None;
         let stream_start = verify_ctx.as_ref().map(|ctx| ctx.stream_start);
         let tier_name = verify_ctx
             .as_ref()
@@ -120,6 +122,18 @@ pub async fn stream_response_translated(
                                     if let Some(ref usage) = chunk.usage {
                                         input_tokens = usage.prompt_tokens;
                                         output_tokens = usage.completion_tokens;
+                                        cache_read_input_tokens = usage
+                                            .prompt_tokens_details
+                                            .as_ref()
+                                            .and_then(|details| details.get("cached_tokens"))
+                                            .and_then(|value| value.as_u64())
+                                            .or(cache_read_input_tokens);
+                                        reasoning_tokens = usage
+                                            .completion_tokens_details
+                                            .as_ref()
+                                            .and_then(|details| details.get("reasoning_tokens"))
+                                            .and_then(|value| value.as_u64())
+                                            .or(reasoning_tokens);
                                     }
 
                                     let was_first = translation_state.is_first;
@@ -218,6 +232,8 @@ pub async fn stream_response_translated(
             Some(AnthropicUsage {
                 input_tokens,
                 output_tokens,
+                cache_read_input_tokens,
+                reasoning_tokens,
             })
         } else {
             // Estimate from accumulated content if no usage reported
@@ -225,6 +241,8 @@ pub async fn stream_response_translated(
             Some(AnthropicUsage {
                 input_tokens,
                 output_tokens: estimated_output as u64,
+                cache_read_input_tokens,
+                reasoning_tokens,
             })
         };
 
@@ -294,7 +312,7 @@ pub async fn stream_response_translated(
                     &ctx.tier_name,
                     usage.input_tokens,
                     usage.output_tokens,
-                    0,
+                    usage.cache_read_input_tokens.unwrap_or(0),
                     0,
                 );
                 verify_token_usage(&ctx.tier_name, ctx.local_estimate, input_tokens);
@@ -575,30 +593,82 @@ pub async fn stream_anthropic_response_with_tracking(
 /// Emit a complete Anthropic response as a sequence of SSE events.
 ///
 /// Used when `forceNonStreaming` is true but the client requested `stream: true`.
-fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
+fn emit_anthropic_sse_events(
+    resp: &AnthropicResponse,
+    include_unsigned_reasoning: bool,
+) -> Vec<String> {
     let mut events = Vec::new();
+    let reasoning = include_unsigned_reasoning
+        .then_some(resp.reasoning_content.as_deref())
+        .flatten()
+        .filter(|reasoning| !reasoning.trim().is_empty())
+        .filter(|_| {
+            !resp
+                .content
+                .iter()
+                .any(|block| matches!(block, AnthropicContentBlock::Thinking { .. }))
+        });
+    let reasoning_offset = usize::from(reasoning.is_some());
 
     // message_start
+    let mut start_usage = serde_json::json!({
+        "input_tokens": resp.usage.input_tokens,
+        "output_tokens": 0
+    });
+    if let Some(cached_tokens) = resp.usage.cache_read_input_tokens {
+        start_usage["cache_read_input_tokens"] = serde_json::json!(cached_tokens);
+    }
+    let mut message = serde_json::json!({
+        "id": resp.id,
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "model": resp.model,
+        "stop_reason": null,
+        "stop_sequence": null,
+        "usage": start_usage
+    });
+    if let Some(refusal) = &resp.refusal {
+        message["refusal"] = serde_json::Value::String(refusal.clone());
+    }
+    if let Some(response_status) = &resp.response_status {
+        message["response_status"] = serde_json::Value::String(response_status.clone());
+    }
+    if let Some(incomplete_details) = &resp.incomplete_details {
+        message["incomplete_details"] = incomplete_details.clone();
+    }
     let start_msg = serde_json::json!({
         "type": "message_start",
-        "message": {
-            "id": resp.id,
-            "type": "message",
-            "role": "assistant",
-            "content": [],
-            "model": resp.model,
-            "stop_reason": null,
-            "stop_sequence": null,
-            "usage": {
-                "input_tokens": resp.usage.input_tokens,
-                "output_tokens": 0
-            }
-        }
+        "message": message
     });
     events.push(format!("event: message_start\ndata: {}\n\n", start_msg));
 
+    if let Some(reasoning) = reasoning {
+        let block_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""}
+        });
+        let delta = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": reasoning}
+        });
+        let block_stop = serde_json::json!({"type": "content_block_stop", "index": 0});
+        events.push(format!(
+            "event: content_block_start\ndata: {}\n\n",
+            block_start
+        ));
+        events.push(format!("event: content_block_delta\ndata: {}\n\n", delta));
+        events.push(format!(
+            "event: content_block_stop\ndata: {}\n\n",
+            block_stop
+        ));
+    }
+
     // Emit content blocks (text, tool_use, and thinking).
-    for (idx, block) in resp.content.iter().enumerate() {
+    for (content_idx, block) in resp.content.iter().enumerate() {
+        let idx = content_idx + reasoning_offset;
         match block {
             AnthropicContentBlock::Text { text } => {
                 // content_block_start
@@ -691,20 +761,24 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
     }
 
     // message_delta
+    let mut delta_usage = serde_json::json!({
+        "output_tokens": resp.usage.output_tokens
+    });
+    if let Some(reasoning_tokens) = resp.usage.reasoning_tokens {
+        delta_usage["reasoning_tokens"] = serde_json::json!(reasoning_tokens);
+    }
     let msg_delta = serde_json::json!({
         "type": "message_delta",
         "delta": {
             "stop_reason": resp.stop_reason,
             "stop_sequence": null
         },
-        "usage": {
-            "output_tokens": resp.usage.output_tokens
-        }
+        "usage": delta_usage
     });
     events.push(format!("event: message_delta\ndata: {}\n\n", msg_delta));
 
-    // message_stop
-    events.push("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string());
+    let message_stop = serde_json::json!({"type": "message_stop"});
+    events.push(format!("event: message_stop\ndata: {}\n\n", message_stop));
 
     events
 }
@@ -715,8 +789,11 @@ fn emit_anthropic_sse_events(resp: &AnthropicResponse) -> Vec<String> {
 /// Reads the response body, parses it as an `AnthropicResponse`, and re-emits it
 /// as SSE events that Claude CLI can parse. Falls through to the original response
 /// if parsing fails.
-pub(super) async fn wrap_json_response_as_sse(response: Response) -> Response {
-    let (parts, body) = response.into_parts();
+pub(super) async fn wrap_json_response_as_sse(
+    response: Response,
+    include_unsigned_reasoning: bool,
+) -> Response {
+    let (mut parts, body) = response.into_parts();
 
     // Only wrap successful JSON responses
     if parts.status != StatusCode::OK {
@@ -736,18 +813,22 @@ pub(super) async fn wrap_json_response_as_sse(response: Response) -> Response {
 
     // Try to parse as AnthropicResponse
     if let Ok(anthropic_resp) = serde_json::from_slice::<AnthropicResponse>(&bytes) {
-        let sse_events = emit_anthropic_sse_events(&anthropic_resp);
+        let sse_events = emit_anthropic_sse_events(&anthropic_resp, include_unsigned_reasoning);
         let sse_body = sse_events.join("");
-
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(Body::from(sse_body))
-            .unwrap_or_else(|_| {
-                // Fallback: return original bytes if SSE build fails
-                Response::from_parts(parts, Body::from(bytes))
-            })
+        parts.headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        parts.headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        parts.headers.remove(axum::http::header::CONTENT_ENCODING);
+        parts.headers.remove(axum::http::header::TRANSFER_ENCODING);
+        parts.headers.remove(axum::http::header::ETAG);
+        parts.headers.remove(axum::http::header::LAST_MODIFIED);
+        Response::from_parts(parts, Body::from(sse_body))
     } else {
         // Can't parse as Anthropic — return original response unchanged
         Response::from_parts(parts, Body::from(bytes))
@@ -757,6 +838,108 @@ pub(super) async fn wrap_json_response_as_sse(response: Response) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn translated_live_stream_preserves_usage_token_details() {
+        let first = serde_json::json!({
+            "id": "chatcmpl-usage-details",
+            "object": "chat.completion.chunk",
+            "created": 42,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "ok"},
+                "finish_reason": "stop"
+            }]
+        });
+        let usage = serde_json::json!({
+            "id": "chatcmpl-usage-details",
+            "object": "chat.completion.chunk",
+            "created": 42,
+            "model": "test-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 7,
+                "total_tokens": 19,
+                "prompt_tokens_details": {"cached_tokens": 5},
+                "completion_tokens_details": {"reasoning_tokens": 3}
+            }
+        });
+        let payload = format!("data: {first}\n\ndata: {usage}\n\ndata: [DONE]\n\n");
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response =
+            stream_response_translated(byte_stream, 8, None, "test-model", TransformerChain::new())
+                .await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let usage = body
+            .split("\n\n")
+            .filter_map(|frame| {
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            })
+            .find(|event| event["type"] == "message_delta")
+            .and_then(|event| event.get("usage").cloned())
+            .expect("message_delta should carry structured usage");
+
+        assert_eq!(usage["input_tokens"], 12);
+        assert_eq!(usage["output_tokens"], 7);
+        assert_eq!(usage["cache_read_input_tokens"], 5);
+        assert_eq!(usage["reasoning_tokens"], 3);
+    }
+
+    #[tokio::test]
+    async fn json_to_sse_rewrite_removes_stale_entity_headers() {
+        let payload = serde_json::json!({
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "test-model",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let mut response = Response::new(Body::from(payload.to_string()));
+        for (name, value) in [
+            (axum::http::header::CONTENT_LENGTH, "10"),
+            (axum::http::header::CONTENT_ENCODING, "gzip"),
+            (axum::http::header::TRANSFER_ENCODING, "chunked"),
+            (axum::http::header::ETAG, "\"old\""),
+            (
+                axum::http::header::LAST_MODIFIED,
+                "Fri, 01 Aug 2025 00:00:00 GMT",
+            ),
+        ] {
+            response
+                .headers_mut()
+                .insert(name, axum::http::HeaderValue::from_str(value).unwrap());
+        }
+
+        let rewritten = wrap_json_response_as_sse(response, false).await;
+
+        assert_eq!(
+            rewritten.headers().get(axum::http::header::CONTENT_TYPE),
+            Some(&axum::http::HeaderValue::from_static("text/event-stream"))
+        );
+        for name in [
+            axum::http::header::CONTENT_LENGTH,
+            axum::http::header::CONTENT_ENCODING,
+            axum::http::header::TRANSFER_ENCODING,
+            axum::http::header::ETAG,
+            axum::http::header::LAST_MODIFIED,
+        ] {
+            assert!(rewritten.headers().get(name).is_none());
+        }
+    }
 
     #[test]
     fn test_emit_anthropic_sse_events_tool_use() {
@@ -779,11 +962,15 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 100,
                 output_tokens: 20,
+                ..Default::default()
             },
             reasoning_content: None,
+            refusal: None,
+            response_status: None,
+            incomplete_details: None,
         };
 
-        let events = emit_anthropic_sse_events(&resp);
+        let events = emit_anthropic_sse_events(&resp, true);
         let joined = events.join("");
 
         // Must contain message_start
@@ -832,11 +1019,16 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 50,
                 output_tokens: 30,
+                cache_read_input_tokens: Some(7),
+                reasoning_tokens: Some(11),
             },
             reasoning_content: None,
+            refusal: None,
+            response_status: None,
+            incomplete_details: None,
         };
 
-        let events = emit_anthropic_sse_events(&resp);
+        let events = emit_anthropic_sse_events(&resp, true);
         let joined = events.join("");
 
         assert!(joined.contains("thinking_delta"), "missing thinking_delta");
@@ -850,6 +1042,98 @@ mod tests {
         );
         assert!(joined.contains("sig123"), "missing signature content");
         assert!(joined.contains("text_delta"), "missing text_delta");
+        assert!(joined.contains("\"cache_read_input_tokens\":7"));
+        assert!(joined.contains("\"reasoning_tokens\":11"));
+    }
+
+    #[test]
+    fn unsigned_reasoning_is_only_emitted_for_openai_adapters() {
+        let resp = AnthropicResponse {
+            id: "msg_unsigned".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text {
+                text: "answer".to_string(),
+            }],
+            model: "responses-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            reasoning_content: Some("unsigned summary".to_string()),
+            refusal: None,
+            response_status: None,
+            incomplete_details: None,
+        };
+
+        let native_events = emit_anthropic_sse_events(&resp, false).join("");
+        assert!(!native_events.contains("thinking_delta"));
+        assert!(!native_events.contains("unsigned summary"));
+
+        let adapter_events = emit_anthropic_sse_events(&resp, true).join("");
+        assert!(adapter_events.contains("thinking_delta"));
+        assert!(adapter_events.contains("unsigned summary"));
+
+        let whitespace_resp = AnthropicResponse {
+            reasoning_content: Some("  \n".to_string()),
+            ..resp
+        };
+        let whitespace_events = emit_anthropic_sse_events(&whitespace_resp, true).join("");
+        assert!(!whitespace_events.contains("thinking_delta"));
+    }
+
+    #[test]
+    fn pseudo_stream_omits_absent_responses_metadata() {
+        let resp = AnthropicResponse {
+            id: "msg_plain".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "plain-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage::default(),
+            reasoning_content: None,
+            refusal: None,
+            response_status: None,
+            incomplete_details: None,
+        };
+
+        let first = emit_anthropic_sse_events(&resp, false)
+            .into_iter()
+            .next()
+            .unwrap();
+        let payload = first.split_once("data: ").unwrap().1.trim();
+        let event: serde_json::Value = serde_json::from_str(payload).unwrap();
+        let message = event["message"].as_object().unwrap();
+
+        assert!(!message.contains_key("refusal"));
+        assert!(!message.contains_key("response_status"));
+        assert!(!message.contains_key("incomplete_details"));
+    }
+
+    #[test]
+    fn pseudo_stream_carries_responses_refusal_and_terminal_metadata() {
+        let resp = AnthropicResponse {
+            id: "msg_refusal".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "responses-model".to_string(),
+            stop_reason: Some("stop_sequence".to_string()),
+            usage: AnthropicUsage::default(),
+            reasoning_content: None,
+            refusal: Some("I cannot help with that.".to_string()),
+            response_status: Some("incomplete".to_string()),
+            incomplete_details: Some(serde_json::json!({"reason": "content_filter"})),
+        };
+
+        let events = emit_anthropic_sse_events(&resp, true).join("");
+
+        assert!(events.contains("I cannot help with that."));
+        assert!(events.contains("\"response_status\":\"incomplete\""));
+        assert!(events.contains("\"reason\":\"content_filter\""));
     }
 
     #[test]
@@ -878,11 +1162,15 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 100,
                 output_tokens: 40,
+                ..Default::default()
             },
             reasoning_content: None,
+            refusal: None,
+            response_status: None,
+            incomplete_details: None,
         };
 
-        let events = emit_anthropic_sse_events(&resp);
+        let events = emit_anthropic_sse_events(&resp, true);
         let joined = events.join("");
 
         // Both tool IDs must be present

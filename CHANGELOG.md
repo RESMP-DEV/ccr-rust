@@ -13,6 +13,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Responses and stream edge cases** — Normalize empty function arguments,
+  preserve reasoning summaries, accept RFC 3339 response timestamps, ignore
+  duplicate terminal stream events, preserve non-object `error` metadata, and
+  remove stale entity headers when JSON responses are rewritten as SSE. String
+  request input and reasoning summaries now also survive the complete
+  Responses-client pseudo-streaming path. Reasoning remains a distinct Responses
+  output item, parallel streamed tool calls retain their original indices, and
+  cached/reasoning token details survive both adapter directions and cached
+  input is included in operator usage metrics. Refusals remain typed Responses
+  refusal blocks instead of being flattened into ordinary answer text,
+  reasoning controls and continuation IDs reach Responses upstreams, incomplete
+  terminal metadata survives both response modes, Anthropic callers receive
+  refusal-only results as text, compressed oversize requests return HTTP 413,
+  and malformed text blocks fail locally. Native
+  Anthropic pseudo-streams omit unsigned reasoning summaries, Responses request
+  bodies and zstd windows are bounded, oversized bodies return HTTP 413, and
+  malformed empty requests fail locally. Pseudo-stream tool calls use dense
+  OpenAI indices even when internal text or reasoning blocks precede them.
+  Streaming regression coverage uses a deterministic upstream-tail gate rather
+  than a machine-load-sensitive wall-clock race. Same-protocol Responses routes
+  retain native tools and one response identity, reasoning controls are
+  validated and translated symmetrically, terminal event types preserve failed
+  and cancelled states, absent metadata is omitted instead of serialized as
+  `null`, and unsupported request encodings return HTTP 415.
+  Native Responses-to-Responses routing now also preserves file inputs, the
+  complete upstream response envelope, native tool output items, citation
+  annotations, and exact pseudo-stream item events. Chat structured-output
+  schemas are translated to Responses `text.format`; invalid tool controls and
+  malformed reasoning objects are rejected locally. Trusted native envelopes
+  travel through response extensions instead of client-visible JSON bridge
+  fields, so neither callers nor upstream providers can inject internal state.
+  Native background Responses may remain queued or in progress with empty
+  output while their complete tracking envelope is returned unchanged; chat
+  adapters still reject unusable empty results. Native failed envelopes retain
+  their response identity and error receipt, pseudo-streams use stable output
+  indices and empty initial items before replayed deltas, queued streams retain
+  their non-terminal event type, and explicit null continuation IDs are omitted.
+  The native-envelope error bypass is restricted to actual Responses providers,
+  so Chat-protocol HTTP-200 error bodies still trigger tier fallback. Replayed
+  pseudo-stream deltas carry their preserved item IDs and output indices, and
+  function-call arguments stream after an empty initial item. Ambiguous
+  flattened deltas are suppressed when a native envelope has multiple matching
+  items or content blocks, including summary-only reasoning, leaving exact
+  added/done/completed items authoritative. Native function, custom-tool,
+  computer, local-shell, shell, apply-patch, and MCP-approval continuation
+  results now pass pre-routing validation and reach Responses providers intact.
+  Responses stream adapters emit translated deltas before upstream EOF, parse
+  each frame once within a bounded byte budget, preserve the active response
+  identity on adapter failures, and preserve exhausted-tier HTTP 429 responses.
+  Live OpenAI streams also retain cached and reasoning token details through
+  Anthropic translation. Anthropic-native tool-use frames become Responses
+  function-call events, encoded upstream streams fail explicitly instead of
+  corrupting translated bytes, and Chat fallbacks omit continuation identity
+  metadata from tool-result content. Native Responses requests now fail an
+  incompatible transformed-provider route rather than silently dropping
+  Responses-only fields. Synthesized text streams now emit the Responses
+  content-part lifecycle, and every non-null embedded error keeps cascading
+  instead of turning a malformed HTTP 200 into a false success, including in
+  wrapped gateway envelopes. Chat image detail hints also survive Responses
+  conversion.
+  The optional sindexer integration is pinned to its reviewed task-aware
+  embedding-prefix release on `main`.
+
 ### Added
 
 - **Quickstart-oriented documentation** — README restructured around a
@@ -21,6 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configs plus a smoke-test script. CLI `--help` output now includes usage
   examples for every command, and `docs/cli.md` documents the previously
   missing `dashboard`, `mcp`, `mcp-daemon`, and `captures` commands.
+- **Responses API upstream protocol** — Providers may set
+  `protocol: "responses"` to send bounded non-streaming requests to
+  `/responses`. CCR-Rust converts chat messages, multimodal input, tools,
+  function-call history, completed text, tool calls, and usage while preserving
+  the existing Anthropic and OpenAI client contracts. Responses upstreams are
+  forced through the existing JSON-to-SSE wrapper when a client requests a
+  stream.
 
 - **Per-request token audit on `/v1/token-audit`** — New read-only endpoint
   exposing recent per-request telemetry (timestamp, tier, and the pre-request
@@ -104,6 +176,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variants to the tier ordering).
 
 ### Fixed
+
+- **Responses protocol validation and streaming contracts** — Accept completed
+  payloads with null error fields, preserve flat function tools, reject malformed
+  images and unsupported tools, normalize wrapped Responses payloads before
+  success accounting, retain tier headers during pseudo-streaming, and emit
+  OpenAI usage exactly once on the terminal stream chunk.
+- **OpenAI gateway envelope and lifecycle compatibility** — Non-streaming
+  OpenAI-compatible responses wrapped as `{success:true,data:{...}}` are
+  normalized before deserialization, and `content_block_stop` now follows the
+  streaming Anthropic-to-OpenAI path. Strict OpenAI clients no longer receive
+  a raw Anthropic lifecycle frame. Anthropic input/output token fields are
+  mapped to OpenAI prompt/completion/total usage, and translated streams end
+  with a standard choices-empty usage chunk.
 
 - **Streamed SSE usage matches recorded usage** — In the OpenAI→Anthropic
   translated streaming path, the prompt-token fallback to the pre-request

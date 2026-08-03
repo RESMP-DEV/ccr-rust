@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{trace, warn};
 
+use super::responses_protocol::{
+    openai_chat_request_to_responses, responses_response_to_openai_chat,
+};
 use super::streaming::{
     stream_anthropic_response_with_tracking, stream_response_translated, BoxByteStream,
 };
@@ -52,6 +55,37 @@ fn sanitized_capture_headers(headers: &reqwest::header::HeaderMap) -> serde_json
     serde_json::Value::Object(values)
 }
 
+/// Normalize the success envelope used by some OpenAI-compatible gateways.
+///
+/// Some gateways return non-streaming OpenAI or Responses payloads inside
+/// `{"success":true,"data":{...}}`. Normalize only an unambiguous response or
+/// error payload so unrelated provider metadata remains untouched.
+fn normalize_openai_response_body(body: bytes::Bytes) -> bytes::Bytes {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+        return body;
+    }
+    let Some(data) = value.get("data") else {
+        return body;
+    };
+    if data
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .is_none()
+        && data
+            .get("output")
+            .and_then(serde_json::Value::as_array)
+            .is_none()
+        && !data.get("error").is_some_and(|error| !error.is_null())
+    {
+        return body;
+    }
+
+    serde_json::to_vec(data).map_or(body, bytes::Bytes::from)
+}
+
 async fn persist_debug_capture(
     capture: Option<&Arc<DebugCapture>>,
     builder: Option<CaptureBuilder>,
@@ -96,16 +130,17 @@ fn embedded_stream_error(payload: &str) -> Option<(String, String)> {
 
     let candidate = json_candidate?;
     let json = serde_json::from_str::<serde_json::Value>(&candidate).ok()?;
-    json.get("error")?;
-
-    let msg = json["error"]["message"]
+    let error = json.get("error").filter(|error| !error.is_null())?;
+    let msg = error["message"]
         .as_str()
+        .or_else(|| error.as_str())
         .unwrap_or("Unknown error in stream body")
         .to_string();
-    let code = json["error"]["code"]
+    let code = error["code"]
         .as_str()
-        .unwrap_or("unknown")
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| error.get("code").map(serde_json::Value::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
     Some((code, msg))
 }
 
@@ -205,14 +240,19 @@ async fn check_stream_for_embedded_error(
 /// Check a non-streaming response body for an embedded error in a 200.
 fn check_body_for_embedded_error(body: &[u8], tier_name: &str) -> Result<(), TryRequestError> {
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
-        if json.get("error").is_some() {
-            let msg = json["error"]["message"]
+        if let Some(error) = json.get("error").filter(|error| !error.is_null()) {
+            let msg = error["message"]
                 .as_str()
+                .or_else(|| error.as_str())
                 .unwrap_or("Unknown error in response body");
-            let code = json["error"]["code"].as_str().unwrap_or("unknown");
+            let code = error["code"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| error.get("code").map(serde_json::Value::to_string))
+                .unwrap_or_else(|| "unknown".to_string());
             warn!(
                 tier = tier_name,
-                error_code = code,
+                error_code = %code,
                 "Provider returned error in 200 body: {}",
                 msg
             );
@@ -269,6 +309,8 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) debug_capture: Option<Arc<DebugCapture>>,
     /// Original OpenAI request body for passthrough to OpenAI-compatible backends.
     pub(super) openai_passthrough_body: Option<&'a serde_json::Value>,
+    /// Render refusal-only Responses results as text for native Anthropic clients.
+    pub(super) render_refusal_as_anthropic_text: bool,
 }
 
 pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, TryRequestError> {
@@ -284,6 +326,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
         ratelimit_tracker,
         debug_capture,
         openai_passthrough_body,
+        render_refusal_as_anthropic_text,
     } = args;
     let provider = config.resolve_provider(tier).ok_or_else(|| {
         TryRequestError::Other(anyhow::anyhow!("Provider not found for tier: {}", tier))
@@ -291,6 +334,25 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
 
     // Build transformer chain from provider config
     let chain = build_transformer_chain(registry, provider, tier.split(',').nth(1).unwrap_or(tier));
+
+    // Native Responses payloads intentionally retain fields that have no
+    // lossless Anthropic or Chat Completions representation. Existing request
+    // transformers operate on the Anthropic-shaped request, so combining the
+    // two would silently drop inputs such as files, hosted tools, text.format,
+    // and metadata. Reject this incompatible route instead of forwarding a
+    // lossy reconstruction; ordinary Chat clients may still use a transformed
+    // Responses provider through the conversion path below.
+    if provider.protocol == ProviderProtocol::Responses
+        && !chain.is_empty()
+        && openai_passthrough_body
+            .and_then(|body| body.get(super::RESPONSES_REQUEST_PASSTHROUGH_KEY))
+            .is_some()
+    {
+        return Err(TryRequestError::Other(anyhow::anyhow!(
+            "Responses provider '{}' cannot apply request transformers to a native Responses payload",
+            provider.name
+        )));
+    }
 
     // Extract the actual model name from the tier (format: "provider,model")
     let model_name = tier.split(',').nth(1).unwrap_or(tier);
@@ -315,7 +377,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
     };
 
     match provider.protocol {
-        ProviderProtocol::Openai => {
+        ProviderProtocol::Openai | ProviderProtocol::Responses => {
             try_request_via_openai_protocol(
                 config,
                 provider,
@@ -330,6 +392,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     chain,
                     debug_capture,
                     openai_passthrough_body: effective_passthrough,
+                    render_refusal_as_anthropic_text,
                 },
             )
             .await
@@ -349,6 +412,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     chain,
                     debug_capture,
                     openai_passthrough_body: None,
+                    render_refusal_as_anthropic_text,
                 },
             )
             .await
@@ -368,6 +432,7 @@ pub(super) struct TryRequestProtocolArgs<'a> {
     pub(super) debug_capture: Option<Arc<DebugCapture>>,
     /// Original OpenAI body for direct passthrough (skips Anthropic round-trip).
     pub(super) openai_passthrough_body: Option<serde_json::Value>,
+    pub(super) render_refusal_as_anthropic_text: bool,
 }
 
 pub(super) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -537,6 +602,16 @@ pub(super) fn build_anthropic_headers(
     Ok(headers)
 }
 
+fn should_preserve_responses_response(
+    protocol: ProviderProtocol,
+    openai_passthrough_body: Option<&serde_json::Value>,
+) -> bool {
+    protocol == ProviderProtocol::Responses
+        && openai_passthrough_body
+            .and_then(|body| body.get(super::RESPONSES_REQUEST_PASSTHROUGH_KEY))
+            .is_some()
+}
+
 pub(super) async fn try_request_via_openai_protocol(
     config: &Config,
     provider: &crate::config::Provider,
@@ -553,16 +628,23 @@ pub(super) async fn try_request_via_openai_protocol(
         chain,
         debug_capture,
         openai_passthrough_body,
+        render_refusal_as_anthropic_text,
     } = args;
 
-    let url = provider_openai_chat_completions_url(provider);
+    let url = if provider.protocol == ProviderProtocol::Responses {
+        provider_endpoint_url(provider, "responses")
+    } else {
+        provider_openai_chat_completions_url(provider)
+    };
     let headers = build_openai_headers(provider)?;
 
     // Fast path: when the inbound request was already OpenAI-formatted (Codex
     // frontend) and no transformers need to modify it, reuse the original body
     // directly with only a model-name swap.  This eliminates the wasteful
     // OpenAI → Anthropic → deserialize → translate → OpenAI round-trip.
-    let (openai_request_value, stream_flag) = if let Some(mut body) = openai_passthrough_body {
+    let preserve_responses_response =
+        should_preserve_responses_response(provider.protocol, openai_passthrough_body.as_ref());
+    let (mut openai_request_value, stream_flag) = if let Some(mut body) = openai_passthrough_body {
         // Swap model name to the backend's expected value.
         if let Some(obj) = body.as_object_mut() {
             obj.insert(
@@ -591,6 +673,20 @@ pub(super) async fn try_request_via_openai_protocol(
             serde_json::to_value(&openai_request).map_err(|e| TryRequestError::Other(e.into()))?;
         (value, stream)
     };
+    if provider.protocol != ProviderProtocol::Responses {
+        if let Some(object) = openai_request_value.as_object_mut() {
+            object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
+        }
+    }
+    let (request_value, stream_flag) = if provider.protocol == ProviderProtocol::Responses {
+        (
+            openai_chat_request_to_responses(&openai_request_value, model_name)
+                .map_err(TryRequestError::Other)?,
+            false,
+        )
+    } else {
+        (openai_request_value, stream_flag)
+    };
 
     // Set up capture if enabled for this provider
     let capture_builder = if let Some(ref capture) = debug_capture {
@@ -599,7 +695,7 @@ pub(super) async fn try_request_via_openai_protocol(
                 .builder(&provider.name, tier_name)
                 .model(model_name)
                 .url(&url)
-                .request_body(openai_request_value.clone())
+                .request_body(request_value.clone())
                 .streaming(stream_flag);
             if capture.headers_enabled() {
                 builder = builder.request_headers(sanitized_capture_headers(&headers));
@@ -616,7 +712,7 @@ pub(super) async fn try_request_via_openai_protocol(
         .http_client()
         .post(&url)
         .headers(headers)
-        .json(&openai_request_value)
+        .json(&request_value)
         .send()
         .await;
 
@@ -749,32 +845,74 @@ pub(super) async fn try_request_via_openai_protocol(
             .as_ref()
             .filter(|capture| capture.headers_enabled())
             .map(|_| sanitized_capture_headers(resp.headers()));
-        let body = resp
+        let raw_body = resp
             .bytes()
             .await
             .map_err(|e| TryRequestError::Other(e.into()))?;
+        let body = normalize_openai_response_body(raw_body.clone());
 
         // Check for embedded error in 200 body BEFORE recording success,
         // otherwise a failed request corrupts tier rate-limit state.
-        if let Err(error) = check_body_for_embedded_error(&body, tier_name) {
-            let body_str = String::from_utf8_lossy(&body);
-            persist_debug_capture(
-                debug_capture.as_ref(),
-                capture_builder,
-                resp_status,
-                &body_str,
-                captured_headers,
-                Some(error.to_string()),
-            )
-            .await;
-            return Err(error);
+        if !preserve_responses_response {
+            if let Err(error) = check_body_for_embedded_error(&body, tier_name) {
+                let body_str = String::from_utf8_lossy(&raw_body);
+                persist_debug_capture(
+                    debug_capture.as_ref(),
+                    capture_builder,
+                    resp_status,
+                    &body_str,
+                    captured_headers,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
+            }
         }
 
-        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+        let mut trusted_responses_response = None;
+        let body_result = if provider.protocol == ProviderProtocol::Responses {
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .map_err(|error| TryRequestError::Other(error.into()))
+                .and_then(|response_value| {
+                    let converted = responses_response_to_openai_chat(
+                        &response_value,
+                        model_name,
+                        preserve_responses_response,
+                    )
+                    .map_err(TryRequestError::Other)?;
+                    if preserve_responses_response {
+                        trusted_responses_response = Some(response_value);
+                    }
+                    Ok(converted)
+                })
+                .and_then(|openai_value| {
+                    serde_json::to_vec(&openai_value)
+                        .map(bytes::Bytes::from)
+                        .map_err(|error| TryRequestError::Other(error.into()))
+                })
+        } else {
+            Ok(body)
+        };
+        let body = match body_result {
+            Ok(body) => body,
+            Err(error) => {
+                let body_str = String::from_utf8_lossy(&raw_body);
+                persist_debug_capture(
+                    debug_capture.as_ref(),
+                    capture_builder,
+                    resp_status,
+                    &body_str,
+                    captured_headers,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
-        let body_str = String::from_utf8_lossy(&body);
+        let body_str = String::from_utf8_lossy(&raw_body);
 
-        // Record capture for non-streaming response
+        // Record capture for the raw non-streaming response.
         if let (Some(builder), Some(capture)) = (capture_builder, debug_capture.clone()) {
             let interaction = builder.complete(resp_status, &body_str, captured_headers, None);
             if let Err(capture_err) = capture.record(interaction).await {
@@ -782,15 +920,23 @@ pub(super) async fn try_request_via_openai_protocol(
             }
         }
 
+        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+
         // Try to parse as OpenAI response and translate.
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
             // Record usage from the response.
             if let Some(ref usage) = openai_resp.usage {
+                let cache_read_tokens = usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.get("cached_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default();
                 record_usage(
                     tier_name,
                     usage.prompt_tokens,
                     usage.completion_tokens,
-                    0, // OpenAI doesn't have cache fields in the same way
+                    cache_read_tokens,
                     0,
                 );
                 verify_token_usage(tier_name, local_estimate, usage.prompt_tokens);
@@ -802,7 +948,18 @@ pub(super) async fn try_request_via_openai_protocol(
             }
 
             // Translate to Anthropic format.
-            let anthropic_resp = translate_response_openai_to_anthropic(openai_resp, model_name);
+            let mut anthropic_resp =
+                translate_response_openai_to_anthropic(openai_resp, model_name);
+            if render_refusal_as_anthropic_text {
+                let refusal = anthropic_resp.refusal.take();
+                if anthropic_resp.content.is_empty() {
+                    if let Some(refusal) = refusal {
+                        anthropic_resp
+                            .content
+                            .push(AnthropicContentBlock::Text { text: refusal });
+                    }
+                }
+            }
 
             // Apply response transformers if chain is not empty.
             let final_resp = if chain.is_empty() {
@@ -820,6 +977,11 @@ pub(super) async fn try_request_via_openai_protocol(
                 serde_json::to_vec(&final_resp).map_err(|e| TryRequestError::Other(e.into()))?;
 
             let mut response = (StatusCode::OK, response_body).into_response();
+            if let Some(trusted_response) = trusted_responses_response {
+                response
+                    .extensions_mut()
+                    .insert(super::TrustedResponsesResponse(trusted_response));
+            }
             insert_ccr_tier_header(&mut response, tier_name);
             return Ok(response);
         }
@@ -847,6 +1009,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
         chain,
         debug_capture,
         openai_passthrough_body: _, // not used for Anthropic protocol
+        render_refusal_as_anthropic_text: _,
     } = args;
 
     let url = provider_anthropic_messages_url(provider);
@@ -1209,5 +1372,83 @@ mod tests {
         assert_eq!(captured["authorization"], "[REDACTED]");
         assert_eq!(captured["x-api-key"], "[REDACTED]");
         assert_eq!(captured["x-request-id"], "request-123");
+    }
+
+    #[test]
+    fn openai_success_envelope_is_unwrapped() {
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "success": true,
+                "data": {
+                    "id": "chatcmpl-wrapped",
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+                }
+            }))
+            .unwrap(),
+        );
+
+        let normalized = normalize_openai_response_body(body);
+        let payload: serde_json::Value = serde_json::from_slice(&normalized).unwrap();
+
+        assert_eq!(payload["id"], "chatcmpl-wrapped");
+        assert!(payload.get("success").is_none());
+        assert_eq!(payload["choices"][0]["message"]["content"], "ok");
+    }
+
+    #[test]
+    fn unrelated_success_envelope_is_preserved() {
+        let body = bytes::Bytes::from_static(br#"{"success":true,"data":{"value":1}}"#);
+
+        assert_eq!(normalize_openai_response_body(body.clone()), body);
+    }
+
+    #[test]
+    fn every_non_null_error_value_is_an_embedded_error() {
+        for body in [
+            br#"{"error":"rate limited","output":[]}"#.as_slice(),
+            br#"{"error":[],"output":[]}"#.as_slice(),
+        ] {
+            assert!(check_body_for_embedded_error(body, "test-tier").is_err());
+            assert!(embedded_stream_error(std::str::from_utf8(body).unwrap()).is_some());
+        }
+        let null_error = br#"{"error":null,"output":[]}"#;
+        assert!(check_body_for_embedded_error(null_error, "test-tier").is_ok());
+        assert!(embedded_stream_error(std::str::from_utf8(null_error).unwrap()).is_none());
+    }
+
+    #[test]
+    fn native_response_preservation_requires_responses_provider() {
+        let mut body = serde_json::json!({});
+        body[super::super::RESPONSES_REQUEST_PASSTHROUGH_KEY] =
+            serde_json::json!({"input": "test"});
+
+        assert!(should_preserve_responses_response(
+            ProviderProtocol::Responses,
+            Some(&body)
+        ));
+        assert!(!should_preserve_responses_response(
+            ProviderProtocol::Openai,
+            Some(&body)
+        ));
+        assert!(!should_preserve_responses_response(
+            ProviderProtocol::Anthropic,
+            Some(&body)
+        ));
+    }
+
+    #[test]
+    fn responses_success_and_error_envelopes_are_unwrapped() {
+        for body in [
+            bytes::Bytes::from_static(br#"{"success":true,"data":{"id":"resp_1","output":[]}}"#),
+            bytes::Bytes::from_static(
+                br#"{"success":true,"data":{"error":{"message":"bad request"}}}"#,
+            ),
+            bytes::Bytes::from_static(br#"{"success":true,"data":{"error":"rate limited"}}"#),
+        ] {
+            let normalized = normalize_openai_response_body(body);
+            let payload: serde_json::Value = serde_json::from_slice(&normalized).unwrap();
+            assert!(payload.get("success").is_none());
+            assert!(payload.get("output").is_some() || payload.get("error").is_some());
+        }
     }
 }

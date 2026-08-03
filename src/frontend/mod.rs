@@ -105,6 +105,9 @@ pub struct Usage {
     /// Breakdown of input tokens (e.g., cache hits/misses)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens_details: Option<Value>,
+    /// Breakdown of output tokens (e.g., reasoning tokens)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens_details: Option<Value>,
 }
 
 /// Internal normalized request format.
@@ -345,6 +348,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 input_tokens_details: None,
+                output_tokens_details: None,
             }),
             extra_data: None,
         };

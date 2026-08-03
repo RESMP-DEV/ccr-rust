@@ -40,6 +40,7 @@ impl Transformer for AnthropicToOpenAiResponseTransformer {
                 == Some("content_block_start")
             || anthropic_response.get("type").and_then(|t| t.as_str())
                 == Some("content_block_delta")
+            || anthropic_response.get("type").and_then(|t| t.as_str()) == Some("content_block_stop")
             || anthropic_response.get("type").and_then(|t| t.as_str()) == Some("message_delta")
             || anthropic_response.get("type").and_then(|t| t.as_str()) == Some("message_stop")
         {
@@ -99,7 +100,7 @@ fn transform_non_streaming_response(anthropic_response: Value) -> Result<Value> 
     // Add usage if present
     let mut response_obj = openai_response;
     if let Some(usage) = anthropic_response.get("usage") {
-        response_obj["usage"] = usage.clone();
+        response_obj["usage"] = anthropic_usage_to_openai(usage);
     }
 
     debug!(
@@ -321,8 +322,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 .get("message")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-
-            serde_json::json!({
+            let mut event = serde_json::json!({
                 "id": message.get("id").and_then(|v| v.as_str()).unwrap_or("chatcmpl-unknown"),
                 "object": "chat.completion.chunk",
                 "created": current_timestamp(),
@@ -332,10 +332,36 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                     "delta": {"role": "assistant"},
                     "finish_reason": null
                 }]
-            })
+            });
+            if let Some(refusal) = message
+                .get("refusal")
+                .and_then(|value| value.as_str())
+                .filter(|refusal| !refusal.is_empty())
+            {
+                event["choices"][0]["delta"]["refusal"] =
+                    serde_json::Value::String(refusal.to_string());
+            }
+            if let Some(status) = message
+                .get("response_status")
+                .and_then(|value| value.as_str())
+                .filter(|status| !status.is_empty())
+            {
+                event["response_status"] = serde_json::Value::String(status.to_string());
+            }
+            if let Some(incomplete_details) = message
+                .get("incomplete_details")
+                .filter(|value| !value.is_null())
+            {
+                event["incomplete_details"] = incomplete_details.clone();
+            }
+            event
         }
         "content_block_start" => {
             // Start of a content block
+            let block_index = anthropic_event
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let content_block = anthropic_event
                 .get("content_block")
                 .cloned()
@@ -363,7 +389,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
 
                     serde_json::json!({
                         "tool_calls": [{
-                            "index": 0,
+                            "index": block_index,
                             "id": id,
                             "type": "function",
                             "function": {
@@ -390,6 +416,10 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
         }
         "content_block_delta" => {
             // Delta within a content block
+            let block_index = anthropic_event
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let delta = anthropic_event
                 .get("delta")
                 .cloned()
@@ -403,7 +433,7 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 // Tool use partial JSON
                 serde_json::json!({
                     "tool_calls": [{
-                        "index": 0,
+                        "index": block_index,
                         "function": {
                             "arguments": partial_json
                         }
@@ -449,8 +479,8 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 }]
             })
         }
-        "message_stop" | "content_block_stop" => {
-            // End of message or content block - no delta needed
+        "content_block_stop" => {
+            // End of a content block - no delta needed.
             serde_json::json!({
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",
@@ -461,6 +491,16 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                     "delta": {},
                     "finish_reason": null
                 }]
+            })
+        }
+        "message_stop" => {
+            // The stream adapter attaches collected usage to this terminal chunk.
+            serde_json::json!({
+                "id": "chatcmpl-stream",
+                "object": "chat.completion.chunk",
+                "created": current_timestamp(),
+                "model": "unknown",
+                "choices": []
             })
         }
         _ => {
@@ -480,6 +520,33 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
     };
 
     Ok(openai_event)
+}
+
+fn anthropic_usage_to_openai(usage: &Value) -> Value {
+    let prompt_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let completion_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let mut openai_usage = serde_json::json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens.saturating_add(completion_tokens)
+    });
+    if let Some(cached_tokens) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
+        openai_usage["prompt_tokens_details"] = serde_json::json!({
+            "cached_tokens": cached_tokens
+        });
+    }
+    if let Some(reasoning_tokens) = usage.get("reasoning_tokens").and_then(Value::as_u64) {
+        openai_usage["completion_tokens_details"] = serde_json::json!({
+            "reasoning_tokens": reasoning_tokens
+        });
+    }
+    openai_usage
 }
 
 /// Get current Unix timestamp.
@@ -541,7 +608,9 @@ mod tests {
         assert_eq!(result["choices"][0]["message"]["role"], "assistant");
         assert_eq!(result["choices"][0]["message"]["content"], "Hello, world!");
         assert_eq!(result["choices"][0]["finish_reason"], "stop");
-        assert_eq!(result["usage"]["input_tokens"], 10);
+        assert_eq!(result["usage"]["prompt_tokens"], 10);
+        assert_eq!(result["usage"]["completion_tokens"], 5);
+        assert_eq!(result["usage"]["total_tokens"], 15);
     }
 
     #[test]
@@ -627,6 +696,9 @@ mod tests {
                 "content": [],
                 "stop_reason": null,
                 "stop_sequence": null,
+                "refusal": "I cannot help with that.",
+                "response_status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"},
                 "usage": {"input_tokens": 10, "output_tokens": 1}
             }
         });
@@ -636,7 +708,38 @@ mod tests {
         assert_eq!(result["object"], "chat.completion.chunk");
         assert_eq!(result["id"], "msg_stream123");
         assert_eq!(result["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(
+            result["choices"][0]["delta"]["refusal"],
+            "I cannot help with that."
+        );
+        assert_eq!(result["response_status"], "incomplete");
+        assert_eq!(
+            result["incomplete_details"],
+            serde_json::json!({"reason": "content_filter"})
+        );
         assert!(result["choices"][0]["finish_reason"].is_null());
+        assert!(result.get("usage").is_none());
+    }
+
+    #[test]
+    fn test_transform_streaming_message_start_omits_null_metadata() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_event = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_stream123",
+                "model": "claude-sonnet-4-6",
+                "refusal": null,
+                "response_status": null,
+                "incomplete_details": null
+            }
+        });
+
+        let result = transformer.transform_response(anthropic_event).unwrap();
+
+        assert!(result["choices"][0]["delta"].get("refusal").is_none());
+        assert!(result.get("response_status").is_none());
+        assert!(result.get("incomplete_details").is_none());
     }
 
     #[test]
@@ -659,6 +762,21 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_streaming_content_block_stop() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_event = serde_json::json!({
+            "type": "content_block_stop",
+            "index": 0
+        });
+
+        let result = transformer.transform_response(anthropic_event).unwrap();
+
+        assert_eq!(result["object"], "chat.completion.chunk");
+        assert!(result["choices"][0]["delta"].is_object());
+        assert!(result["choices"][0]["finish_reason"].is_null());
+    }
+
+    #[test]
     fn test_transform_streaming_tool_use_delta() {
         let transformer = AnthropicToOpenAiResponseTransformer;
 
@@ -677,7 +795,30 @@ mod tests {
         let tool_calls = result["choices"][0]["delta"]["tool_calls"]
             .as_array()
             .unwrap();
+        assert_eq!(tool_calls[0]["index"], 1);
         assert_eq!(tool_calls[0]["function"]["arguments"], "{\"a\": 1}");
+    }
+
+    #[test]
+    fn test_transform_streaming_tool_use_start_preserves_block_index() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_event = serde_json::json!({
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_second",
+                "name": "second_tool",
+                "input": {}
+            }
+        });
+
+        let result = transformer.transform_response(anthropic_event).unwrap();
+        let tool_call = &result["choices"][0]["delta"]["tool_calls"][0];
+
+        assert_eq!(tool_call["index"], 2);
+        assert_eq!(tool_call["id"], "toolu_second");
+        assert_eq!(tool_call["function"]["name"], "second_tool");
     }
 
     #[test]
@@ -698,6 +839,22 @@ mod tests {
 
         assert_eq!(result["object"], "chat.completion.chunk");
         assert_eq!(result["choices"][0]["finish_reason"], "stop");
+        assert!(result.get("usage").is_none());
+    }
+
+    #[test]
+    fn test_transform_streaming_message_stop_has_empty_choices() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_event = serde_json::json!({
+            "type": "message_stop",
+            "usage": {"input_tokens": 120, "output_tokens": 30}
+        });
+
+        let result = transformer.transform_response(anthropic_event).unwrap();
+
+        assert_eq!(result["object"], "chat.completion.chunk");
+        assert_eq!(result["choices"].as_array().unwrap().len(), 0);
+        assert!(result.get("usage").is_none());
     }
 
     #[test]

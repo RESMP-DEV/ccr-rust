@@ -268,10 +268,27 @@ impl Frontend for ClaudeCodeFrontend {
         // Always include usage — Claude CLI crashes on missing/null usage
         // ("undefined is not an object (evaluating '_.input_tokens')")
         let usage = response.usage.unwrap_or_default();
-        anthropic_response["usage"] = serde_json::json!({
+        let mut anthropic_usage = serde_json::json!({
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens
         });
+        if let Some(cached_tokens) = usage
+            .input_tokens_details
+            .as_ref()
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_u64)
+        {
+            anthropic_usage["cache_read_input_tokens"] = serde_json::json!(cached_tokens);
+        }
+        if let Some(reasoning_tokens) = usage
+            .output_tokens_details
+            .as_ref()
+            .and_then(|details| details.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+        {
+            anthropic_usage["reasoning_tokens"] = serde_json::json!(reasoning_tokens);
+        }
+        anthropic_response["usage"] = anthropic_usage;
 
         // Add extra data if present
         if let Some(extra) = response.extra_data {
@@ -494,6 +511,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 input_tokens_details: None,
+                output_tokens_details: None,
             }),
             extra_data: None,
         };

@@ -23,6 +23,14 @@ pub use openai_compat::handle_chat_completions;
 mod responses_api;
 pub use responses_api::handle_responses;
 
+mod responses_protocol;
+
+const RESPONSES_REQUEST_PASSTHROUGH_KEY: &str = "__ccr_responses_request";
+const RESPONSES_RESPONSE_PASSTHROUGH_KEY: &str = "__ccr_responses_response";
+
+#[derive(Clone, Debug)]
+struct TrustedResponsesResponse(serde_json::Value);
+
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -34,7 +42,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use tracing::{error, info, warn};
 
-use crate::frontend::detect_frontend;
+use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::{
     increment_active_requests, record_failure, record_pre_request_tokens,
     record_rate_limit_backoff, record_rate_limit_hit, record_request_duration_with_frontend,
@@ -238,12 +246,12 @@ pub async fn handle_messages(
         );
 
         // Per-provider streaming decision: allow_streaming bypasses forceNonStreaming
-        let provider_allows_streaming = config
-            .resolve_provider(tier)
-            .map(|p| p.allow_streaming)
-            .unwrap_or(false);
-        let forced_non_streaming =
-            config.router().force_non_streaming && !provider_allows_streaming;
+        let provider = config.resolve_provider(tier);
+        let provider_allows_streaming = provider.map(|p| p.allow_streaming).unwrap_or(false);
+        let provider_uses_responses =
+            provider.is_some_and(|p| p.protocol == crate::config::ProviderProtocol::Responses);
+        let forced_non_streaming = provider_uses_responses
+            || (config.router().force_non_streaming && !provider_allows_streaming);
         if client_wants_stream && forced_non_streaming {
             request.stream = Some(false);
         } else {
@@ -280,6 +288,7 @@ pub async fn handle_messages(
                 ratelimit_tracker: state.ratelimit_tracker.clone(),
                 debug_capture: state.debug_capture.clone(),
                 openai_passthrough_body: request.openai_passthrough_body.as_ref(),
+                render_refusal_as_anthropic_text: frontend == FrontendType::ClaudeCode,
             })
             .await
             {
@@ -328,7 +337,11 @@ pub async fn handle_messages(
                     // If client wanted streaming but we forced non-streaming for this provider,
                     // wrap the JSON response as pseudo-SSE so Claude CLI can parse it.
                     if client_wants_stream && forced_non_streaming {
-                        return streaming::wrap_json_response_as_sse(response).await;
+                        return streaming::wrap_json_response_as_sse(
+                            response,
+                            frontend == FrontendType::Codex,
+                        )
+                        .await;
                     }
 
                     return response;
@@ -623,6 +636,7 @@ mod tests {
                     role: "assistant".to_string(),
                     content: Some(serde_json::Value::String("The answer is 42.".to_string())),
                     reasoning_content: Some("Let me think...".to_string()),
+                    refusal: None,
                     tool_calls: None,
                 },
                 finish_reason: Some("stop".to_string()),
@@ -631,7 +645,10 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 20,
                 prompt_tokens_details: None,
+                completion_tokens_details: None,
             }),
+            response_status: None,
+            incomplete_details: None,
         };
 
         let anthropic_resp =

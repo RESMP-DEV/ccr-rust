@@ -114,19 +114,33 @@ fn parse_sse_data_frames(payload: &str) -> Vec<String> {
 }
 
 async fn start_anthropic_stream_server(chunks: Vec<(Bytes, u64)>) -> String {
+    start_anthropic_stream_server_with_gate(chunks, None).await
+}
+
+async fn start_anthropic_stream_server_with_gate(
+    chunks: Vec<(Bytes, u64)>,
+    tail_gate: Option<std::sync::Arc<tokio::sync::Notify>>,
+) -> String {
     let chunks = std::sync::Arc::new(chunks);
     let app = Router::new().route(
         "/messages",
         post({
             let chunks = chunks.clone();
+            let tail_gate = tail_gate.clone();
             move || {
                 let chunks = chunks.clone();
+                let tail_gate = tail_gate.clone();
                 async move {
                     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
                     tokio::spawn(async move {
-                        for (chunk, delay_ms) in chunks.iter() {
+                        for (index, (chunk, delay_ms)) in chunks.iter().enumerate() {
                             if tx.send(Ok(chunk.clone())).await.is_err() {
                                 return;
+                            }
+                            if index == 0 {
+                                if let Some(gate) = &tail_gate {
+                                    gate.notified().await;
+                                }
                             }
                             if *delay_ms > 0 {
                                 tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
@@ -286,7 +300,7 @@ async fn test_anthropic_stream_emits_first_assistant_delta_before_completion() {
                     }
                 }),
             )),
-            1200,
+            0,
         ),
         (
             Bytes::from(sse_event(
@@ -305,7 +319,9 @@ async fn test_anthropic_stream_emits_first_assistant_delta_before_completion() {
         ),
     ];
 
-    let upstream_url = start_anthropic_stream_server(stream_chunks).await;
+    let release_tail = std::sync::Arc::new(tokio::sync::Notify::new());
+    let upstream_url =
+        start_anthropic_stream_server_with_gate(stream_chunks, Some(release_tail.clone())).await;
     let config_json = make_anthropic_test_config(&upstream_url);
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
@@ -314,13 +330,13 @@ async fn test_anthropic_stream_emits_first_assistant_delta_before_completion() {
     let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
     let app = build_app(config);
 
-    let resp = timeout(Duration::from_millis(700), make_codex_stream_request(&app))
+    let resp = timeout(Duration::from_secs(5), make_codex_stream_request(&app))
         .await
         .expect("response should start before upstream stream completes");
     assert_eq!(resp.status(), StatusCode::OK);
 
     let mut stream = resp.into_body().into_data_stream();
-    let first_chunk = timeout(Duration::from_millis(700), stream.next())
+    let first_chunk = timeout(Duration::from_secs(5), stream.next())
         .await
         .expect("first chunk should arrive before stream completion")
         .expect("stream should contain first chunk")
@@ -330,11 +346,17 @@ async fn test_anthropic_stream_emits_first_assistant_delta_before_completion() {
     assert!(first_text.contains("\"role\":\"assistant\""));
     assert!(!first_text.contains("[DONE]"));
 
-    let mut rest = String::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.unwrap();
-        rest.push_str(std::str::from_utf8(&chunk).unwrap());
-    }
+    release_tail.notify_one();
+    let rest = timeout(Duration::from_secs(5), async {
+        let mut rest = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            rest.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+        rest
+    })
+    .await
+    .expect("stream should complete after the upstream tail is released");
     let full_stream = format!("{first_text}{rest}");
 
     let assistant_index = full_stream

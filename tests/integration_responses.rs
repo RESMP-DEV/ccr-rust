@@ -3,9 +3,15 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
+use bytes::Bytes;
+use futures::StreamExt;
 use serde_json::json;
+use tokio::net::TcpListener;
+use tokio::time::{timeout, Duration};
+use tokio_stream::wrappers::ReceiverStream;
 use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -25,6 +31,71 @@ fn build_openai_sse(chunks: &[serde_json::Value]) -> String {
     }
     sse.push_str("data: [DONE]\n\n");
     sse
+}
+
+async fn start_gated_openai_stream_server(
+    tail_gate: std::sync::Arc<tokio::sync::Notify>,
+) -> String {
+    let app = Router::new().route(
+        "/chat/completions",
+        post(move || {
+            let tail_gate = tail_gate.clone();
+            async move {
+                let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+                tokio::spawn(async move {
+                    let first = format!(
+                        "data: {}\n\n",
+                        json!({
+                            "id": "chatcmpl-gated",
+                            "object": "chat.completion.chunk",
+                            "created": 1730000002,
+                            "model": "test-model",
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": "first"},
+                                "finish_reason": null
+                            }]
+                        })
+                    );
+                    if tx.send(Ok(Bytes::from(first))).await.is_err() {
+                        return;
+                    }
+                    tokio::select! {
+                        _ = tail_gate.notified() => {}
+                        _ = tx.closed() => return,
+                    }
+                    let tail = format!(
+                        "data: {}\n\ndata: [DONE]\n\n",
+                        json!({
+                            "id": "chatcmpl-gated",
+                            "object": "chat.completion.chunk",
+                            "created": 1730000002,
+                            "model": "test-model",
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": " tail"},
+                                "finish_reason": "stop"
+                            }]
+                        })
+                    );
+                    let _ = tx.send(Ok(Bytes::from(tail))).await;
+                });
+
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(ReceiverStream::new(rx)))
+                    .unwrap()
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
 }
 
 fn parse_sse_events(body: &str) -> Vec<SseEvent> {
@@ -621,6 +692,94 @@ async fn test_responses_stream_emits_required_events() {
 }
 
 #[tokio::test]
+async fn test_responses_stream_emits_delta_before_upstream_completion() {
+    if skip_if_localhost_bind_unavailable(
+        "test_responses_stream_emits_delta_before_upstream_completion",
+    ) {
+        return;
+    }
+    let tail_gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mock_url = start_gated_openai_stream_server(tail_gate.clone()).await;
+
+    let config_json = make_test_config(&mock_url);
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let request = json!({
+        "model": "mock,test-model",
+        "input": "Stream without waiting for EOF",
+        "stream": true
+    });
+    let resp = timeout(
+        Duration::from_secs(5),
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("Responses headers should arrive before the upstream tail")
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let mut body = resp.into_body().into_data_stream();
+    let prefix = timeout(Duration::from_secs(5), async {
+        let mut prefix = String::new();
+        while !prefix.contains("first") {
+            let chunk = body
+                .next()
+                .await
+                .expect("stream should remain open before the tail")
+                .expect("stream prefix should be readable");
+            prefix.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        prefix
+    })
+    .await
+    .expect("first translated delta should not wait for upstream EOF");
+
+    let prefix_events = parse_sse_events(&prefix);
+    let first_delta = prefix_events
+        .iter()
+        .find(|event| event.event == "response.output_text.delta")
+        .expect("prefix should contain a translated text delta");
+    assert_eq!(first_delta.data["delta"], "first");
+    assert!(!prefix_events
+        .iter()
+        .any(|event| event.event == "response.completed"));
+
+    tail_gate.notify_one();
+    let suffix = timeout(Duration::from_secs(5), async {
+        let mut suffix = String::new();
+        while let Some(chunk) = body.next().await {
+            suffix.push_str(&String::from_utf8_lossy(
+                &chunk.expect("stream suffix should be readable"),
+            ));
+        }
+        suffix
+    })
+    .await
+    .expect("stream should complete after releasing the upstream tail");
+
+    let suffix_events = parse_sse_events(&suffix);
+    let tail_delta = suffix_events
+        .iter()
+        .find(|event| event.event == "response.output_text.delta")
+        .expect("suffix should contain the released tail delta");
+    assert_eq!(tail_delta.data["delta"], " tail");
+    assert!(suffix_events
+        .iter()
+        .any(|event| event.event == "response.completed"));
+}
+
+#[tokio::test]
 async fn test_responses_stream_merges_tool_call_deltas_across_chunks() {
     if skip_if_localhost_bind_unavailable(
         "test_responses_stream_merges_tool_call_deltas_across_chunks",
@@ -961,10 +1120,21 @@ async fn test_responses_stream_complex_mixed_content_and_tools() {
         .expect("Tool 1 added");
     assert_eq!(tool1_added.data["item"]["name"], "calculator");
 
+    let added_events = events
+        .iter()
+        .filter(|event| event.event == "response.output_item.added")
+        .collect::<Vec<_>>();
+    assert!(added_events
+        .iter()
+        .all(|event| event.data["output_index"].as_u64().is_some()));
+
     let done_events: Vec<&SseEvent> = events
         .iter()
         .filter(|e| e.event == "response.output_item.done")
         .collect();
+    assert!(done_events
+        .iter()
+        .all(|event| event.data["output_index"].as_u64().is_some()));
 
     let done_debug: Vec<String> = done_events.iter().map(|e| e.data.to_string()).collect();
     assert!(
@@ -1055,6 +1225,68 @@ async fn test_responses_stream_maps_errors_to_response_failed() {
 }
 
 #[tokio::test]
+async fn test_responses_stream_preserves_exhausted_tier_rate_limit() {
+    if skip_if_localhost_bind_unavailable(
+        "test_responses_stream_preserves_exhausted_tier_rate_limit",
+    ) {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "17")
+                .set_body_json(json!({
+                    "error": {
+                        "type": "rate_limit_error",
+                        "message": "upstream rate limit",
+                        "code": "rate_limited"
+                    }
+                })),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config_json = make_test_config(&mock_server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let request = json!({
+        "model": "mock,test-model",
+        "input": "Rate limit case",
+        "stream": true
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(resp.headers().get("retry-after").unwrap(), "17");
+    assert_eq!(resp.headers().get("x-ccr-tier").unwrap(), "mock");
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+    assert_eq!(body["error"]["code"], "rate_limited");
+}
+
+#[tokio::test]
 async fn test_responses_stream_recovers_when_upstream_sends_anthropic_events() {
     if skip_if_localhost_bind_unavailable(
         "test_responses_stream_recovers_when_upstream_sends_anthropic_events",
@@ -1131,6 +1363,8 @@ async fn test_responses_stream_recovers_when_upstream_sends_anthropic_events() {
         .find(|e| e.event == "response.completed")
         .expect("expected response.completed event");
     assert_eq!(completed.data["response"]["status"], "completed");
+    assert_eq!(completed.data["response"]["usage"]["input_tokens"], 3);
+    assert_eq!(completed.data["response"]["usage"]["output_tokens"], 2);
 
     let joined_deltas = events
         .iter()

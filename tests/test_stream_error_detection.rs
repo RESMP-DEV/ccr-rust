@@ -286,6 +286,97 @@ async fn overload_error_in_200_cascades() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn string_error_in_non_streaming_200_cascades() {
+    if skip_if_localhost_bind_unavailable("string_error_in_non_streaming_200_cascades") {
+        return;
+    }
+
+    let broken_server = MockServer::start().await;
+    let recovery_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "data": {"error": "rate limited", "output": []}
+        })))
+        .expect(1)
+        .mount(&broken_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-recovered",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "m1",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "recovered"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1}
+        })))
+        .expect(1)
+        .mount(&recovery_server)
+        .await;
+
+    let config = json!({
+        "Providers": [{
+            "name": "broken",
+            "api_base_url": broken_server.uri(),
+            "api_key": "k",
+            "models": ["m0"],
+            "tier_name": "broken"
+        }, {
+            "name": "recovery",
+            "api_base_url": recovery_server.uri(),
+            "api_key": "k",
+            "models": ["m1"],
+            "tier_name": "recovery"
+        }],
+        "Router": {
+            "default": "broken,m0",
+            "tiers": ["broken,m0", "recovery,m1"],
+            "tierRetries": {
+                "broken": {"max_retries": 0},
+                "recovery": {"max_retries": 0}
+            }
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let cfg = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(cfg);
+    let request = json!({
+        "model": "broken,m0",
+        "messages": [{"role": "user", "content": "recover"}],
+        "max_tokens": 32,
+        "stream": false
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["content"][0]["text"], "recovered");
+}
+
 /// A valid response from tier-0 should NOT be treated as an error.
 #[tokio::test]
 async fn valid_200_response_not_treated_as_error() {

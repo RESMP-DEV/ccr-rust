@@ -24,6 +24,12 @@ pub(super) fn translate_response_openai_to_anthropic(
         .choices
         .first()
         .and_then(|choice| choice.message.reasoning_content.clone());
+    let refusal = openai_resp
+        .choices
+        .first()
+        .and_then(|choice| choice.message.refusal.clone());
+    let response_status = openai_resp.response_status.clone();
+    let incomplete_details = openai_resp.incomplete_details.clone();
 
     let content = if let Some(choice) = openai_resp.choices.first() {
         let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
@@ -106,9 +112,19 @@ pub(super) fn translate_response_openai_to_anthropic(
 
     let usage = openai_resp
         .usage
-        .map(|u| AnthropicUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
+        .map(|openai_usage| AnthropicUsage {
+            input_tokens: openai_usage.prompt_tokens,
+            output_tokens: openai_usage.completion_tokens,
+            cache_read_input_tokens: openai_usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(serde_json::Value::as_u64),
+            reasoning_tokens: openai_usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.get("reasoning_tokens"))
+                .and_then(serde_json::Value::as_u64),
         })
         .unwrap_or_default();
 
@@ -129,6 +145,9 @@ pub(super) fn translate_response_openai_to_anthropic(
             })
         }),
         reasoning_content,
+        refusal,
+        response_status,
+        incomplete_details,
     }
 }
 
@@ -340,7 +359,7 @@ pub(super) fn create_stream_stop_events(
         index: None,
         content_block: None,
         delta: Some(serde_json::json!({"stop_reason": stop_reason})),
-        usage: Some(usage.clone()),
+        usage: Some(usage),
         stop_reason: None,
     });
 
@@ -350,7 +369,7 @@ pub(super) fn create_stream_stop_events(
         index: None,
         content_block: None,
         delta: None,
-        usage: Some(usage),
+        usage: None,
         stop_reason: None,
     });
 

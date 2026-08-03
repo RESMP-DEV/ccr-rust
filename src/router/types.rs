@@ -162,6 +162,10 @@ pub struct OpenAIResponse {
     pub model: String,
     pub choices: Vec<OpenAIChoice>,
     pub usage: Option<OpenAIUsage>,
+    #[serde(default)]
+    pub response_status: Option<String>,
+    #[serde(default)]
+    pub incomplete_details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +184,8 @@ pub struct OpenAIResponseMessage {
     pub content: Option<serde_json::Value>,
     #[serde(default, rename = "reasoning_content", alias = "reasoning")]
     pub reasoning_content: Option<String>,
+    #[serde(default)]
+    pub refusal: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<OpenAIToolCall>>,
 }
@@ -209,8 +215,9 @@ pub struct OpenAIUsage {
     #[serde(default)]
     pub completion_tokens: u64,
     #[serde(default)]
-    #[allow(dead_code)]
     pub prompt_tokens_details: Option<serde_json::Value>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<serde_json::Value>,
 }
 
 /// OpenAI streaming response chunk.
@@ -284,6 +291,15 @@ pub struct AnthropicResponse {
     /// Serialized back to OpenAI format instead of thinking blocks
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// OpenAI Responses refusal metadata carried through the internal Anthropic shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+    /// Original Responses API terminal status carried through the adapter pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_status: Option<String>,
+    /// Original Responses API incomplete metadata carried through the adapter pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -305,6 +321,10 @@ pub enum AnthropicContentBlock {
 pub struct AnthropicUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
 }
 
 /// Anthropic streaming event types.
