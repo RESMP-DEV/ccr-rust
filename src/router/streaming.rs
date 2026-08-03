@@ -72,6 +72,8 @@ pub async fn stream_response_translated(
         let mut accumulated_tool_calls: Vec<(String, String, String)> = Vec::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
+        let mut cache_read_input_tokens: Option<u64> = None;
+        let mut reasoning_tokens: Option<u64> = None;
         let stream_start = verify_ctx.as_ref().map(|ctx| ctx.stream_start);
         let tier_name = verify_ctx
             .as_ref()
@@ -120,6 +122,18 @@ pub async fn stream_response_translated(
                                     if let Some(ref usage) = chunk.usage {
                                         input_tokens = usage.prompt_tokens;
                                         output_tokens = usage.completion_tokens;
+                                        cache_read_input_tokens = usage
+                                            .prompt_tokens_details
+                                            .as_ref()
+                                            .and_then(|details| details.get("cached_tokens"))
+                                            .and_then(|value| value.as_u64())
+                                            .or(cache_read_input_tokens);
+                                        reasoning_tokens = usage
+                                            .completion_tokens_details
+                                            .as_ref()
+                                            .and_then(|details| details.get("reasoning_tokens"))
+                                            .and_then(|value| value.as_u64())
+                                            .or(reasoning_tokens);
                                     }
 
                                     let was_first = translation_state.is_first;
@@ -218,7 +232,8 @@ pub async fn stream_response_translated(
             Some(AnthropicUsage {
                 input_tokens,
                 output_tokens,
-                ..Default::default()
+                cache_read_input_tokens,
+                reasoning_tokens,
             })
         } else {
             // Estimate from accumulated content if no usage reported
@@ -226,7 +241,8 @@ pub async fn stream_response_translated(
             Some(AnthropicUsage {
                 input_tokens,
                 output_tokens: estimated_output as u64,
-                ..Default::default()
+                cache_read_input_tokens,
+                reasoning_tokens,
             })
         };
 
@@ -296,7 +312,7 @@ pub async fn stream_response_translated(
                     &ctx.tier_name,
                     usage.input_tokens,
                     usage.output_tokens,
-                    0,
+                    usage.cache_read_input_tokens.unwrap_or(0),
                     0,
                 );
                 verify_token_usage(&ctx.tier_name, ctx.local_estimate, input_tokens);
@@ -822,6 +838,53 @@ pub(super) async fn wrap_json_response_as_sse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn translated_live_stream_preserves_usage_token_details() {
+        let first = serde_json::json!({
+            "id": "chatcmpl-usage-details",
+            "object": "chat.completion.chunk",
+            "created": 42,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "ok"},
+                "finish_reason": "stop"
+            }]
+        });
+        let usage = serde_json::json!({
+            "id": "chatcmpl-usage-details",
+            "object": "chat.completion.chunk",
+            "created": 42,
+            "model": "test-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 7,
+                "total_tokens": 19,
+                "prompt_tokens_details": {"cached_tokens": 5},
+                "completion_tokens_details": {"reasoning_tokens": 3}
+            }
+        });
+        let payload = format!("data: {first}\n\ndata: {usage}\n\ndata: [DONE]\n\n");
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response =
+            stream_response_translated(byte_stream, 8, None, "test-model", TransformerChain::new())
+                .await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(body.contains("\"input_tokens\":12"));
+        assert!(body.contains("\"output_tokens\":7"));
+        assert!(body.contains("\"cache_read_input_tokens\":5"));
+        assert!(body.contains("\"reasoning_tokens\":3"));
+    }
 
     #[tokio::test]
     async fn json_to_sse_rewrite_removes_stale_entity_headers() {

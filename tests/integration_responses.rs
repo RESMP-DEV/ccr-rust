@@ -1347,6 +1347,8 @@ async fn test_responses_stream_recovers_when_upstream_sends_anthropic_events() {
         .find(|e| e.event == "response.completed")
         .expect("expected response.completed event");
     assert_eq!(completed.data["response"]["status"], "completed");
+    assert_eq!(completed.data["response"]["usage"]["input_tokens"], 3);
+    assert_eq!(completed.data["response"]["usage"]["output_tokens"], 2);
 
     let joined_deltas = events
         .iter()

@@ -19,8 +19,10 @@ use tracing::error;
 use crate::sse::SseFrameDecoder;
 
 mod handler;
+mod incremental_stream;
 
 pub use handler::handle_responses;
+use incremental_stream::ResponsesStreamConverter;
 
 pub(super) const MAX_RESPONSES_BODY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RESPONSES_ZSTD_WINDOW_LOG: u32 = 24;
@@ -864,18 +866,18 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
     tokio::spawn(async move {
         let mut stream = body.into_data_stream();
         let mut decoder = SseFrameDecoder::new();
-        let mut source = String::new();
-        let mut emitted = String::new();
+        let mut converter = ResponsesStreamConverter::new(preserved_response);
         let mut received_bytes = 0_usize;
-        let mut source_done = false;
 
         while let Some(chunk) = stream.next().await {
             let bytes = match chunk {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     error!("Failed to read OpenAI stream chunk: {}", err);
-                    let failed =
-                        responses_stream_adapter_failed_event("Failed to read upstream stream");
+                    let failed = responses_stream_adapter_failed_event(
+                        converter.response_id(),
+                        "Failed to read upstream stream",
+                    );
                     let _ = tx.send(Ok(Bytes::from(failed))).await;
                     return;
                 }
@@ -883,85 +885,42 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
             received_bytes = received_bytes.saturating_add(bytes.len());
             if received_bytes > MAX_RESPONSES_BODY_BYTES {
                 let failed = responses_stream_adapter_failed_event(
+                    converter.response_id(),
                     "Upstream stream exceeded the Responses adapter limit",
                 );
                 let _ = tx.send(Ok(Bytes::from(failed))).await;
                 return;
             }
 
-            let frames = decoder.push(&bytes);
-            if frames.is_empty() {
-                continue;
-            }
-            for frame in frames {
-                source_done |= frame.data.trim() == "[DONE]";
-                source.push_str(&frame.to_sse_string());
-            }
-
-            let converted = convert_sse_payload_to_responses(&source, preserved_response.as_ref());
-            let prefix_len = responses_stream_stable_prefix_len(&converted);
-            let stable_prefix = &converted[..prefix_len];
-            let Some(delta) = stable_prefix.strip_prefix(&emitted) else {
-                error!("Responses stream conversion prefix diverged");
-                let failed = responses_stream_adapter_failed_event(
-                    "Responses stream conversion became inconsistent",
-                );
-                let _ = tx.send(Ok(Bytes::from(failed))).await;
-                return;
-            };
-            if !delta.is_empty() {
-                if tx
-                    .send(Ok(Bytes::copy_from_slice(delta.as_bytes())))
-                    .await
-                    .is_err()
-                {
+            for frame in decoder.push(&bytes) {
+                let converted = if frame.data.trim() == "[DONE]" {
+                    converter.finish()
+                } else {
+                    converter.push_frame(frame.event.as_deref(), &frame.data)
+                };
+                if !converted.is_empty() && tx.send(Ok(Bytes::from(converted))).await.is_err() {
                     return;
                 }
-                emitted.push_str(delta);
-            }
-            if source_done {
-                break;
+                if frame.data.trim() == "[DONE]" {
+                    return;
+                }
             }
         }
 
-        let converted = convert_sse_payload_to_responses(&source, preserved_response.as_ref());
-        let Some(tail) = converted.strip_prefix(&emitted) else {
-            error!("Responses stream conversion tail diverged");
-            let failed = responses_stream_adapter_failed_event(
-                "Responses stream conversion became inconsistent",
-            );
-            let _ = tx.send(Ok(Bytes::from(failed))).await;
-            return;
-        };
+        let tail = converter.finish();
         if !tail.is_empty() {
-            let _ = tx.send(Ok(Bytes::copy_from_slice(tail.as_bytes()))).await;
+            let _ = tx.send(Ok(Bytes::from(tail))).await;
         }
     });
 
     Response::from_parts(parts, Body::from_stream(ReceiverStream::new(rx)))
 }
 
-fn responses_stream_stable_prefix_len(converted: &str) -> usize {
-    [
-        "event: response.output_item.done\n",
-        "event: response.queued\n",
-        "event: response.in_progress\n",
-        "event: response.completed\n",
-        "event: response.incomplete\n",
-        "event: response.failed\n",
-        "event: response.cancelled\n",
-    ]
-    .iter()
-    .filter_map(|marker| converted.find(marker))
-    .min()
-    .unwrap_or(converted.len())
-}
-
-fn responses_stream_adapter_failed_event(message: &str) -> String {
+fn responses_stream_adapter_failed_event(response_id: &str, message: &str) -> String {
     let failed = serde_json::json!({
         "type": "response.failed",
         "response": {
-            "id": "resp_failed",
+            "id": response_id,
             "object": "response",
             "status": "failed",
             "error": {
@@ -1132,648 +1091,99 @@ fn convert_sse_payload_to_responses(
     payload: &str,
     preserved_response: Option<&serde_json::Value>,
 ) -> String {
-    #[derive(Default)]
-    struct ToolAccum {
-        id: String,
-        item_id: Option<String>,
-        name: String,
-        arguments: String,
-        emitted_arguments_len: usize,
-        added: bool,
-        output_index: Option<usize>,
-    }
-
+    let mut converter = ResponsesStreamConverter::new(preserved_response.cloned());
     let mut output = String::new();
-    let mut response_id = "resp_stream".to_string();
-    let mut created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let mut model = "unknown".to_string();
-    let mut created_sent = false;
-    let mut reasoning_item_added = false;
-    let mut reasoning_output_index = None;
-    let mut message_item_added = false;
-    let mut message_output_index = None;
-    let mut next_output_index = 0;
-    let mut message_text = String::new();
-    let mut refusal_text = String::new();
-    let mut reasoning_text = String::new();
-    let mut response_status = "completed".to_string();
-    let mut incomplete_details = None;
-    let preserved_response = preserved_response.cloned();
-    let mut preserved_items_added = false;
-    let mut tools: std::collections::BTreeMap<usize, ToolAccum> = std::collections::BTreeMap::new();
-    let mut usage = map_openai_usage_to_responses_usage(&serde_json::json!({}));
-
-    if let Some(status) = preserved_response
-        .as_ref()
-        .and_then(|response| response.get("status"))
-        .and_then(|status| status.as_str())
-    {
-        response_status = status.to_string();
-    }
-
     for (event_type, data) in parse_sse_frames(payload) {
         if data.trim() == "[DONE]" {
             break;
         }
-
-        let chunk: serde_json::Value = match serde_json::from_str(&data) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        // OpenAI chunk metadata
-        if !created_sent {
-            if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
-                response_id = id.to_string();
-            }
-        }
-        if let Some(ts) = chunk.get("created").and_then(|v| v.as_i64()) {
-            created_at = ts;
-        }
-        if let Some(m) = chunk.get("model").and_then(|v| v.as_str()) {
-            model = m.to_string();
-        }
-        if let Some(status) = chunk.get("response_status").and_then(|v| v.as_str()) {
-            response_status = status.to_string();
-        }
-        if let Some(details) = chunk
-            .get("incomplete_details")
-            .filter(|value| !value.is_null())
-        {
-            incomplete_details = Some(details.clone());
-        }
-        // Anthropic message_start metadata fallback
-        if event_type.as_deref() == Some("message_start")
-            || chunk.get("type").and_then(|v| v.as_str()) == Some("message_start")
-        {
-            if let Some(msg) = chunk.get("message") {
-                if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
-                    response_id = id.to_string();
-                }
-                if let Some(m) = msg.get("model").and_then(|v| v.as_str()) {
-                    model = m.to_string();
-                }
-                if let Some(u) = msg.get("usage") {
-                    usage = map_openai_usage_to_responses_usage(&serde_json::json!({
-                        "prompt_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        "completion_tokens": u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        "total_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                            + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                    }));
-                }
-            }
-        }
-
-        if !created_sent {
-            let created_event = serde_json::json!({
-                "type": "response.created",
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": created_at,
-                    "status": "in_progress",
-                    "model": model
-                }
-            });
-            output.push_str("event: response.created\ndata: ");
-            output.push_str(&created_event.to_string());
-            output.push_str("\n\n");
-            created_sent = true;
-        }
-
-        if !preserved_items_added {
-            if let Some(items) = preserved_response
-                .as_ref()
-                .and_then(|response| response.get("output"))
-                .and_then(|value| value.as_array())
-            {
-                for (output_index, item) in items.iter().enumerate() {
-                    let added = serde_json::json!({
-                        "type": "response.output_item.added",
-                        "output_index": output_index,
-                        "item": initial_responses_output_item(item)
-                    });
-                    output.push_str("event: response.output_item.added\ndata: ");
-                    output.push_str(&added.to_string());
-                    output.push_str("\n\n");
-                }
-                preserved_items_added = true;
-            }
-        }
-
-        if let Some(u) = chunk.get("usage") {
-            usage = map_openai_usage_to_responses_usage(u);
-        }
-
-        // OpenAI chunk path
-        let choice = chunk
-            .get("choices")
-            .and_then(|v| v.as_array())
-            .and_then(|v| v.first());
-
-        if let Some(choice) = choice {
-            let delta = choice.get("delta").cloned().unwrap_or_default();
-
-            if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
-                if !message_item_added {
-                    if preserved_response.is_none() {
-                        let output_index = next_output_index;
-                        next_output_index += 1;
-                        let added = serde_json::json!({
-                            "type": "response.output_item.added",
-                            "output_index": output_index,
-                            "item": {
-                                "id": format!("msg_{}", response_id),
-                                "type": "message",
-                                "role": "assistant",
-                                "content": []
-                            }
-                        });
-                        output.push_str("event: response.output_item.added\ndata: ");
-                        output.push_str(&added.to_string());
-                        output.push_str("\n\n");
-                        message_output_index = Some(output_index);
-                    }
-                    message_item_added = true;
-                }
-
-                message_text.push_str(text);
-                let identity = preserved_response
-                    .as_ref()
-                    .and_then(|response| {
-                        unique_response_output_item_identity(
-                            response,
-                            "message",
-                            Some("output_text"),
-                        )
-                    })
-                    .or_else(|| {
-                        message_output_index.map(|output_index| ResponseOutputItemIdentity {
-                            output_index,
-                            item_id: Some(format!("msg_{}", response_id)),
-                            content_index: Some(0),
-                        })
-                    });
-                append_response_delta(&mut output, "response.output_text.delta", text, identity);
-            }
-
-            if let Some(reasoning) = delta
-                .get("reasoning_content")
-                .and_then(|v| v.as_str())
-                .filter(|reasoning| !reasoning.is_empty())
-            {
-                if preserved_response.is_none() {
-                    add_reasoning_output_item(
-                        &mut output,
-                        &response_id,
-                        &mut reasoning_item_added,
-                        &mut reasoning_output_index,
-                        &mut next_output_index,
-                    );
-                } else {
-                    reasoning_item_added = true;
-                }
-                reasoning_text.push_str(reasoning);
-                let identity = preserved_response
-                    .as_ref()
-                    .and_then(|response| {
-                        unique_response_output_item_identity(
-                            response,
-                            "reasoning",
-                            Some("reasoning_text"),
-                        )
-                    })
-                    .or_else(|| {
-                        reasoning_output_index.map(|output_index| ResponseOutputItemIdentity {
-                            output_index,
-                            item_id: Some(format!("rs_{}", response_id)),
-                            content_index: Some(0),
-                        })
-                    });
-                append_response_delta(
-                    &mut output,
-                    "response.reasoning_text.delta",
-                    reasoning,
-                    identity,
-                );
-            }
-
-            if let Some(refusal) = delta
-                .get("refusal")
-                .and_then(|v| v.as_str())
-                .filter(|refusal| !refusal.is_empty())
-            {
-                if !message_item_added {
-                    if preserved_response.is_none() {
-                        let output_index = next_output_index;
-                        next_output_index += 1;
-                        let added = serde_json::json!({
-                            "type": "response.output_item.added",
-                            "output_index": output_index,
-                            "item": {
-                                "id": format!("msg_{}", response_id),
-                                "type": "message",
-                                "role": "assistant",
-                                "content": []
-                            }
-                        });
-                        output.push_str("event: response.output_item.added\ndata: ");
-                        output.push_str(&added.to_string());
-                        output.push_str("\n\n");
-                        message_output_index = Some(output_index);
-                    }
-                    message_item_added = true;
-                }
-                refusal_text.push_str(refusal);
-                let identity = preserved_response
-                    .as_ref()
-                    .and_then(|response| {
-                        unique_response_output_item_identity(response, "message", Some("refusal"))
-                    })
-                    .or_else(|| {
-                        message_output_index.map(|output_index| ResponseOutputItemIdentity {
-                            output_index,
-                            item_id: Some(format!("msg_{}", response_id)),
-                            content_index: Some(0),
-                        })
-                    });
-                append_response_delta(&mut output, "response.refusal.delta", refusal, identity);
-            }
-
-            if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
-                for tool_call in tool_calls {
-                    let index =
-                        tool_call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let entry = tools.entry(index).or_default();
-
-                    if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
-                        entry.id = id.to_string();
-                    }
-                    if let Some(name) = tool_call
-                        .get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(|v| v.as_str())
-                    {
-                        entry.name = name.to_string();
-                    }
-                    if let Some(args) = tool_call
-                        .get("function")
-                        .and_then(|f| f.get("arguments"))
-                        .and_then(|v| v.as_str())
-                    {
-                        entry.arguments.push_str(args);
-                    }
-
-                    if !entry.added && (!entry.id.is_empty() || !entry.name.is_empty()) {
-                        if entry.id.is_empty() {
-                            entry.id = format!("call_{}", index);
-                        }
-                        if entry.name.is_empty() {
-                            entry.name = "tool".to_string();
-                        }
-                        if preserved_response.is_none() {
-                            let output_index = next_output_index;
-                            next_output_index += 1;
-                            let added = serde_json::json!({
-                                "type": "response.output_item.added",
-                                "output_index": output_index,
-                                "item": {
-                                    "id": entry.id,
-                                    "type": "function_call",
-                                    "call_id": entry.id,
-                                    "name": entry.name,
-                                    "arguments": ""
-                                }
-                            });
-                            output.push_str("event: response.output_item.added\ndata: ");
-                            output.push_str(&added.to_string());
-                            output.push_str("\n\n");
-                            entry.output_index = Some(output_index);
-                            entry.item_id = Some(entry.id.clone());
-                        } else if let Some(identity) =
-                            preserved_response.as_ref().and_then(|response| {
-                                response_output_item_identity(
-                                    response,
-                                    "function_call",
-                                    index,
-                                    None,
-                                )
-                            })
-                        {
-                            entry.output_index = Some(identity.output_index);
-                            entry.item_id = identity.item_id;
-                        }
-                        entry.added = true;
-                    }
-
-                    if entry.added && entry.arguments.len() > entry.emitted_arguments_len {
-                        let delta = entry.arguments[entry.emitted_arguments_len..].to_string();
-                        entry.emitted_arguments_len = entry.arguments.len();
-                        let identity =
-                            entry
-                                .output_index
-                                .map(|output_index| ResponseOutputItemIdentity {
-                                    output_index,
-                                    item_id: entry.item_id.clone(),
-                                    content_index: None,
-                                });
-                        append_response_delta(
-                            &mut output,
-                            "response.function_call_arguments.delta",
-                            &delta,
-                            identity,
-                        );
-                    }
-                }
-            }
-            continue;
-        }
-
-        // Anthropic event fallback path (when OpenAI conversion did not happen upstream)
-        let event_type = event_type.or_else(|| {
-            chunk
-                .get("type")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        });
-        match event_type.as_deref() {
-            Some("content_block_delta") => {
-                if let Some(delta) = chunk.get("delta") {
-                    if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                        if !text.is_empty() {
-                            if !message_item_added {
-                                if preserved_response.is_none() {
-                                    let output_index = next_output_index;
-                                    next_output_index += 1;
-                                    let added = serde_json::json!({
-                                        "type": "response.output_item.added",
-                                        "output_index": output_index,
-                                        "item": {
-                                            "id": format!("msg_{}", response_id),
-                                            "type": "message",
-                                            "role": "assistant",
-                                            "content": []
-                                        }
-                                    });
-                                    output.push_str("event: response.output_item.added\ndata: ");
-                                    output.push_str(&added.to_string());
-                                    output.push_str("\n\n");
-                                    message_output_index = Some(output_index);
-                                }
-                                message_item_added = true;
-                            }
-                            message_text.push_str(text);
-                            let identity = preserved_response
-                                .as_ref()
-                                .and_then(|response| {
-                                    unique_response_output_item_identity(
-                                        response,
-                                        "message",
-                                        Some("output_text"),
-                                    )
-                                })
-                                .or_else(|| {
-                                    message_output_index.map(|output_index| {
-                                        ResponseOutputItemIdentity {
-                                            output_index,
-                                            item_id: Some(format!("msg_{}", response_id)),
-                                            content_index: Some(0),
-                                        }
-                                    })
-                                });
-                            append_response_delta(
-                                &mut output,
-                                "response.output_text.delta",
-                                text,
-                                identity,
-                            );
-                        }
-                    }
-                    if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
-                        if !thinking.is_empty() {
-                            if preserved_response.is_none() {
-                                add_reasoning_output_item(
-                                    &mut output,
-                                    &response_id,
-                                    &mut reasoning_item_added,
-                                    &mut reasoning_output_index,
-                                    &mut next_output_index,
-                                );
-                            } else {
-                                reasoning_item_added = true;
-                            }
-                            reasoning_text.push_str(thinking);
-                            let identity = preserved_response
-                                .as_ref()
-                                .and_then(|response| {
-                                    unique_response_output_item_identity(
-                                        response,
-                                        "reasoning",
-                                        Some("reasoning_text"),
-                                    )
-                                })
-                                .or_else(|| {
-                                    reasoning_output_index.map(|output_index| {
-                                        ResponseOutputItemIdentity {
-                                            output_index,
-                                            item_id: Some(format!("rs_{}", response_id)),
-                                            content_index: Some(0),
-                                        }
-                                    })
-                                });
-                            append_response_delta(
-                                &mut output,
-                                "response.reasoning_text.delta",
-                                thinking,
-                                identity,
-                            );
-                        }
-                    }
-                }
-            }
-            Some("message_delta") => {
-                if let Some(u) = chunk.get("usage") {
-                    usage = map_openai_usage_to_responses_usage(&serde_json::json!({
-                        "prompt_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        "completion_tokens": u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        "total_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                            + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                    }));
-                }
-            }
-            _ => {}
-        }
+        output.push_str(&converter.push_frame(event_type.as_deref(), &data));
     }
-
-    let mut indexed_output_items = Vec::new();
-
-    if preserved_response.is_none() && !reasoning_text.is_empty() {
-        let reasoning_item = responses_reasoning_item(&response_id, &reasoning_text);
-        let output_index =
-            reasoning_output_index.expect("generated reasoning output must have an added event");
-        indexed_output_items.push((output_index, reasoning_item.clone()));
-        let done = serde_json::json!({
-            "type": "response.output_item.done",
-            "output_index": output_index,
-            "item": reasoning_item
-        });
-        output.push_str("event: response.output_item.done\ndata: ");
-        output.push_str(&done.to_string());
-        output.push_str("\n\n");
-    }
-
-    if preserved_response.is_none() && message_item_added {
-        let mut message_content = Vec::new();
-        if !message_text.is_empty() {
-            message_content.push(serde_json::json!({
-                "type": "output_text",
-                "text": message_text
-            }));
-        }
-        if !refusal_text.is_empty() {
-            message_content.push(serde_json::json!({
-                "type": "refusal",
-                "refusal": refusal_text
-            }));
-        }
-        let message_item = serde_json::json!({
-            "id": format!("msg_{}", response_id),
-            "type": "message",
-            "role": "assistant",
-            "content": message_content
-        });
-        let output_index =
-            message_output_index.expect("generated message output must have an added event");
-        indexed_output_items.push((output_index, message_item.clone()));
-        let done = serde_json::json!({
-            "type": "response.output_item.done",
-            "output_index": output_index,
-            "item": message_item
-        });
-        output.push_str("event: response.output_item.done\ndata: ");
-        output.push_str(&done.to_string());
-        output.push_str("\n\n");
-    }
-
-    for tool in tools.values().filter(|_| preserved_response.is_none()) {
-        let call_id = if tool.id.is_empty() {
-            "call_unknown"
-        } else {
-            &tool.id
-        };
-        let name = if tool.name.is_empty() {
-            "tool"
-        } else {
-            &tool.name
-        };
-        let item = serde_json::json!({
-            "id": call_id,
-            "type": "function_call",
-            "call_id": call_id,
-            "name": name,
-            "arguments": tool.arguments
-        });
-        let output_index = if let Some(output_index) = tool.output_index {
-            output_index
-        } else {
-            let output_index = next_output_index;
-            next_output_index += 1;
-            let added = serde_json::json!({
-                "type": "response.output_item.added",
-                "output_index": output_index,
-                "item": {
-                    "id": call_id,
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": ""
-                }
-            });
-            output.push_str("event: response.output_item.added\ndata: ");
-            output.push_str(&added.to_string());
-            output.push_str("\n\n");
-            output_index
-        };
-        indexed_output_items.push((output_index, item.clone()));
-        let done = serde_json::json!({
-            "type": "response.output_item.done",
-            "output_index": output_index,
-            "item": item
-        });
-        output.push_str("event: response.output_item.done\ndata: ");
-        output.push_str(&done.to_string());
-        output.push_str("\n\n");
-    }
-
-    indexed_output_items.sort_by_key(|(output_index, _)| *output_index);
-    let mut output_items = indexed_output_items
-        .into_iter()
-        .map(|(_, item)| item)
-        .collect::<Vec<_>>();
-
-    if let Some(items) = preserved_response
-        .as_ref()
-        .and_then(|response| response.get("output"))
-        .and_then(|value| value.as_array())
-    {
-        for (output_index, item) in items.iter().enumerate() {
-            let done = serde_json::json!({
-                "type": "response.output_item.done",
-                "output_index": output_index,
-                "item": item
-            });
-            output.push_str("event: response.output_item.done\ndata: ");
-            output.push_str(&done.to_string());
-            output.push_str("\n\n");
-        }
-        output_items = items.clone();
-    }
-
-    let terminal_type = match response_status.as_str() {
-        "queued" => "response.queued",
-        "in_progress" => "response.in_progress",
-        "completed" => "response.completed",
-        "incomplete" => "response.incomplete",
-        "failed" => "response.failed",
-        "cancelled" => "response.cancelled",
-        _ => "response.incomplete",
-    };
-    let terminal_response = if let Some(preserved_response) = preserved_response {
-        preserved_response
-    } else {
-        let mut terminal_response = serde_json::json!({
-            "id": response_id,
-            "object": "response",
-            "created_at": created_at,
-            "status": response_status,
-            "model": model,
-            "output": output_items,
-            "usage": usage
-        });
-        if let Some(incomplete_details) = incomplete_details {
-            terminal_response["incomplete_details"] = incomplete_details;
-        }
-        terminal_response
-    };
-    let terminal = serde_json::json!({
-        "type": terminal_type,
-        "response": terminal_response
-    });
-    output.push_str("event: ");
-    output.push_str(terminal_type);
-    output.push_str("\ndata: ");
-    output.push_str(&terminal.to_string());
-    output.push_str("\n\n");
-
+    output.push_str(&converter.finish());
     output
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incremental_stream_converter_emits_each_frame_once() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let first = serde_json::json!({
+            "id": "resp_incremental",
+            "object": "chat.completion.chunk",
+            "created": 42,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "first"},
+                "finish_reason": null
+            }]
+        });
+        let second = serde_json::json!({
+            "id": "resp_incremental",
+            "object": "chat.completion.chunk",
+            "created": 42,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": " second"},
+                "finish_reason": "stop"
+            }]
+        });
+
+        let first_events = converter.push_frame(None, &first.to_string());
+        let second_events = converter.push_frame(None, &second.to_string());
+        let terminal_events = converter.finish();
+
+        assert!(first_events.contains("response.created"));
+        assert!(first_events.contains("\"delta\":\"first\""));
+        assert!(!second_events.contains("response.created"));
+        assert!(!second_events.contains("\"delta\":\"first\""));
+        assert!(second_events.contains("\"delta\":\" second\""));
+        assert!(!second_events.contains("response.completed"));
+        assert!(terminal_events.contains("response.output_item.done"));
+        assert!(terminal_events.contains("response.completed"));
+    }
+
+    #[tokio::test]
+    async fn incremental_stream_failure_retains_active_response_id() {
+        let first = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "id": "resp_active",
+                "object": "chat.completion.chunk",
+                "created": 42,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "first"},
+                    "finish_reason": null
+                }]
+            })
+        );
+        let body = Body::from_stream(futures::stream::iter([
+            Ok::<Bytes, std::io::Error>(Bytes::from(first)),
+            Ok(Bytes::from(vec![b'x'; MAX_RESPONSES_BODY_BYTES])),
+        ]));
+        let upstream = Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+            .body(body)
+            .unwrap();
+
+        let adapted = convert_openai_stream_response_to_responses(upstream).await;
+        let body = axum::body::to_bytes(adapted.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let payload = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(payload.contains("event: response.created"));
+        assert!(payload.contains("event: response.failed"));
+        assert!(payload.contains("\"id\":\"resp_active\""));
+        assert!(!payload.contains("resp_failed"));
+    }
 
     #[test]
     fn rejects_non_object_responses_reasoning() {
