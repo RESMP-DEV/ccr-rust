@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input rate. Pre-request routing estimates still treat prompts as uncached
   because the hit rate is unknown before dispatch; cached-prefix affinity as
   a routing signal stays out until measured telemetry justifies it.
+  Pseudo-streamed (`forceNonStreaming`) responses now carry
+  `cache_creation_input_tokens` in `message_start` usage alongside the
+  cache-read split, matching the non-streaming response body.
 
 ### Changed
 

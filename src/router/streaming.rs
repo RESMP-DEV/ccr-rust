@@ -671,6 +671,9 @@ fn emit_anthropic_sse_events(
     if let Some(cached_tokens) = resp.usage.cache_read_input_tokens {
         start_usage["cache_read_input_tokens"] = serde_json::json!(cached_tokens);
     }
+    if let Some(created_tokens) = resp.usage.cache_creation_input_tokens {
+        start_usage["cache_creation_input_tokens"] = serde_json::json!(created_tokens);
+    }
     let mut message = serde_json::json!({
         "id": resp.id,
         "type": "message",
@@ -1050,6 +1053,44 @@ mod tests {
         );
         // Must have message_stop
         assert!(joined.contains("message_stop"), "missing message_stop");
+    }
+
+    #[test]
+    fn test_emit_anthropic_sse_events_cache_usage() {
+        let resp = AnthropicResponse {
+            id: "msg_test".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text {
+                text: "ok".to_string(),
+            }],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_read_input_tokens: Some(60),
+                cache_creation_input_tokens: Some(30),
+                ..Default::default()
+            },
+            reasoning_content: None,
+            refusal: None,
+            response_status: None,
+            incomplete_details: None,
+        };
+
+        let events = emit_anthropic_sse_events(&resp, true);
+        let start_usage = events
+            .iter()
+            .filter_map(|event| event.lines().find_map(|line| line.strip_prefix("data: ")))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .find(|event| event["type"] == "message_start")
+            .map(|event| event["message"]["usage"].clone())
+            .expect("message_start should carry usage");
+
+        assert_eq!(start_usage["input_tokens"], 100);
+        assert_eq!(start_usage["cache_read_input_tokens"], 60);
+        assert_eq!(start_usage["cache_creation_input_tokens"], 30);
     }
 
     #[test]
