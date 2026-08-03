@@ -173,7 +173,7 @@ When CCR-Rust aggregates tool catalogs from multiple MCP backends, the combined 
 ```bash
 ccr-rust mcp --level medium \
   --wrap "npx @anthropic/mcp-server-filesystem" \
-  --wrap "npx @zilliz/claude-context-mcp@latest"
+  --wrap "contrib/rust_sindexer/target/release/sindexer"
 ```
 
 ### Recommendation
