@@ -64,14 +64,17 @@ fn response_content_blocks(content: &Value, role: &str) -> Result<Vec<Value>> {
                         })?;
                         (!text.is_empty()).then(|| json!({"type": text_type, "text": text}))
                     }
-                    "image_url" => item
-                        .get("image_url")
-                        .and_then(|image| {
-                            image
-                                .as_str()
-                                .or_else(|| image.get("url").and_then(Value::as_str))
-                        })
-                        .map(|image_url| json!({"type": "input_image", "image_url": image_url})),
+                    "image_url" => item.get("image_url").and_then(|image| {
+                        let image_url = image
+                            .as_str()
+                            .or_else(|| image.get("url").and_then(Value::as_str))?;
+                        let mut block = json!({"type": "input_image", "image_url": image_url});
+                        if let Some(detail) = image.get("detail").filter(|detail| !detail.is_null())
+                        {
+                            block["detail"] = detail.clone();
+                        }
+                        Some(block)
+                    }),
                     "input_image" => Some(item.clone()),
                     _ => None,
                 };
@@ -509,7 +512,10 @@ mod tests {
                 {"role": "system", "content": "Be concise"},
                 {"role": "user", "content": [
                     {"type": "image_url", "image_url": {}},
-                    {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}
+                    {"type": "image_url", "image_url": {
+                        "url": "https://example.test/a.png",
+                        "detail": "high"
+                    }}
                 ]},
                 {"role": "assistant", "content": "", "tool_calls": [{
                     "id": "call_1",
@@ -536,6 +542,7 @@ mod tests {
             converted["input"][1]["content"][0]["image_url"],
             "https://example.test/a.png"
         );
+        assert_eq!(converted["input"][1]["content"][0]["detail"], "high");
         assert_eq!(converted["tools"].as_array().unwrap().len(), 3);
         assert_eq!(converted["tools"][0]["name"], "flat");
         assert_eq!(converted["tools"][1]["name"], "nested");

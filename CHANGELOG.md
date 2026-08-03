@@ -72,7 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incompatible transformed-provider route rather than silently dropping
   Responses-only fields. Synthesized text streams now emit the Responses
   content-part lifecycle, and every non-null embedded error keeps cascading
-  instead of turning a malformed HTTP 200 into a false success.
+  instead of turning a malformed HTTP 200 into a false success, including in
+  wrapped gateway envelopes. Chat image detail hints also survive Responses
+  conversion.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 

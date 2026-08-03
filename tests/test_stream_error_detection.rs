@@ -296,10 +296,10 @@ async fn string_error_in_non_streaming_200_cascades() {
     let recovery_server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"error": "rate limited", "output": []})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "data": {"error": "rate limited", "output": []}
+        })))
         .expect(1)
         .mount(&broken_server)
         .await;

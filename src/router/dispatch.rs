@@ -78,10 +78,7 @@ fn normalize_openai_response_body(body: bytes::Bytes) -> bytes::Bytes {
             .get("output")
             .and_then(serde_json::Value::as_array)
             .is_none()
-        && data
-            .get("error")
-            .and_then(serde_json::Value::as_object)
-            .is_none()
+        && !data.get("error").is_some_and(|error| !error.is_null())
     {
         return body;
     }
@@ -1446,6 +1443,7 @@ mod tests {
             bytes::Bytes::from_static(
                 br#"{"success":true,"data":{"error":{"message":"bad request"}}}"#,
             ),
+            bytes::Bytes::from_static(br#"{"success":true,"data":{"error":"rate limited"}}"#),
         ] {
             let normalized = normalize_openai_response_body(body);
             let payload: serde_json::Value = serde_json::from_slice(&normalized).unwrap();
