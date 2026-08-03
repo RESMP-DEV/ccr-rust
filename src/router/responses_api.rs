@@ -18,6 +18,7 @@ use tracing::error;
 
 use crate::sse::SseFrameDecoder;
 
+mod content_part_events;
 mod handler;
 mod incremental_stream;
 
@@ -1164,14 +1165,47 @@ mod tests {
         let second_events = converter.push_frame(None, &second.to_string());
         let terminal_events = converter.finish();
 
-        assert!(first_events.contains("response.created"));
-        assert!(first_events.contains("\"delta\":\"first\""));
+        let first_event_types = parse_sse_frames(&first_events)
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .filter_map(|event| event["type"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first_event_types,
+            vec![
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta"
+            ]
+        );
+        let added_part = parse_sse_frames(&first_events)
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .find(|event| event["type"] == "response.content_part.added")
+            .expect("content part must be announced before its first delta");
+        assert_eq!(
+            added_part["part"],
+            serde_json::json!({"type": "output_text", "text": "", "annotations": []})
+        );
         assert!(!second_events.contains("response.created"));
         assert!(!second_events.contains("\"delta\":\"first\""));
         assert!(second_events.contains("\"delta\":\" second\""));
         assert!(!second_events.contains("response.completed"));
-        assert!(terminal_events.contains("response.output_item.done"));
-        assert!(terminal_events.contains("response.completed"));
+        let terminal_event_types = parse_sse_frames(&terminal_events)
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .filter_map(|event| event["type"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminal_event_types,
+            vec![
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.completed"
+            ]
+        );
     }
 
     #[test]
@@ -1558,7 +1592,11 @@ mod tests {
                 "id": "msg_native",
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": "answer"}]
+                "content": [{
+                    "type": "output_text",
+                    "text": "answer",
+                    "annotations": [{"type": "url_citation", "url": "https://example.com"}]
+                }]
             }]
         });
         let chunks = [
@@ -1612,6 +1650,13 @@ mod tests {
             assert_eq!(event["output_index"], output_index);
             assert_eq!(event["item_id"], item_id);
         }
+        let content_done = events
+            .iter()
+            .find(|event| {
+                event["type"] == "response.content_part.done" && event["output_index"] == 2
+            })
+            .expect("preserved message content should complete its part lifecycle");
+        assert_eq!(content_done["part"], preserved["output"][2]["content"][0]);
     }
 
     #[test]

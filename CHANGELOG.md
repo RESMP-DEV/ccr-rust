@@ -70,7 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   corrupting translated bytes, and Chat fallbacks omit continuation identity
   metadata from tool-result content. Native Responses requests now fail an
   incompatible transformed-provider route rather than silently dropping
-  Responses-only fields.
+  Responses-only fields. Synthesized text streams now emit the Responses
+  content-part lifecycle, and every non-null embedded error keeps cascading
+  instead of turning a malformed HTTP 200 into a false success.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 

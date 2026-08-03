@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use super::content_part_events::{append_content_part_added, append_content_part_done};
 use super::{
     add_reasoning_output_item, append_response_delta, initial_responses_output_item,
     map_openai_usage_to_responses_usage, response_output_item_identity, responses_reasoning_item,
@@ -33,6 +34,11 @@ pub(super) struct ResponsesStreamConverter {
     reasoning_output_index: Option<usize>,
     message_item_added: bool,
     message_output_index: Option<usize>,
+    message_text_part_added: bool,
+    message_text_content_index: Option<usize>,
+    refusal_part_added: bool,
+    refusal_content_index: Option<usize>,
+    next_message_content_index: usize,
     next_output_index: usize,
     message_text: String,
     refusal_text: String,
@@ -66,6 +72,11 @@ impl ResponsesStreamConverter {
             reasoning_output_index: None,
             message_item_added: false,
             message_output_index: None,
+            message_text_part_added: false,
+            message_text_content_index: None,
+            refusal_part_added: false,
+            refusal_content_index: None,
+            next_message_content_index: 0,
             next_output_index: 0,
             message_text: String::new(),
             refusal_text: String::new(),
@@ -239,9 +250,98 @@ impl ResponsesStreamConverter {
                     .map(|output_index| ResponseOutputItemIdentity {
                         output_index,
                         item_id: Some(format!("msg_{}", self.response_id)),
-                        content_index: Some(0),
+                        content_index: match content_type {
+                            "output_text" => self.message_text_content_index,
+                            "refusal" => self.refusal_content_index,
+                            _ => None,
+                        },
                     })
             })
+    }
+
+    fn ensure_message_content_part(&mut self, content_type: &str, output: &mut String) {
+        self.ensure_message_item(output);
+        let already_added = match content_type {
+            "output_text" => self.message_text_part_added,
+            "refusal" => self.refusal_part_added,
+            _ => return,
+        };
+        if already_added {
+            return;
+        }
+
+        if self.preserved_response.is_none() {
+            let content_index = self.next_message_content_index;
+            self.next_message_content_index += 1;
+            match content_type {
+                "output_text" => self.message_text_content_index = Some(content_index),
+                "refusal" => self.refusal_content_index = Some(content_index),
+                _ => return,
+            }
+        }
+
+        let Some(identity) = self.message_identity(content_type) else {
+            return;
+        };
+        append_content_part_added(output, &identity, content_type);
+        match content_type {
+            "output_text" => self.message_text_part_added = true,
+            "refusal" => self.refusal_part_added = true,
+            _ => {}
+        }
+    }
+
+    fn finish_message_content_parts(&self, output: &mut String) {
+        let mut parts = Vec::new();
+        if self.message_text_part_added {
+            if let Some(identity) = self.message_identity("output_text") {
+                let preserved_part = self.preserved_content_part(&identity);
+                parts.push((
+                    identity.content_index.unwrap_or(0),
+                    identity,
+                    "output_text",
+                    self.message_text.as_str(),
+                    preserved_part,
+                ));
+            }
+        }
+        if self.refusal_part_added {
+            if let Some(identity) = self.message_identity("refusal") {
+                let preserved_part = self.preserved_content_part(&identity);
+                parts.push((
+                    identity.content_index.unwrap_or(0),
+                    identity,
+                    "refusal",
+                    self.refusal_text.as_str(),
+                    preserved_part,
+                ));
+            }
+        }
+        parts.sort_by_key(|(content_index, _, _, _, _)| *content_index);
+        for (_, identity, content_type, content, preserved_part) in parts {
+            append_content_part_done(
+                output,
+                &identity,
+                content_type,
+                content,
+                preserved_part.as_ref(),
+            );
+        }
+    }
+
+    fn preserved_content_part(
+        &self,
+        identity: &ResponseOutputItemIdentity,
+    ) -> Option<serde_json::Value> {
+        self.preserved_response
+            .as_ref()?
+            .get("output")?
+            .as_array()?
+            .get(identity.output_index)?
+            .get("content")?
+            .as_array()?
+            .get(identity.content_index?)
+            .cloned()
     }
 
     fn reasoning_identity(&self) -> Option<ResponseOutputItemIdentity> {
@@ -289,7 +389,7 @@ impl ResponsesStreamConverter {
             .and_then(|value| value.as_str())
             .filter(|text| !text.is_empty())
         {
-            self.ensure_message_item(output);
+            self.ensure_message_content_part("output_text", output);
             self.message_text.push_str(text);
             append_response_delta(
                 output,
@@ -312,7 +412,7 @@ impl ResponsesStreamConverter {
             .and_then(|value| value.as_str())
             .filter(|refusal| !refusal.is_empty())
         {
-            self.ensure_message_item(output);
+            self.ensure_message_content_part("refusal", output);
             self.refusal_text.push_str(refusal);
             append_response_delta(
                 output,
@@ -494,7 +594,7 @@ impl ResponsesStreamConverter {
                     .and_then(|value| value.as_str())
                     .filter(|text| !text.is_empty())
                 {
-                    self.ensure_message_item(output);
+                    self.ensure_message_content_part("output_text", output);
                     self.message_text.push_str(text);
                     append_response_delta(
                         output,
@@ -537,20 +637,33 @@ impl ResponsesStreamConverter {
             append_output_item_done(&mut output, output_index, &reasoning_item);
         }
 
+        self.finish_message_content_parts(&mut output);
+
         if self.preserved_response.is_none() && self.message_item_added {
-            let mut content = Vec::new();
+            let mut indexed_content = Vec::new();
             if !self.message_text.is_empty() {
-                content.push(serde_json::json!({
-                    "type": "output_text",
-                    "text": self.message_text
-                }));
+                indexed_content.push((
+                    self.message_text_content_index.unwrap_or(0),
+                    serde_json::json!({
+                        "type": "output_text",
+                        "text": self.message_text
+                    }),
+                ));
             }
             if !self.refusal_text.is_empty() {
-                content.push(serde_json::json!({
-                    "type": "refusal",
-                    "refusal": self.refusal_text
-                }));
+                indexed_content.push((
+                    self.refusal_content_index.unwrap_or(0),
+                    serde_json::json!({
+                        "type": "refusal",
+                        "refusal": self.refusal_text
+                    }),
+                ));
             }
+            indexed_content.sort_by_key(|(content_index, _)| *content_index);
+            let content = indexed_content
+                .into_iter()
+                .map(|(_, content)| content)
+                .collect::<Vec<_>>();
             let message_item = serde_json::json!({
                 "id": format!("msg_{}", self.response_id),
                 "type": "message",
