@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   added/done/completed items authoritative. Native function, custom-tool,
   computer, local-shell, shell, apply-patch, and MCP-approval continuation
   results now pass pre-routing validation and reach Responses providers intact.
+  Responses stream adapters emit translated deltas before upstream EOF, bound
+  their reconstruction buffer, and preserve exhausted-tier HTTP 429 responses.
   The optional sindexer integration is pinned to its reviewed task-aware
   embedding-prefix release on `main`.
 
