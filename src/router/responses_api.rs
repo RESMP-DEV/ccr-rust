@@ -10,8 +10,13 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use bytes::Bytes;
+use futures::StreamExt;
 use std::io::Read;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::error;
+
+use crate::sse::SseFrameDecoder;
 
 mod handler;
 
@@ -795,52 +800,38 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
         .extensions
         .get::<super::TrustedResponsesResponse>()
         .map(|response| response.0.clone());
-    let body_bytes = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            error!("Failed to read OpenAI stream: {}", err);
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": "Failed to read upstream stream"})),
-            )
-                .into_response();
-        }
-    };
-
-    let payload = String::from_utf8_lossy(&body_bytes);
 
     if parts.status != StatusCode::OK {
-        let mut output = String::new();
-        // Check if this is a rate limit error (429)
-        let is_rate_limit = parts.status == StatusCode::TOO_MANY_REQUESTS;
-        let retry_after = parts
-            .headers
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
-
-        let error_text = String::from_utf8_lossy(&body_bytes).to_string();
-
-        let mut error_obj = serde_json::json!({
-            "message": error_text
-        });
-
-        if is_rate_limit {
-            error_obj["code"] = serde_json::Value::String("rate_limited".to_string());
-            if let Some(retry_after_secs) = retry_after {
-                error_obj["retry_after"] = serde_json::json!(retry_after_secs);
-            }
-        } else {
-            error_obj["code"] = serde_json::Value::String("upstream_error".to_string());
+        // Exhausted-tier rate limits are an HTTP contract, not a successful SSE
+        // stream. Preserve the synthesized status, headers, and structured body
+        // so Responses clients can apply their normal retry policy.
+        if parts.status == StatusCode::TOO_MANY_REQUESTS {
+            return Response::from_parts(parts, body);
         }
 
+        let body_bytes = match to_bytes(body, MAX_RESPONSES_BODY_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                error!("Failed to read OpenAI stream error body: {}", err);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": "Failed to read upstream stream"})),
+                )
+                    .into_response();
+            }
+        };
+        let mut output = String::new();
+        let error_text = String::from_utf8_lossy(&body_bytes).to_string();
         let failed_event = serde_json::json!({
             "type": "response.failed",
             "response": {
                 "id": "resp_failed",
                 "object": "response",
                 "status": "failed",
-                "error": error_obj
+                "error": {
+                    "message": error_text,
+                    "code": "upstream_error"
+                }
             }
         });
         output.push_str("event: response.failed\ndata: ");
@@ -854,14 +845,132 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
         return Response::from_parts(parts, Body::from(output));
     }
 
-    let output = convert_sse_payload_to_responses(&payload, preserved_response.as_ref());
-
     parts.headers.insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("text/event-stream"),
     );
+    parts.headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    parts.headers.remove(axum::http::header::CONTENT_ENCODING);
+    parts.headers.remove(axum::http::header::TRANSFER_ENCODING);
+    parts.headers.remove(axum::http::header::ETAG);
+    parts.headers.remove(axum::http::header::LAST_MODIFIED);
     parts.status = StatusCode::OK;
-    Response::from_parts(parts, Body::from(output))
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(100);
+    tokio::spawn(async move {
+        let mut stream = body.into_data_stream();
+        let mut decoder = SseFrameDecoder::new();
+        let mut source = String::new();
+        let mut emitted = String::new();
+        let mut received_bytes = 0_usize;
+        let mut source_done = false;
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    error!("Failed to read OpenAI stream chunk: {}", err);
+                    let failed =
+                        responses_stream_adapter_failed_event("Failed to read upstream stream");
+                    let _ = tx.send(Ok(Bytes::from(failed))).await;
+                    return;
+                }
+            };
+            received_bytes = received_bytes.saturating_add(bytes.len());
+            if received_bytes > MAX_RESPONSES_BODY_BYTES {
+                let failed = responses_stream_adapter_failed_event(
+                    "Upstream stream exceeded the Responses adapter limit",
+                );
+                let _ = tx.send(Ok(Bytes::from(failed))).await;
+                return;
+            }
+
+            let frames = decoder.push(&bytes);
+            if frames.is_empty() {
+                continue;
+            }
+            for frame in frames {
+                source_done |= frame.data.trim() == "[DONE]";
+                source.push_str(&frame.to_sse_string());
+            }
+
+            let converted = convert_sse_payload_to_responses(&source, preserved_response.as_ref());
+            let prefix_len = responses_stream_stable_prefix_len(&converted);
+            let stable_prefix = &converted[..prefix_len];
+            let Some(delta) = stable_prefix.strip_prefix(&emitted) else {
+                error!("Responses stream conversion prefix diverged");
+                let failed = responses_stream_adapter_failed_event(
+                    "Responses stream conversion became inconsistent",
+                );
+                let _ = tx.send(Ok(Bytes::from(failed))).await;
+                return;
+            };
+            if !delta.is_empty() {
+                if tx
+                    .send(Ok(Bytes::copy_from_slice(delta.as_bytes())))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                emitted.push_str(delta);
+            }
+            if source_done {
+                break;
+            }
+        }
+
+        let converted = convert_sse_payload_to_responses(&source, preserved_response.as_ref());
+        let Some(tail) = converted.strip_prefix(&emitted) else {
+            error!("Responses stream conversion tail diverged");
+            let failed = responses_stream_adapter_failed_event(
+                "Responses stream conversion became inconsistent",
+            );
+            let _ = tx.send(Ok(Bytes::from(failed))).await;
+            return;
+        };
+        if !tail.is_empty() {
+            let _ = tx.send(Ok(Bytes::copy_from_slice(tail.as_bytes()))).await;
+        }
+    });
+
+    Response::from_parts(parts, Body::from_stream(ReceiverStream::new(rx)))
+}
+
+fn responses_stream_stable_prefix_len(converted: &str) -> usize {
+    [
+        "event: response.output_item.done\n",
+        "event: response.queued\n",
+        "event: response.in_progress\n",
+        "event: response.completed\n",
+        "event: response.incomplete\n",
+        "event: response.failed\n",
+        "event: response.cancelled\n",
+    ]
+    .iter()
+    .filter_map(|marker| converted.find(marker))
+    .min()
+    .unwrap_or(converted.len())
+}
+
+fn responses_stream_adapter_failed_event(message: &str) -> String {
+    let failed = serde_json::json!({
+        "type": "response.failed",
+        "response": {
+            "id": "resp_failed",
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "message": message,
+                "code": "stream_adapter_error"
+            }
+        }
+    });
+    format!("event: response.failed\ndata: {failed}\n\n")
 }
 
 fn initial_responses_output_item(item: &serde_json::Value) -> serde_json::Value {
