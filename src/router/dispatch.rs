@@ -332,6 +332,25 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
     // Build transformer chain from provider config
     let chain = build_transformer_chain(registry, provider, tier.split(',').nth(1).unwrap_or(tier));
 
+    // Native Responses payloads intentionally retain fields that have no
+    // lossless Anthropic or Chat Completions representation. Existing request
+    // transformers operate on the Anthropic-shaped request, so combining the
+    // two would silently drop inputs such as files, hosted tools, text.format,
+    // and metadata. Reject this incompatible route instead of forwarding a
+    // lossy reconstruction; ordinary Chat clients may still use a transformed
+    // Responses provider through the conversion path below.
+    if provider.protocol == ProviderProtocol::Responses
+        && !chain.is_empty()
+        && openai_passthrough_body
+            .and_then(|body| body.get(super::RESPONSES_REQUEST_PASSTHROUGH_KEY))
+            .is_some()
+    {
+        return Err(TryRequestError::Other(anyhow::anyhow!(
+            "Responses provider '{}' cannot apply request transformers to a native Responses payload",
+            provider.name
+        )));
+    }
+
     // Extract the actual model name from the tier (format: "provider,model")
     let model_name = tier.split(',').nth(1).unwrap_or(tier);
 

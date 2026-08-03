@@ -879,11 +879,22 @@ mod tests {
             .await
             .unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
+        let usage = body
+            .split("\n\n")
+            .filter_map(|frame| {
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            })
+            .find(|event| event["type"] == "message_delta")
+            .and_then(|event| event.get("usage").cloned())
+            .expect("message_delta should carry structured usage");
 
-        assert!(body.contains("\"input_tokens\":12"));
-        assert!(body.contains("\"output_tokens\":7"));
-        assert!(body.contains("\"cache_read_input_tokens\":5"));
-        assert!(body.contains("\"reasoning_tokens\":3"));
+        assert_eq!(usage["input_tokens"], 12);
+        assert_eq!(usage["output_tokens"], 7);
+        assert_eq!(usage["cache_read_input_tokens"], 5);
+        assert_eq!(usage["reasoning_tokens"], 3);
     }
 
     #[tokio::test]

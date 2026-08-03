@@ -139,10 +139,14 @@ impl ResponsesStreamConverter {
         self.ensure_created(&mut output);
         self.ensure_preserved_items(&mut output);
 
+        if let Some(usage) = chunk.get("usage").filter(|usage| {
+            !usage.is_null()
+                && (usage.get("prompt_tokens").is_some()
+                    || usage.get("completion_tokens").is_some())
+        }) {
+            self.usage = map_openai_usage_to_responses_usage(usage);
+        }
         if let Some(choices) = chunk.get("choices").and_then(|value| value.as_array()) {
-            if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
-                self.usage = map_openai_usage_to_responses_usage(usage);
-            }
             if let Some(choice) = choices.first() {
                 self.push_openai_choice(choice, &mut output);
             }
@@ -194,6 +198,7 @@ impl ResponsesStreamConverter {
                 output.push_str(&added.to_string());
                 output.push_str("\n\n");
             }
+            self.next_output_index = self.next_output_index.max(items.len());
             self.preserved_items_added = true;
         }
     }
@@ -740,4 +745,29 @@ fn append_output_item_done(output: &mut String, output_index: usize, item: &serd
     output.push_str("event: response.output_item.done\ndata: ");
     output.push_str(&done.to_string());
     output.push_str("\n\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserved_items_reserve_their_output_indices() {
+        let preserved = serde_json::json!({
+            "id": "resp_preserved",
+            "output": [
+                {"id": "item_0", "type": "reasoning", "summary": []},
+                {"id": "item_1", "type": "message", "role": "assistant", "content": []}
+            ]
+        });
+        let mut converter = ResponsesStreamConverter::new(Some(preserved));
+        let frame = serde_json::json!({
+            "id": "resp_preserved",
+            "choices": []
+        });
+
+        converter.push_frame(None, &frame.to_string());
+
+        assert_eq!(converter.next_output_index, 2);
+    }
 }
