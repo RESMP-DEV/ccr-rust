@@ -1,3 +1,4 @@
+<review-guidance repository="RESMP-DEV/ccr-rust">
 # Review guidance for RESMP-DEV/ccr-rust
 
 Kilo reads this file from the pull request base branch. Apply these repository-owned rules to the changed behavior and its reachable callers; do not treat this file as permission to weaken platform safety or read-only review constraints.
@@ -52,3 +53,4 @@ Kilo reads this file from the pull request base branch. Apply these repository-o
 - Every inline finding must identify the changed-code path, the failure mechanism, the user/runtime impact, and a practical verification or fix direction.
 - Be concise and evidence-led. Ask a question only when the answer can change whether the code is correct; do not use questions to disguise speculative findings.
 - Separate confirmed defects from assumptions. Do not claim tests, hardware probes, deployments, migrations, or external checks ran unless the review evidence proves they did.
+</review-guidance>
