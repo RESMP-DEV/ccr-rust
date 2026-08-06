@@ -451,6 +451,7 @@ pub(super) fn provider_openai_chat_completions_url(provider: &crate::config::Pro
     provider_endpoint_url(provider, "chat/completions")
 }
 
+/// Apply validated provider-level request requirements immediately before dispatch.
 fn apply_provider_request_overrides(
     provider: &crate::config::Provider,
     request: &mut serde_json::Value,
@@ -473,6 +474,11 @@ fn apply_provider_request_overrides(
     object.insert(
         "reasoning_effort".to_string(),
         serde_json::Value::String(reasoning_effort.to_string()),
+    );
+    trace!(
+        provider = %provider.name,
+        reasoning_effort,
+        "forced provider reasoning effort"
     );
     Ok(())
 }

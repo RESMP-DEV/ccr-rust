@@ -121,6 +121,11 @@ Each provider entry configures an upstream API endpoint.
 | `pricing` | object | No | - | Provider-default input/output prices in USD per million tokens, with optional cached-input rates. |
 | `model_pricing` | object | No | - | Model-keyed price overrides using the same rate fields. |
 | `transformer` | object | No | - | Request/response transformation configuration. |
+| `force_reasoning_effort` | string | No | - | Force `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` on every OpenAI-protocol request. |
+
+`force_reasoning_effort` is valid only for the default `openai` provider
+protocol. Configuration validation rejects unsupported values and other
+protocols before the router starts.
 
 ### Provider and Model Pricing
 

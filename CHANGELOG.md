@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Forced provider reasoning effort** — OpenAI-compatible providers may set
   `force_reasoning_effort`; CCR applies it immediately before upstream
   dispatch so caller defaults cannot weaken a provider's required reasoning
-  level while the original OpenAI request fields remain intact.
+  level while the original OpenAI request fields remain intact. Configuration
+  loading rejects unsupported values and non-OpenAI provider protocols.
 
 - **Cached-input token accounting** — `/v1/usage` now reports aggregate
   `total_cache_read_tokens` and `total_cache_creation_tokens` alongside the
