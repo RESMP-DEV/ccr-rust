@@ -348,6 +348,13 @@ pub struct Provider {
     /// non-streaming mode causes excessive latency (e.g. Gemini).
     #[serde(default)]
     pub allow_streaming: bool,
+
+    /// Force one OpenAI Chat Completions reasoning effort for every request.
+    ///
+    /// Applied after frontend normalization so caller defaults cannot weaken
+    /// a provider-specific requirement.
+    #[serde(default)]
+    pub force_reasoning_effort: Option<String>,
 }
 
 fn default_honor_ratelimit_headers() -> bool {

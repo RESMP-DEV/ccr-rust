@@ -551,6 +551,21 @@ mod tests {
     }
 
     #[test]
+    fn provider_with_forced_reasoning_effort() {
+        let p = parse_provider(
+            r#"{
+                "name": "upstage",
+                "api_base_url": "https://api.upstage.ai/v1",
+                "api_key": "up-test",
+                "models": ["solar-pro4"],
+                "force_reasoning_effort": "max"
+            }"#,
+        );
+
+        assert_eq!(p.force_reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
     fn should_bypass_logic() {
         let t = parse_transformer(r#"{"use": ["anthropic"]}"#);
         assert!(t.should_bypass("anthropic", "some-model"));
