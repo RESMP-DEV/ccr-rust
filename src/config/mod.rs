@@ -25,9 +25,7 @@ fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
                 provider.name
             );
         }
-        if reasoning_effort.trim() != reasoning_effort
-            || !REASONING_EFFORT_VALUES.contains(&reasoning_effort)
-        {
+        if !REASONING_EFFORT_VALUES.contains(&reasoning_effort) {
             anyhow::bail!(
                 "provider '{}' has invalid force_reasoning_effort '{}'; expected one of: {}",
                 provider.name,
