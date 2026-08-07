@@ -18,6 +18,7 @@ use crate::mcp::auth::BearerAuth;
 use crate::mcp::protocol::JsonRpcMessage;
 use crate::mcp::tools::context7::Context7Tool;
 use crate::mcp::tools::exa::ExaTool;
+use crate::mcp::tools::jina::JinaTool;
 use crate::mcp::tools::memory::MemoryTool;
 use crate::mcp::tools::pyright::PyrightTool;
 use crate::mcp::tools::ToolRegistry;
@@ -59,6 +60,13 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         if !exa_key.is_empty() {
             tracing::info!("exa tool enabled");
             tools.push(Box::new(ExaTool::new(http_client.clone(), exa_key)));
+        }
+    }
+
+    if let Ok(jina_key) = std::env::var("JINA_API_KEY") {
+        if !jina_key.is_empty() {
+            tracing::info!("jina tool enabled");
+            tools.push(Box::new(JinaTool::new(http_client.clone(), jina_key)));
         }
     }
 

@@ -232,3 +232,87 @@ async fn test_health_and_mcp_require_correct_bearer_auth() {
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["result"], json!({}));
 }
+
+/// When JINA_API_KEY is set, the daemon must register the web_search_jina and
+/// web_fetch_jina tools. Without the key they must be absent. This completes
+/// the Python-side readiness contract (services.py _WEB_SEARCH_TOOLS).
+#[tokio::test]
+async fn test_jina_tools_registered_when_key_set() {
+    // Use a unique port to avoid collisions with other tests.
+    let port = 13461;
+    std::env::set_var("JINA_API_KEY", "test-jina-key");
+    let _handle = start_daemon(port).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    mcp_post(
+        port,
+        &json!({
+            "jsonrpc": "2.0", "id": "init", "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "test", "version": "0.1" } }
+        }),
+    )
+    .await;
+
+    let list_resp = mcp_post(
+        port,
+        &json!({
+            "jsonrpc": "2.0", "id": "tl", "method": "tools/list", "params": {}
+        }),
+    )
+    .await;
+
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+
+    assert!(
+        names.contains(&"web_search_jina"),
+        "web_search_jina must be registered when JINA_API_KEY is set: {names:?}"
+    );
+    assert!(
+        names.contains(&"web_fetch_jina"),
+        "web_fetch_jina must be registered when JINA_API_KEY is set: {names:?}"
+    );
+
+    std::env::remove_var("JINA_API_KEY");
+}
+
+#[tokio::test]
+async fn test_jina_tools_absent_when_key_not_set() {
+    let port = 13462;
+    std::env::remove_var("JINA_API_KEY");
+    let _handle = start_daemon(port).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    mcp_post(
+        port,
+        &json!({
+            "jsonrpc": "2.0", "id": "init", "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "test", "version": "0.1" } }
+        }),
+    )
+    .await;
+
+    let list_resp = mcp_post(
+        port,
+        &json!({
+            "jsonrpc": "2.0", "id": "tl", "method": "tools/list", "params": {}
+        }),
+    )
+    .await;
+
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+
+    assert!(
+        !names.contains(&"web_search_jina"),
+        "web_search_jina must be absent without JINA_API_KEY"
+    );
+    assert!(
+        !names.contains(&"web_fetch_jina"),
+        "web_fetch_jina must be absent without JINA_API_KEY"
+    );
+}
