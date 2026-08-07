@@ -18,6 +18,7 @@ use crate::mcp::auth::BearerAuth;
 use crate::mcp::protocol::JsonRpcMessage;
 use crate::mcp::tools::context7::Context7Tool;
 use crate::mcp::tools::exa::ExaTool;
+use crate::mcp::tools::jina::JinaTool;
 use crate::mcp::tools::memory::MemoryTool;
 use crate::mcp::tools::pyright::PyrightTool;
 use crate::mcp::tools::ToolRegistry;
@@ -34,6 +35,12 @@ pub struct DaemonArgs {
     pub pyright_root: Option<PathBuf>,
     pub pyright_workspace_dir: Option<PathBuf>,
     pub auth_token: String,
+    #[doc(hidden)]
+    pub jina_api_key: Option<String>,
+    #[doc(hidden)]
+    pub jina_search_base: Option<String>,
+    #[doc(hidden)]
+    pub jina_reader_base: Option<String>,
 }
 
 pub async fn run(args: DaemonArgs) -> Result<()> {
@@ -44,6 +51,9 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         pyright_root,
         pyright_workspace_dir,
         auth_token,
+        jina_api_key,
+        jina_search_base,
+        jina_reader_base,
     } = args;
     let auth = BearerAuth::new(auth_token)?;
 
@@ -59,6 +69,28 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         if !exa_key.is_empty() {
             tracing::info!("exa tool enabled");
             tools.push(Box::new(ExaTool::new(http_client.clone(), exa_key)));
+        }
+    }
+
+    if let Some(jina_key) = jina_api_key.or_else(|| std::env::var("JINA_API_KEY").ok()) {
+        if !jina_key.is_empty() {
+            tracing::info!("jina tool enabled");
+            let jina_tool = match (jina_search_base, jina_reader_base) {
+                (Some(search_base), Some(reader_base)) => JinaTool::new_with_base_urls(
+                    http_client.clone(),
+                    jina_key,
+                    search_base,
+                    reader_base,
+                ),
+                (None, None) => JinaTool::new(http_client.clone(), jina_key),
+                (Some(_), None) => {
+                    anyhow::bail!("jina_reader_base must be set when jina_search_base is set")
+                }
+                (None, Some(_)) => {
+                    anyhow::bail!("jina_search_base must be set when jina_reader_base is set")
+                }
+            };
+            tools.push(Box::new(jina_tool.context("invalid Jina configuration")?));
         }
     }
 

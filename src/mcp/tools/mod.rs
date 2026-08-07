@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 pub mod context7;
 pub mod exa;
+pub mod jina;
 pub mod memory;
 pub mod pyright;
 mod pyright_workspace;
