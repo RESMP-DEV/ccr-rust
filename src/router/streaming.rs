@@ -233,6 +233,7 @@ pub async fn stream_response_translated(
                 input_tokens,
                 output_tokens,
                 cache_read_input_tokens,
+                cache_creation_input_tokens: None,
                 reasoning_tokens,
             })
         } else {
@@ -242,6 +243,7 @@ pub async fn stream_response_translated(
                 input_tokens,
                 output_tokens: estimated_output as u64,
                 cache_read_input_tokens,
+                cache_creation_input_tokens: None,
                 reasoning_tokens,
             })
         };
@@ -308,16 +310,25 @@ pub async fn stream_response_translated(
                 // upstream value instead: when the provider omitted usage
                 // (raw 0) there is nothing to compare, and passing the
                 // substituted estimate would record a false 0% drift sample.
+                let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
                 record_usage(
                     &ctx.tier_name,
                     usage.input_tokens,
                     usage.output_tokens,
-                    usage.cache_read_input_tokens.unwrap_or(0),
+                    cache_read,
                     0,
                 );
                 verify_token_usage(&ctx.tier_name, ctx.local_estimate, input_tokens);
                 if let Some(cost) = ctx.pricing.and_then(|p| {
-                    p.estimate_request_cost_usd(usage.input_tokens, usage.output_tokens)
+                    // OpenAI-style prompt_tokens already include the cached
+                    // share; bill that share at the cached rate when one is
+                    // configured (zero otherwise, keeping a lower bound).
+                    p.estimate_request_cost_usd_with_cache(
+                        usage.input_tokens.saturating_sub(cache_read),
+                        cache_read,
+                        0,
+                        usage.output_tokens,
+                    )
                 }) {
                     record_cost(&ctx.tier_name, cost);
                 }
@@ -384,6 +395,8 @@ pub async fn stream_anthropic_response_with_tracking(
         let mut decoder = SseFrameDecoder::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
+        let mut cache_read_tokens: u64 = 0;
+        let mut cache_creation_tokens: u64 = 0;
         let mut accumulated_content_len: usize = 0;
         // TTFT/throughput timing
         let stream_start = verify_ctx.stream_start;
@@ -419,10 +432,19 @@ pub async fn stream_anthropic_response_with_tracking(
                                     continue;
                                 }
 
-                                // Parse Anthropic SSE events to extract usage
+                                // Parse Anthropic SSE events to extract usage.
+                                // message_start reports usage under
+                                // `message.usage` (input plus cache splits);
+                                // message_delta reports a top-level `usage`
+                                // (cumulative output, and input or cache fields
+                                // on some providers). Positive values win so a
+                                // later event never zeroes an earlier report.
                                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(json_str) {
-                                    // Extract usage from message_delta events
-                                    if let Some(usage) = event.get("usage") {
+                                    let usage_sources = [
+                                        event.get("usage"),
+                                        event.get("message").and_then(|m| m.get("usage")),
+                                    ];
+                                    for usage in usage_sources.into_iter().flatten() {
                                         if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
                                             if input > 0 {
                                                 input_tokens = input;
@@ -431,6 +453,16 @@ pub async fn stream_anthropic_response_with_tracking(
                                         if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
                                             if output > 0 {
                                                 output_tokens = output;
+                                            }
+                                        }
+                                        if let Some(read) = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+                                            if read > 0 {
+                                                cache_read_tokens = read;
+                                            }
+                                        }
+                                        if let Some(creation) = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+                                            if creation > 0 {
+                                                cache_creation_tokens = creation;
                                             }
                                         }
                                     }
@@ -512,8 +544,16 @@ pub async fn stream_anthropic_response_with_tracking(
             return;
         }
 
+        // Anthropic-style usage reports the uncached prompt slice in
+        // input_tokens with cache reads and writes as separate fields.
+        // Account the full prompt volume and keep the cache splits for
+        // reporting and discounted cost estimation.
+        let raw_prompt_tokens = input_tokens
+            .saturating_add(cache_read_tokens)
+            .saturating_add(cache_creation_tokens);
+
         // Estimate tokens if provider returned zeros (some Anthropic-compatible APIs don't report usage)
-        let final_input_tokens = if input_tokens == 0 && local_estimate > 0 {
+        let final_input_tokens = if raw_prompt_tokens == 0 && local_estimate > 0 {
             warn!(
                 tier = %tier_name,
                 "Anthropic stream returned 0 input_tokens, using pre-request estimate: {}",
@@ -521,7 +561,7 @@ pub async fn stream_anthropic_response_with_tracking(
             );
             local_estimate
         } else {
-            input_tokens
+            raw_prompt_tokens
         };
 
         let final_output_tokens = if output_tokens == 0 && accumulated_content_len > 0 {
@@ -538,14 +578,27 @@ pub async fn stream_anthropic_response_with_tracking(
         };
 
         // Record usage. Drift verification receives the raw upstream value:
-        // when the provider omitted usage (input_tokens == 0) there is
+        // when the provider omitted usage (raw_prompt_tokens == 0) there is
         // nothing to compare, and passing the substituted estimate would
         // record a false 0% drift sample.
-        record_usage(&tier_name, final_input_tokens, final_output_tokens, 0, 0);
-        verify_token_usage(&tier_name, local_estimate, input_tokens);
-        if let Some(cost) = pricing
-            .and_then(|p| p.estimate_request_cost_usd(final_input_tokens, final_output_tokens))
-        {
+        record_usage(
+            &tier_name,
+            final_input_tokens,
+            final_output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        );
+        verify_token_usage(&tier_name, local_estimate, raw_prompt_tokens);
+        if let Some(cost) = pricing.and_then(|p| {
+            p.estimate_request_cost_usd_with_cache(
+                final_input_tokens
+                    .saturating_sub(cache_read_tokens)
+                    .saturating_sub(cache_creation_tokens),
+                cache_read_tokens,
+                cache_creation_tokens,
+                final_output_tokens,
+            )
+        }) {
             record_cost(&tier_name, cost);
         }
 
@@ -617,6 +670,9 @@ fn emit_anthropic_sse_events(
     });
     if let Some(cached_tokens) = resp.usage.cache_read_input_tokens {
         start_usage["cache_read_input_tokens"] = serde_json::json!(cached_tokens);
+    }
+    if let Some(created_tokens) = resp.usage.cache_creation_input_tokens {
+        start_usage["cache_creation_input_tokens"] = serde_json::json!(created_tokens);
     }
     let mut message = serde_json::json!({
         "id": resp.id,
@@ -1000,6 +1056,44 @@ mod tests {
     }
 
     #[test]
+    fn test_emit_anthropic_sse_events_cache_usage() {
+        let resp = AnthropicResponse {
+            id: "msg_test".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text {
+                text: "ok".to_string(),
+            }],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_read_input_tokens: Some(60),
+                cache_creation_input_tokens: Some(30),
+                ..Default::default()
+            },
+            reasoning_content: None,
+            refusal: None,
+            response_status: None,
+            incomplete_details: None,
+        };
+
+        let events = emit_anthropic_sse_events(&resp, true);
+        let start_usage = events
+            .iter()
+            .filter_map(|event| event.lines().find_map(|line| line.strip_prefix("data: ")))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .find(|event| event["type"] == "message_start")
+            .map(|event| event["message"]["usage"].clone())
+            .expect("message_start should carry usage");
+
+        assert_eq!(start_usage["input_tokens"], 100);
+        assert_eq!(start_usage["cache_read_input_tokens"], 60);
+        assert_eq!(start_usage["cache_creation_input_tokens"], 30);
+    }
+
+    #[test]
     fn test_emit_anthropic_sse_events_thinking() {
         let resp = AnthropicResponse {
             id: "msg_think".to_string(),
@@ -1020,6 +1114,7 @@ mod tests {
                 input_tokens: 50,
                 output_tokens: 30,
                 cache_read_input_tokens: Some(7),
+                cache_creation_input_tokens: None,
                 reasoning_tokens: Some(11),
             },
             reasoning_content: None,

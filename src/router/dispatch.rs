@@ -941,7 +941,15 @@ pub(super) async fn try_request_via_openai_protocol(
                 );
                 verify_token_usage(tier_name, local_estimate, usage.prompt_tokens);
                 if let Some(cost) = provider.pricing_for_model(model_name).and_then(|p| {
-                    p.estimate_request_cost_usd(usage.prompt_tokens, usage.completion_tokens)
+                    // OpenAI-style prompt_tokens already include the cached
+                    // share; bill that share at the cached rate when one is
+                    // configured (zero otherwise, keeping a lower bound).
+                    p.estimate_request_cost_usd_with_cache(
+                        usage.prompt_tokens.saturating_sub(cache_read_tokens),
+                        cache_read_tokens,
+                        0,
+                        usage.completion_tokens,
+                    )
                 }) {
                     record_cost(tier_name, cost);
                 }
@@ -1258,8 +1266,23 @@ pub(super) async fn try_request_via_anthropic_protocol(
                     return Ok(response);
                 }
             };
+            // Anthropic-style usage reports the uncached prompt slice in
+            // input_tokens with cache reads and writes as separate fields.
+            // Account the full prompt volume and keep the cache splits for
+            // reporting and discounted cost estimation.
+            let cache_read_tokens = anthropic_resp.usage.cache_read_input_tokens.unwrap_or(0);
+            let cache_creation_tokens = anthropic_resp
+                .usage
+                .cache_creation_input_tokens
+                .unwrap_or(0);
+            let raw_prompt_tokens = anthropic_resp
+                .usage
+                .input_tokens
+                .saturating_add(cache_read_tokens)
+                .saturating_add(cache_creation_tokens);
+
             // Estimate tokens when provider returns zeros (common for some Anthropic-compatible APIs)
-            let mut input_tokens = anthropic_resp.usage.input_tokens;
+            let mut input_tokens = raw_prompt_tokens;
             let mut output_tokens = anthropic_resp.usage.output_tokens;
 
             // Use pre-request estimate for input if provider returned 0
@@ -1294,12 +1317,27 @@ pub(super) async fn try_request_via_anthropic_protocol(
                 }
             }
 
-            record_usage(tier_name, input_tokens, output_tokens, 0, 0);
-            verify_token_usage(tier_name, local_estimate, input_tokens);
-            if let Some(cost) = provider
-                .pricing_for_model(model_name)
-                .and_then(|p| p.estimate_request_cost_usd(input_tokens, output_tokens))
-            {
+            record_usage(
+                tier_name,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+            );
+            // Drift verification receives the raw upstream prompt volume: when
+            // the provider omitted usage there is nothing to compare, and the
+            // substituted estimate would record a false 0% drift sample.
+            verify_token_usage(tier_name, local_estimate, raw_prompt_tokens);
+            if let Some(cost) = provider.pricing_for_model(model_name).and_then(|p| {
+                p.estimate_request_cost_usd_with_cache(
+                    input_tokens
+                        .saturating_sub(cache_read_tokens)
+                        .saturating_sub(cache_creation_tokens),
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    output_tokens,
+                )
+            }) {
                 record_cost(tier_name, cost);
             }
 

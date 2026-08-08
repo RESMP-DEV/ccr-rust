@@ -120,6 +120,9 @@ pub(super) fn translate_response_openai_to_anthropic(
                 .as_ref()
                 .and_then(|details| details.get("cached_tokens"))
                 .and_then(serde_json::Value::as_u64),
+            // OpenAI-style caching is automatic and reports no separate
+            // cache-write count.
+            cache_creation_input_tokens: None,
             reasoning_tokens: openai_usage
                 .completion_tokens_details
                 .as_ref()

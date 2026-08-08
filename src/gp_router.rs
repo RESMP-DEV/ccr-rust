@@ -391,6 +391,12 @@ fn estimate_tier_costs(
                         .and_then(|provider| provider.pricing_for_model(model))
                 })
                 .and_then(|pricing| {
+                    // Pre-request estimates deliberately treat the whole prompt
+                    // as uncached: the cache-hit share is unknown before
+                    // dispatch, and assuming a discount would understate cost.
+                    // Using measured cache hit rates as a routing signal
+                    // (cached-prefix affinity) requires accumulated telemetry
+                    // first; do not add it here without measured evidence.
                     pricing.estimate_request_cost_usd(
                         request.estimated_input_tokens,
                         request.max_output_tokens,
@@ -567,6 +573,8 @@ mod tests {
         let pricing = crate::config::ModelPricing {
             input_per_million_tokens: 1.5,
             output_per_million_tokens: 6.0,
+            cache_read_per_million_tokens: None,
+            cache_creation_per_million_tokens: None,
         };
 
         let cost = pricing

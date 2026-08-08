@@ -202,9 +202,14 @@ impl<'de> Deserialize<'de> for ProviderTransformer {
 
 /// Token pricing for a provider or model override, in USD per million tokens.
 ///
-/// Pricing is optional at the provider level. When supplied, both rates are
-/// explicit so cost comparisons never silently treat a missing component as
-/// free. A model-specific entry takes precedence over the provider default.
+/// Pricing is optional at the provider level. When supplied, both base rates
+/// are explicit so cost comparisons never silently treat a missing component
+/// as free. A model-specific entry takes precedence over the provider default.
+///
+/// Cached-input rates are separately optional because providers publish them
+/// independently. An unset cached rate means the discounted price is unknown:
+/// those tokens then contribute nothing to the estimate, keeping the total an
+/// honest lower bound instead of billing cached traffic at the full rate.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct ModelPricing {
     #[serde(alias = "inputPerMillionTokens")]
@@ -212,23 +217,70 @@ pub struct ModelPricing {
 
     #[serde(alias = "outputPerMillionTokens")]
     pub output_per_million_tokens: f64,
+
+    /// Discounted rate for cache-read (cached input) tokens.
+    #[serde(
+        default,
+        alias = "cacheReadPerMillionTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_read_per_million_tokens: Option<f64>,
+
+    /// Surcharged rate for cache-creation (cache write) tokens.
+    #[serde(
+        default,
+        alias = "cacheCreationPerMillionTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_creation_per_million_tokens: Option<f64>,
 }
 
 impl ModelPricing {
-    /// Estimate the request cost for the supplied token counts.
-    /// Invalid negative or non-finite rates are treated as unpriced.
+    /// Estimate the request cost for the supplied token counts, treating the
+    /// whole input volume as uncached. Invalid negative or non-finite base
+    /// rates are treated as unpriced.
     pub fn estimate_request_cost_usd(&self, input_tokens: u64, output_tokens: u64) -> Option<f64> {
-        if !self.input_per_million_tokens.is_finite()
-            || !self.output_per_million_tokens.is_finite()
-            || self.input_per_million_tokens < 0.0
-            || self.output_per_million_tokens < 0.0
+        self.estimate_request_cost_usd_with_cache(input_tokens, 0, 0, output_tokens)
+    }
+
+    /// Estimate the request cost with the cached share of the prompt split out.
+    ///
+    /// `uncached_input_tokens` must exclude `cache_read_tokens` and
+    /// `cache_creation_tokens`; callers subtract the provider-reported cached
+    /// counts from the total prompt volume first. Cached tokens are billed at
+    /// their configured rates when present. An unset or invalid cached rate
+    /// contributes zero so the estimate stays a lower bound of the true cost.
+    pub fn estimate_request_cost_usd_with_cache(
+        &self,
+        uncached_input_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+        output_tokens: u64,
+    ) -> Option<f64> {
+        fn valid_rate(rate: f64) -> bool {
+            rate.is_finite() && rate >= 0.0
+        }
+
+        if !valid_rate(self.input_per_million_tokens) || !valid_rate(self.output_per_million_tokens)
         {
             return None;
         }
 
-        let estimated = (input_tokens as f64 * self.input_per_million_tokens
+        let mut estimated = (uncached_input_tokens as f64 * self.input_per_million_tokens
             + output_tokens as f64 * self.output_per_million_tokens)
             / 1_000_000.0;
+        if let Some(rate) = self
+            .cache_read_per_million_tokens
+            .filter(|r| valid_rate(*r))
+        {
+            estimated += cache_read_tokens as f64 * rate / 1_000_000.0;
+        }
+        if let Some(rate) = self
+            .cache_creation_per_million_tokens
+            .filter(|r| valid_rate(*r))
+        {
+            estimated += cache_creation_tokens as f64 * rate / 1_000_000.0;
+        }
         estimated.is_finite().then_some(estimated)
     }
 }

@@ -23,8 +23,8 @@ use super::{
     FRONTEND_REQUEST_LATENCY, INPUT_TOKENS_TOTAL, METRIC_FRONTEND_REQUEST_DURATION_SECONDS,
     METRIC_OUTPUT_TOKENS_PER_SECOND, METRIC_REQUEST_DURATION_SECONDS, METRIC_TTFT_SECONDS,
     OUTPUT_TOKENS_PER_SECOND, OUTPUT_TOKENS_TOTAL, REQUESTS_TOTAL, REQUEST_DURATION,
-    TOKEN_DRIFT_STATE, TOTAL_FAILURES, TOTAL_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_REQUESTS,
-    TTFT_SECONDS,
+    TOKEN_DRIFT_STATE, TOTAL_CACHE_CREATION_TOKENS, TOTAL_CACHE_READ_TOKENS, TOTAL_FAILURES,
+    TOTAL_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_REQUESTS, TTFT_SECONDS,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -91,10 +91,19 @@ pub async fn token_audit_handler() -> impl IntoResponse {
 pub struct UsageSummary {
     pub total_requests: u64,
     pub total_failures: u64,
+    /// Full prompt-side token volume, including the cached share reported by
+    /// providers. The cache splits below are subsets of this total.
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    /// Prompt tokens served from provider prompt caches (cache reads).
+    #[serde(default)]
+    pub total_cache_read_tokens: u64,
+    /// Prompt tokens written into provider prompt caches (cache creation).
+    #[serde(default)]
+    pub total_cache_creation_tokens: u64,
     /// Estimated USD cost summed across priced tiers. Unpriced tiers (no
-    /// configured `model_pricing`) contribute nothing, so this is a lower
+    /// configured `model_pricing`) contribute nothing, and cached tokens are
+    /// billed only when a cached rate is configured, so this is a lower
     /// bound when some providers lack pricing.
     pub total_cost_usd: f64,
     pub active_streams: f64,
@@ -302,6 +311,8 @@ pub async fn usage_handler() -> impl IntoResponse {
         total_failures: TOTAL_FAILURES.load(Ordering::Relaxed),
         total_input_tokens: TOTAL_INPUT_TOKENS.load(Ordering::Relaxed),
         total_output_tokens: TOTAL_OUTPUT_TOKENS.load(Ordering::Relaxed),
+        total_cache_read_tokens: TOTAL_CACHE_READ_TOKENS.load(Ordering::Relaxed),
+        total_cache_creation_tokens: TOTAL_CACHE_CREATION_TOKENS.load(Ordering::Relaxed),
         total_cost_usd,
         active_streams: ACTIVE_STREAMS.get(),
         active_requests: ACTIVE_REQUESTS.get(),
