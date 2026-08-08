@@ -10,6 +10,33 @@ use std::sync::Arc;
 
 use crate::debug_capture::DebugCaptureConfig;
 
+const REASONING_EFFORT_VALUES: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Validate cross-field provider requirements before the router accepts traffic.
+fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
+    for provider in providers {
+        let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
+            continue;
+        };
+        if provider.protocol != ProviderProtocol::Openai {
+            anyhow::bail!(
+                "provider '{}' force_reasoning_effort requires protocol 'openai'",
+                provider.name
+            );
+        }
+        if !REASONING_EFFORT_VALUES.contains(&reasoning_effort) {
+            anyhow::bail!(
+                "provider '{}' has invalid force_reasoning_effort '{}'; expected one of: {}",
+                provider.name,
+                reasoning_effort,
+                REASONING_EFFORT_VALUES.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Named routing preset with optional parameter overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PresetConfig {
@@ -171,6 +198,7 @@ impl Config {
             });
         let file: ConfigFile =
             serde_json::from_str(&content).context("Failed to parse config JSON")?;
+        validate_provider_contracts(&file.providers)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
         let mut client_builder = reqwest::Client::builder()
@@ -548,6 +576,57 @@ mod tests {
             }"#,
         );
         assert_eq!(p.protocol, ProviderProtocol::Responses);
+    }
+
+    #[test]
+    fn provider_with_forced_reasoning_effort() {
+        let p = parse_provider(
+            r#"{
+                "name": "upstage",
+                "api_base_url": "https://api.upstage.ai/v1",
+                "api_key": "up-test",
+                "models": ["solar-pro4"],
+                "force_reasoning_effort": "max"
+            }"#,
+        );
+
+        assert_eq!(p.force_reasoning_effort.as_deref(), Some("max"));
+        validate_provider_contracts(&[p]).unwrap();
+    }
+
+    #[test]
+    fn forced_reasoning_effort_requires_openai_protocol() {
+        let p = parse_provider(
+            r#"{
+                "name": "bad-responses",
+                "api_base_url": "https://api.example.test/v1",
+                "api_key": "test",
+                "models": ["model"],
+                "protocol": "responses",
+                "force_reasoning_effort": "max"
+            }"#,
+        );
+
+        let error = validate_provider_contracts(&[p]).unwrap_err();
+
+        assert!(error.to_string().contains("requires protocol 'openai'"));
+    }
+
+    #[test]
+    fn forced_reasoning_effort_rejects_unknown_values() {
+        let p = parse_provider(
+            r#"{
+                "name": "bad-effort",
+                "api_base_url": "https://api.example.test/v1",
+                "api_key": "test",
+                "models": ["model"],
+                "force_reasoning_effort": "maximum"
+            }"#,
+        );
+
+        let error = validate_provider_contracts(&[p]).unwrap_err();
+
+        assert!(error.to_string().contains("invalid force_reasoning_effort"));
     }
 
     #[test]

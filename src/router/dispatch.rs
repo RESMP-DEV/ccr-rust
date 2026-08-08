@@ -451,6 +451,38 @@ pub(super) fn provider_openai_chat_completions_url(provider: &crate::config::Pro
     provider_endpoint_url(provider, "chat/completions")
 }
 
+/// Apply validated provider-level request requirements immediately before dispatch.
+fn apply_provider_request_overrides(
+    provider: &crate::config::Provider,
+    request: &mut serde_json::Value,
+) -> Result<(), TryRequestError> {
+    let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
+        return Ok(());
+    };
+    if provider.protocol != ProviderProtocol::Openai {
+        return Err(TryRequestError::Other(anyhow::anyhow!(
+            "provider '{}' force_reasoning_effort requires protocol 'openai'",
+            provider.name
+        )));
+    }
+    let object = request.as_object_mut().ok_or_else(|| {
+        TryRequestError::Other(anyhow::anyhow!(
+            "provider '{}' request override requires a JSON object",
+            provider.name
+        ))
+    })?;
+    object.insert(
+        "reasoning_effort".to_string(),
+        serde_json::Value::String(reasoning_effort.to_string()),
+    );
+    trace!(
+        provider = %provider.name,
+        reasoning_effort,
+        "forced provider reasoning effort"
+    );
+    Ok(())
+}
+
 pub(super) fn provider_anthropic_messages_url(provider: &crate::config::Provider) -> String {
     provider_endpoint_url(provider, "messages")
 }
@@ -678,7 +710,7 @@ pub(super) async fn try_request_via_openai_protocol(
             object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
         }
     }
-    let (request_value, stream_flag) = if provider.protocol == ProviderProtocol::Responses {
+    let (mut request_value, stream_flag) = if provider.protocol == ProviderProtocol::Responses {
         (
             openai_chat_request_to_responses(&openai_request_value, model_name)
                 .map_err(TryRequestError::Other)?,
@@ -687,6 +719,7 @@ pub(super) async fn try_request_via_openai_protocol(
     } else {
         (openai_request_value, stream_flag)
     };
+    apply_provider_request_overrides(provider, &mut request_value)?;
 
     // Set up capture if enabled for this provider
     let capture_builder = if let Some(ref capture) = debug_capture {
@@ -1387,6 +1420,41 @@ mod tests {
 
         assert_eq!(headers.get("authorization").unwrap(), "Bearer ak-test");
         assert!(headers.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn provider_reasoning_effort_override_is_forced() {
+        let provider: Provider = serde_json::from_value(serde_json::json!({
+            "name": "upstage",
+            "api_base_url": "https://api.upstage.ai/v1",
+            "api_key": "up-test",
+            "models": ["solar-pro4"],
+            "force_reasoning_effort": "max"
+        }))
+        .unwrap();
+        let mut request = serde_json::json!({"reasoning_effort": "low"});
+
+        apply_provider_request_overrides(&provider, &mut request).unwrap();
+
+        assert_eq!(request["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn provider_reasoning_effort_override_rejects_non_openai_protocol() {
+        let provider: Provider = serde_json::from_value(serde_json::json!({
+            "name": "test-responses",
+            "api_base_url": "https://api.example.test/v1",
+            "api_key": "test",
+            "models": ["model"],
+            "protocol": "responses",
+            "force_reasoning_effort": "max"
+        }))
+        .unwrap();
+        let mut request = serde_json::json!({});
+
+        let error = apply_provider_request_overrides(&provider, &mut request).unwrap_err();
+
+        assert!(error.to_string().contains("requires protocol 'openai'"));
     }
 
     #[test]
