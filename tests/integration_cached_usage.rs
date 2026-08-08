@@ -410,6 +410,152 @@ async fn openai_cached_tokens_priced_at_cached_rate() {
     );
 }
 
+async fn run_openai_stream_usage_case(
+    tier_name: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cached_tokens: u64,
+) -> serde_json::Value {
+    let mock_server = MockServer::start().await;
+    let sse_body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "chatcmpl-stream-cached",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": "claude-sonnet-4-6",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": "Hello"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-stream-cached",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": "claude-sonnet-4-6",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens.saturating_add(completion_tokens),
+                "prompt_tokens_details": {"cached_tokens": cached_tokens}
+            }
+        })
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config_json = json!({
+        "Providers": [{
+            "name": tier_name,
+            "api_base_url": mock_server.uri(),
+            "api_key": "test-key",
+            "models": ["claude-sonnet-4-6"],
+            "pricing": {
+                "input_per_million_tokens": 3.0,
+                "output_per_million_tokens": 15.0,
+                "cache_read_per_million_tokens": 0.3
+            }
+        }],
+        "Router": {"default": format!("{tier_name},claude-sonnet-4-6")},
+        "API_TIMEOUT_MS": 5000
+    });
+    let config_file = write_config_file(&config_json);
+    let config = ccr_rust::config::Config::from_file(config_file.path().to_str().unwrap()).unwrap();
+    let app = build_app(config);
+    let message_content = if prompt_tokens == 0 && cached_tokens > 0 {
+        "alpha beta gamma delta ".repeat(1000)
+    } else {
+        "Say hello from the streaming test".to_string()
+    };
+    let request_body = json!({
+        "model": format!("{tier_name},claude-sonnet-4-6"),
+        "messages": [{"role": "user", "content": message_content}],
+        "max_tokens": 100,
+        "stream": true
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    // Draining the body waits for the stream task to record usage and drop its
+    // sole sender, so the metrics snapshot is complete here.
+    let summary = fetch_usage_summary().await;
+    find_tier(&summary, tier_name).expect("streaming tier recorded")
+}
+
+#[tokio::test]
+async fn openai_stream_cached_tokens_are_recorded_and_discounted() {
+    if skip_if_localhost_bind_unavailable("openai_stream_cached_tokens_are_recorded_and_discounted")
+    {
+        return;
+    }
+    let tier = run_openai_stream_usage_case("cache-openai-stream-probe", 1000, 100, 800).await;
+    assert_eq!(tier["input_tokens"], 1000);
+    assert_eq!(tier["output_tokens"], 100);
+    assert_eq!(tier["cache_read_tokens"], 800);
+    let cost = tier["cost_usd"].as_f64().unwrap();
+    assert!(approx_eq(cost, 2340e-6), "got {cost}");
+}
+
+#[tokio::test]
+async fn openai_stream_zero_prompt_tokens_use_the_local_estimate() {
+    if skip_if_localhost_bind_unavailable("openai_stream_zero_prompt_tokens_use_the_local_estimate")
+    {
+        return;
+    }
+    let tier_name = "cache-openai-stream-fallback";
+    let tier = run_openai_stream_usage_case(tier_name, 0, 5, 800).await;
+    let input_tokens = tier["input_tokens"].as_u64().unwrap_or(0);
+    assert!(input_tokens > 800);
+    assert_eq!(tier["output_tokens"], 5);
+    assert_eq!(tier["cache_read_tokens"], 800);
+    let expected_cost =
+        ((input_tokens - 800) as f64 * 3.0 + 800.0 * 0.3 + 5.0 * 15.0) / 1_000_000.0;
+    let cost = tier["cost_usd"].as_f64().unwrap();
+    assert!(approx_eq(cost, expected_cost), "got {cost}");
+
+    let drift_response =
+        axum::response::IntoResponse::into_response(ccr_rust::metrics::token_drift_handler().await);
+    let drift_bytes = axum::body::to_bytes(drift_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let drift: serde_json::Value = serde_json::from_slice(&drift_bytes).unwrap();
+    assert!(
+        drift
+            .as_array()
+            .is_some_and(|entries| entries.iter().all(|entry| entry["tier"] != tier_name)),
+        "zero upstream prompt usage must not create a false drift sample"
+    );
+}
+
 #[test]
 fn usage_summary_deserializes_legacy_payload_without_cache_totals() {
     // A dashboard binary newer than the running service must tolerate a

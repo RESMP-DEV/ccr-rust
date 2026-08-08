@@ -33,9 +33,9 @@ use super::{
     METRIC_TOKEN_DRIFT_PCT, OUTPUT_TOKENS_TOTAL, PEAK_ACTIVE_STREAMS, PRE_REQUEST_TOKENS,
     PRE_REQUEST_TOKENS_BUCKETS, RATE_LIMIT_HITS, REJECTED_STREAMS, REQUESTS_TOTAL,
     REQUEST_DURATION_BUCKETS, STREAM_BACKPRESSURE, TIER_EWMA_LATENCY, TOKEN_DRIFT_ABS,
-    TOKEN_DRIFT_ALERTS, TOKEN_DRIFT_PCT, TOKEN_DRIFT_STATE, TOTAL_CACHE_CREATION_TOKENS,
-    TOTAL_CACHE_READ_TOKENS, TOTAL_FAILURES, TOTAL_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS,
-    TOTAL_REQUESTS,
+    TOKEN_DRIFT_ALERTS, TOKEN_DRIFT_PCT, TOKEN_DRIFT_SEMANTICS_VERSION, TOKEN_DRIFT_STATE,
+    TOTAL_CACHE_CREATION_TOKENS, TOTAL_CACHE_READ_TOKENS, TOTAL_FAILURES, TOTAL_INPUT_TOKENS,
+    TOTAL_OUTPUT_TOKENS, TOTAL_REQUESTS,
 };
 
 static REDIS_RUNTIME: OnceLock<RedisRuntime> = OnceLock::new();
@@ -391,7 +391,7 @@ fn load_snapshot(conn: &mut redis::Connection, prefix: &str) -> Result<RedisSnap
         .hgetall(redis_token_drift_state_key(prefix))
         .unwrap_or_default();
     for (tier, raw) in drift_raw {
-        if let Ok(entry) = serde_json::from_str::<TokenDriftEntry>(&raw) {
+        if let Some(entry) = decode_current_token_drift_entry(&raw) {
             snapshot.token_drift_state.insert(tier, entry);
         }
     }
@@ -628,6 +628,11 @@ fn redis_hist_bucket_key(prefix: &str, metric: &str, bound: &str) -> String {
 
 fn redis_token_drift_state_key(prefix: &str) -> String {
     format!("{}:state:token-drift", prefix)
+}
+
+fn decode_current_token_drift_entry(raw: &str) -> Option<TokenDriftEntry> {
+    let entry = serde_json::from_str::<TokenDriftEntry>(raw).ok()?;
+    (entry.semantics_version == TOKEN_DRIFT_SEMANTICS_VERSION).then_some(entry)
 }
 
 fn redis_token_audit_list_key(prefix: &str) -> String {
@@ -890,5 +895,33 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
             }
             metric_families.push(family);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_token_drift_state_is_not_mixed_with_current_semantics() {
+        let legacy = r#"{"local_sum":100,"upstream_sum":80,"samples":2,"last_drift_pct":25.0,"last_local":50,"last_upstream":40}"#;
+        assert!(decode_current_token_drift_entry(legacy).is_none());
+    }
+
+    #[test]
+    fn current_token_drift_state_round_trips() {
+        let entry = TokenDriftEntry {
+            semantics_version: TOKEN_DRIFT_SEMANTICS_VERSION,
+            local_sum: 100,
+            upstream_sum: 120,
+            samples: 2,
+            last_drift_pct: -20.0,
+            last_local: 50,
+            last_upstream: 60,
+        };
+        let raw = serde_json::to_string(&entry).unwrap();
+        let decoded = decode_current_token_drift_entry(&raw).expect("current state");
+        assert_eq!(decoded.semantics_version, TOKEN_DRIFT_SEMANTICS_VERSION);
+        assert_eq!(decoded.upstream_sum, 120);
     }
 }

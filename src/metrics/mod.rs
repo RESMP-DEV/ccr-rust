@@ -259,9 +259,12 @@ pub struct PreRequestAuditEntry {
 /// Percentage thresholds for drift severity classification.
 const DRIFT_WARN_PCT: f64 = 10.0;
 const DRIFT_ALERT_PCT: f64 = 25.0;
+const TOKEN_DRIFT_SEMANTICS_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TokenDriftEntry {
+    #[serde(default)]
+    semantics_version: u8,
     local_sum: u64,
     upstream_sum: u64,
     samples: u64,
@@ -741,6 +744,7 @@ pub fn verify_token_usage(tier: &str, local_estimate: u64, upstream_input: u64) 
     let mut guard = TOKEN_DRIFT_STATE.write();
     let state = guard.get_or_insert_with(HashMap::new);
     let entry = state.entry(tier.to_string()).or_insert(TokenDriftEntry {
+        semantics_version: TOKEN_DRIFT_SEMANTICS_VERSION,
         local_sum: 0,
         upstream_sum: 0,
         samples: 0,
