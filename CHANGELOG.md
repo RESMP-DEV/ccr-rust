@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added a Jina MCP tool (`web_search_jina`, `web_fetch_jina`) registered on the
+  daemon when `JINA_API_KEY` is set, providing live web search (`s.jina.ai`)
+  and URL reading (`r.jina.ai`) to dispatched agents. Every request carries
+  real-time cache-bypass and privacy headers (`X-No-Cache`, `X-Ttl: 0`, `DNT`,
+  `X-No-Track`) so bursty workloads do not trip cache-abuse heuristics. This
+  completes the AlphaHENG-side readiness contract that expected these exact
+  tool names when the key was configured.
+
 ### Added
 
 - **Forced provider reasoning effort** — OpenAI-compatible providers may set

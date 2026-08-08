@@ -651,6 +651,9 @@ async fn main() -> Result<()> {
                 memory_dir: memory_dir.map(std::path::PathBuf::from),
                 pyright_root: pyright_root.map(std::path::PathBuf::from),
                 pyright_workspace_dir: pyright_workspace_dir.map(std::path::PathBuf::from),
+                jina_api_key: None,
+                jina_search_base: None,
+                jina_reader_base: None,
             })
             .await?;
         }
