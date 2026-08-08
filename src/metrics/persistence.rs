@@ -922,6 +922,11 @@ mod tests {
         let raw = serde_json::to_string(&entry).unwrap();
         let decoded = decode_current_token_drift_entry(&raw).expect("current state");
         assert_eq!(decoded.semantics_version, TOKEN_DRIFT_SEMANTICS_VERSION);
+        assert_eq!(decoded.local_sum, 100);
         assert_eq!(decoded.upstream_sum, 120);
+        assert_eq!(decoded.samples, 2);
+        assert_eq!(decoded.last_drift_pct, -20.0);
+        assert_eq!(decoded.last_local, 50);
+        assert_eq!(decoded.last_upstream, 60);
     }
 }
