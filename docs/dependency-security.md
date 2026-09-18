@@ -18,7 +18,7 @@ through Sindexer. The reviewed Sindexer Git revision remains unchanged.
 
 ### Automated exception enforcement
 
-Both CI and the release audit job install OSV-Scanner 2.6.0 and run:
+The tag-triggered release audit job installs OSV-Scanner 2.6.0 and runs:
 
 ```bash
 osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
@@ -27,6 +27,18 @@ osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
 The explicit lockfile input also works in checkouts beneath hidden directories.
 The release build depends on this audit job. OSV complements the existing
 RustSec and cargo-deny checks; neither of those reads `osv-scanner.toml`.
+
+The GitHub push/pull-request CI workflow has been removed. Before submitting
+changes, run the local validation commands:
+
+```bash
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+cargo audit --file Cargo.lock
+cargo deny check
+osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
+```
 
 OSV-Scanner 2.6.0 honors `IgnoredVulns.ignoreUntil` without any experimental
 flag. A live scan of `paste` 1.0.15 with its exception dated 2026-10-01

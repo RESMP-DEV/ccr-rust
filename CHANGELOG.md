@@ -13,10 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Removed the GitHub push/pull-request CI workflow. Formatting, Clippy, tests,
+  and dependency audits remain local validation steps; tag-triggered release
+  audits and builds remain enabled.
+
 - Updated locked Rustls to 0.23.45 and WebPKI to 0.103.15 to fix
-  RUSTSEC-2026-0285. CI and release audits now run OSV-Scanner 2.6.0 against
+  RUSTSEC-2026-0285. Release audits now run OSV-Scanner 2.6.0 against
   the committed lockfile and expiring exception policy, so expired exceptions
-  and new OSV findings block those workflows.
+  and new OSV findings block releases.
 
 - Updated the locked `h2` transport dependency from 0.4.13 to 0.4.18 to fix
   RUSTSEC-2026-0258, which allowed peers to queue unbounded empty HTTP/2 DATA
