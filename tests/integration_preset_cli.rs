@@ -68,6 +68,8 @@ async fn cli_dispatches_named_presets_and_rejects_unknown_routes() {
     )
     .unwrap();
 
+    let log_path = directory.path().join("server.log");
+    let log = std::fs::File::create(&log_path).unwrap();
     drop(listener);
     let mut server = ServerProcess(
         Command::new(env!("CARGO_BIN_EXE_ccr-rust"))
@@ -82,8 +84,8 @@ async fn cli_dispatches_named_presets_and_rejects_unknown_routes() {
                     .into_iter()
                     .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
             )
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log))
             .spawn()
             .expect("start CCR CLI"),
     );
@@ -93,19 +95,26 @@ async fn cli_dispatches_named_presets_and_rejects_unknown_routes() {
         .build()
         .unwrap();
     let base = format!("http://127.0.0.1:{port}");
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let readiness = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            assert!(server.0.try_wait().unwrap().is_none(), "CLI exited early");
+            if let Some(status) = server.0.try_wait().unwrap() {
+                return Err(format!("CLI exited early: {status}"));
+            }
             if let Ok(response) = client.get(format!("{base}/health")).send().await {
                 if response.status().is_success() {
-                    break;
+                    return Ok(());
                 }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("CLI health deadline");
+    .await;
+    assert!(
+        matches!(readiness, Ok(Ok(()))),
+        "CLI health failed: {readiness:?}\n{}",
+        std::fs::read_to_string(&log_path)
+            .unwrap_or_else(|error| format!("read server log: {error}"))
+    );
 
     let listing: serde_json::Value = client
         .get(format!("{base}/v1/presets"))
