@@ -73,6 +73,11 @@ Prebuilt release binaries are not published yet — build from source or use Doc
 
 ## Quickstart
 
+Already set up locally? See [Local operation and agent use](docs/local-operation.md)
+for `claude-ccr`, `codex-ccr`, service control, and verification. To keep personal
+and corporate plans separate, follow [Authentication suites](docs/auth-suites.md).
+The complete [documentation index](docs/index.md) covers setup and operations.
+
 This gets a router running locally with one provider in about two minutes.
 
 ### 1. Install
@@ -144,9 +149,9 @@ curl -s http://127.0.0.1:3456/v1/messages \
 ### 5. Point your coding tool at CCR-Rust
 
 ```bash
-# Claude Code
-export ANTHROPIC_BASE_URL=http://127.0.0.1:3456
-claude
+# Claude Code: opt in for this command only
+ANTHROPIC_BASE_URL=http://127.0.0.1:3456 \
+ANTHROPIC_AUTH_TOKEN=ccr-local ANTHROPIC_API_KEY=ccr-local claude
 
 # Codex (configure CCR-Rust as a custom provider first)
 # See docs/codex_setup.md for the current config.toml settings.
@@ -157,7 +162,10 @@ codex --profile ccr
 # provider configuration; the exact setting varies by client.
 ```
 
-If Claude Code complains about a missing `ANTHROPIC_API_KEY`, keep that variable set to any non-empty value locally — CCR-Rust uses the upstream provider keys from its own config file, not the one from your client.
+The local client token above is a placeholder. CCR uses the upstream provider
+keys from its own config; its HTTP listener does not authenticate clients.
+Keep it on loopback. Ordinary `claude` and `codex` launches retain their existing
+configuration. See the client guides for model overrides and profile formats.
 
 More examples (multi-tier failover, presets, a smoke-test script) live in [`examples/`](examples/).
 

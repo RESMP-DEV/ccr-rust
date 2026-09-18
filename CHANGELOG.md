@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Documented opt-in local Claude Code/Codex operation and agent instructions,
+  including the dated live tool-loop acceptance. Added separate API-plan and
+  native-login suite recipes with observed credential isolation and shared-tier
+  fallback behavior. Corrected client setup guidance for credential loading,
+  Codex profile formats, and verification limits.
+
 - Removed the GitHub push/pull-request CI workflow. Formatting, Clippy, tests,
   and dependency audits remain local validation steps; tag-triggered release
   audits and builds remain enabled.

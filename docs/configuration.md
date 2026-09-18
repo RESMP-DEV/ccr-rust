@@ -1,5 +1,9 @@
 # CCR-Rust Configuration
 
+For opt-in client launches and service operation, see [Local operation](local-operation.md).
+For separate personal/corporate credentials, see [Authentication suites](auth-suites.md);
+multiple provider entries in a shared fallback list do not isolate accounts.
+
 ## Config File Location
 
 CCR-Rust reads its configuration from a JSON file. The location is determined by:
@@ -42,6 +46,13 @@ ccr-rust start
 
 If you prefer keeping keys in a `.env` file, load it into the shell first
 (e.g. `set -a; . ~/.claude-code-router/.env; set +a`) before starting CCR-Rust.
+
+Check every required variable for a nonempty value before startup, without
+printing it (for example, `: "${GEMINI_API_KEY:?Missing GEMINI_API_KEY}"`).
+If expansion fails, the current loader warns and retains the raw config;
+`validate` alone therefore does not prove credentials were loaded or accepted
+by a provider. A sourced `.env` is executable shell code: use only a trusted,
+private file.
 
 ### Security Best Practice
 
