@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added Kimi/GLM plan-switching instructions and a two-provider example, with
+  live client verification and the existing `maxtoken` transformer needed for
+  Codex-to-Kimi Anthropic requests. Refreshed Kimi/Z.AI endpoint and credential
+  guidance and corrected the documented preset API, precedence, and limits.
+  Updated the multi-tier sample and removed an undefined provider from the
+  root example's default route.
+- Fixed named preset URL registration for Axum 0.7, so requests to
+  `/preset/NAME/v1/messages` reach the preset handler instead of returning 404.
+  Added coverage against the actual CLI server for dispatch, parameter
+  precedence, missing presets, and unsupported preset transports.
+
 - Documented opt-in local Claude Code/Codex operation and agent instructions,
   including the dated live tool-loop acceptance. Added separate API-plan and
   native-login suite recipes with observed credential isolation and shared-tier

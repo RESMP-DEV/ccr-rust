@@ -4,6 +4,8 @@ Select CCR explicitly for a session. Keep ordinary `codex` launches on their
 existing provider. On the configured workstation, use `codex-ccr`; see
 [Local operation](local-operation.md) for service commands and the dated live
 client test. For personal/corporate accounts, use [Authentication suites](auth-suites.md).
+For Kimi/GLM route selection, named profiles, and provider-specific requirements,
+see [Switching plans](switching-plans.md#codex-select-a-route-or-save-a-profile).
 
 The September 17, 2026 live tool-loop test used the local Codex development
 build `0.0.0` with a Responses upstream. Other versions/providers need their

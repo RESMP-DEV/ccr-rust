@@ -71,10 +71,9 @@
         }
     ],
     "Router": {
-        "default": "wafer,Qwen3.5-397B-A17B",
+        "default": "deepseek,deepseek-reasoner",
         "background": "deepseek,deepseek-chat",
         "tiers": [
-            "wafer,Qwen3.5-397B-A17B",
             "deepseek,deepseek-reasoner",
             "minimax,MiniMax-M2.7",
             "openrouter,inclusionai/ling-2.6-flash:free"
