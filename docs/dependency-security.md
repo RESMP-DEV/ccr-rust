@@ -6,6 +6,45 @@ must expire so the live graph is reviewed again. `cargo audit` and `cargo deny
 check` continue to report the graph, and newly actionable vulnerabilities
 remain release blockers.
 
+## 2026-09-17 review
+
+### `rustls` RUSTSEC-2026-0285
+
+Resolved. `Cargo.lock` pins `rustls` 0.23.45 and its required
+`rustls-webpki` 0.103.15 update. Rustls previously accepted TLS 1.3 handshake
+messages across encryption-level boundaries. The locked 0.23.39 release was
+affected; 0.23.45 is the advisory's fixed floor. Reqwest reaches this TLS stack
+through Sindexer. The reviewed Sindexer Git revision remains unchanged.
+
+### Automated exception enforcement
+
+Both CI and the release audit job install OSV-Scanner 2.6.0 and run:
+
+```bash
+osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
+```
+
+The explicit lockfile input also works in checkouts beneath hidden directories.
+The release build depends on this audit job. OSV complements the existing
+RustSec and cargo-deny checks; neither of those reads `osv-scanner.toml`.
+
+OSV-Scanner 2.6.0 honors `IgnoredVulns.ignoreUntil` without any experimental
+flag. A live scan of `paste` 1.0.15 with its exception dated 2026-10-01
+returned exit 0; the same scan with an expiry of 2020-01-01 returned exit 1
+and reported RUSTSEC-2024-0436. `--experimental-ignores` is not a supported
+option in this version. The existing exceptions still expire on 2026-10-01;
+this update does not extend them.
+
+### Remaining migrations
+
+The refreshed crates.io metadata shows Ratatui Core 0.1.2 supports `lru`
+0.18, but Tantivy 0.26.2 still requires `lru` 0.16.3. A dashboard-only
+update therefore cannot remove the affected cache implementation from the
+default Sindexer graph. Egobox GP 0.36.3 and Linfa PLS 0.8.1 still require
+`paste`. The existing risk decisions and follow-ups below remain applicable
+to the unchanged locked consumers. Redis 1.7.0 is available, but requires
+the separately tested persistence migration described below.
+
 ## 2026-08-23 review
 
 ### `h2` RUSTSEC-2026-0258
