@@ -1,0 +1,9 @@
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0253"
+ignoreUntil = 2026-10-01
+reason = "Both consumers require lru 0.16; reachable keys do not have panicking Drop implementations. See docs/dependency-security.md."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2026-10-01
+reason = "Unmaintained build-time macro in the current latest egobox-gp graph; no patched paste release exists. See docs/dependency-security.md."
