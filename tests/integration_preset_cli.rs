@@ -75,12 +75,20 @@ async fn cli_dispatches_named_presets_and_rejects_unknown_routes() {
             .args(["--host", "127.0.0.1", "--port", &port.to_string()])
             .current_dir(directory.path())
             .env_clear()
+            // Preserve OS initialization and diagnostics without inheriting
+            // router overrides, provider credentials, or proxy settings.
+            .envs(
+                ["SystemRoot", "WINDIR", "PATH", "RUST_BACKTRACE", "RUST_LOG"]
+                    .into_iter()
+                    .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("start CCR CLI"),
     );
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()
         .unwrap();

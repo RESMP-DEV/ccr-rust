@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live client verification and the existing `maxtoken` transformer needed for
   Codex-to-Kimi Anthropic requests. Refreshed Kimi/Z.AI endpoint and credential
   guidance and corrected the documented preset API, precedence, and limits.
+  Aligned native Claude suite cleanup with its background/subagent overrides.
   Updated the multi-tier sample and removed an undefined provider from the
   root example's default route.
 - Fixed named preset URL registration for Axum 0.7, so requests to
