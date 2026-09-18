@@ -78,6 +78,10 @@ for `claude-ccr`, `codex-ccr`, service control, and verification. To keep person
 and corporate plans separate, follow [Authentication suites](docs/auth-suites.md).
 The complete [documentation index](docs/index.md) covers setup and operations.
 
+Use [Switching coding plans](docs/switching-plans.md) to choose Kimi or Z.AI GLM
+per session, save Codex profiles, or configure deliberate fallback. A tested
+two-provider starting point is [examples/coding-plans.json](examples/coding-plans.json).
+
 This gets a router running locally with one provider in about two minutes.
 
 ### 1. Install

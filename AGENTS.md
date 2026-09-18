@@ -13,6 +13,13 @@ and [Authentication suites](docs/auth-suites.md). Keep CCR an **opt-in launch
 option**; do not replace normal Claude/Codex provider settings with global
 localhost overrides.
 
+For switching Kimi, Z.AI GLM, or another coding plan, follow
+[Switching plans](docs/switching-plans.md) and its tested example config.
+Use explicit `provider,model` routes; update Claude's background/subagent
+defaults as well as its main model. Kimi's Anthropic endpoint requires an
+output limit: keep the documented `maxtoken` transformer for Codex requests
+that omit one. Check actual client tool round trips after changing a plan.
+
 On the configured workstation, check `command -v ccr-local claude-ccr codex-ccr`
 before using these local helpers. They are not installed by Cargo. Use
 `claude-ccr` or `codex-ccr` for routed sessions. Other machines should follow

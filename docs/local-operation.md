@@ -4,6 +4,8 @@ Use CCR as an **opt-in launch option**. Keep ordinary `claude` and `codex`
 commands on their existing providers; select CCR explicitly for a session.
 For separate personal and corporate accounts, read [Authentication suites](auth-suites.md)
 before adding credentials or fallback routes.
+See [Switching plans](switching-plans.md) for Kimi/GLM commands and the
+configuration needed for Codex tool calls through Kimi.
 
 ## Existing workstation setup
 

@@ -459,7 +459,7 @@ async fn run_server(
         .route("/v1/responses", post(router::handle_responses))
         .route("/v1/models", get(router::list_models))
         .route(
-            "/preset/{name}/v1/messages",
+            "/preset/:name/v1/messages",
             post(router::handle_preset_messages),
         )
         .route("/v1/presets", get(router::list_presets))

@@ -11,6 +11,8 @@ if needed and selects the configured Z.AI route. See
 the dated live-client acceptance. Those helpers are not installed by Cargo.
 For personal/corporate API plans or Claude logins, use
 [Authentication suites](auth-suites.md).
+For Kimi/GLM launch recipes that set all model tiers together, see
+[Switching plans](switching-plans.md#claude-code-select-a-plan-for-a-new-session).
 
 ## Prepare the router
 
