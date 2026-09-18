@@ -14,6 +14,7 @@ pub mod router;
 pub mod routing;
 pub mod schema_validate;
 pub mod sse;
+pub mod telemetry;
 pub mod transform;
 pub mod transformer;
 pub mod turn_capture;

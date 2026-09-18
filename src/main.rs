@@ -5,7 +5,9 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use ccr_rust::telemetry;
 use clap::{Parser, Subcommand};
+use opentelemetry::trace::TracerProvider;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -13,7 +15,7 @@ use tokio::signal::ctrl_c;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 mod config {
     pub use ccr_rust::config::*;
@@ -477,6 +479,7 @@ async fn run_server(
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
+    let app = telemetry::instrument(app, telemetry::enabled());
 
     let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
     tracing::info!("CCR-Rust listening on {}", addr);
@@ -576,12 +579,26 @@ async fn check_status(host: &str, port: u16) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let telemetry_provider = tokio::task::spawn_blocking(telemetry::provider_from_env)
+        .await
+        .unwrap_or(None);
+    let telemetry_layer = telemetry_provider.as_ref().map(|provider| {
+        tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("ccr-rust"))
+            .with_location(false)
+            .with_threads(false)
+            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.target() == "ccr_telemetry"
+            }))
+    });
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ccr_rust=info,tower_http=info".into()),
+            tracing_subscriber::fmt::layer().with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "ccr_rust=info,tower_http=info".into()),
+            ),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(telemetry_layer)
         .init();
 
     let cli = Cli::parse();
@@ -665,6 +682,15 @@ async fn main() -> Result<()> {
             full,
         }) => {
             list_captures(&config_path, provider, limit, stats, output_dir, full)?;
+        }
+    }
+    if let Some(provider) = telemetry_provider {
+        let result = tokio::task::spawn_blocking(move || {
+            provider.shutdown_with_timeout(std::time::Duration::from_secs(3))
+        })
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            eprintln!("CCR telemetry shutdown timed out or failed; routing shutdown completed");
         }
     }
     Ok(())

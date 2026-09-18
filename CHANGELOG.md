@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added optional request tracing to a loopback OpenTelemetry Collector through
+  `CCR_OTEL_ENDPOINT`. Exported spans contain route templates, bounded methods,
+  response status and stream completion, with a bounded queue and timeout.
+  Request bodies, headers and raw URLs are excluded. Existing Prometheus
+  metrics remain independent of telemetry export.
+
 - Removed the GitHub push/pull-request CI workflow. Formatting, Clippy, tests,
   and dependency audits remain local validation steps; tag-triggered release
   audits and builds remain enabled.
