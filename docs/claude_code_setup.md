@@ -1,252 +1,118 @@
-# Claude Code fallback how-to
+# Claude Code through CCR
 
-This guide is for the most common real-world question:
+Keep Claude Code as the interface while using a provider configured in CCR.
+Routing through an API-key provider uses that provider's plan; it does not
+extend or transfer a Claude subscription. Select CCR explicitly for a session
+and keep ordinary `claude` launches on their existing configuration.
 
-> My Claude plan ran out. How do I keep using Claude Code without changing my whole workflow?
+On the configured workstation, run `claude-ccr`. It starts the local service
+if needed and selects the configured Z.AI route. See
+[Local operation](local-operation.md) for helper files, service commands, and
+the dated live-client acceptance. Those helpers are not installed by Cargo.
+For personal/corporate API plans or Claude logins, use
+[Authentication suites](auth-suites.md).
 
-CCR-Rust lets you keep **Claude Code as the interface** while routing requests to one or more backup providers behind the scenes.
+## Prepare the router
 
-## The short version
-
-1. Run CCR-Rust locally.
-2. Give it one or two provider API keys.
-3. Point Claude Code at `http://127.0.0.1:3456`.
-4. Keep typing `claude` like normal.
-
-Claude Code still speaks Anthropic format. CCR-Rust receives that request, picks a provider from your config, translates if needed, and returns a response in the format Claude Code expects.
-
-## Step 1: install CCR-Rust
-
-```bash
-cargo build --release
-cargo install --path . --force
-```
-
-If you have not installed Claude Code yet:
-
-```bash
-npm install -g @anthropic-ai/claude-code
-claude --version
-```
-
-## Step 2: create a simple fallback config
-
-Create the default config directory and copy the example file:
-
-```bash
-mkdir -p ~/.claude-code-router
-cp config.example.json ~/.claude-code-router/config.json
-```
-
-Then start with a **minimal backup-provider setup** like this:
+Build and install CCR, then create a config with one provider you have access
+to. See [Local operation](local-operation.md#set-up-another-machine) and
+[Configuration](configuration.md). An Anthropic-compatible Z.AI coding-plan
+endpoint can be configured as:
 
 ```json
 {
-  "Providers": [
-    {
-      "name": "deepseek",
-      "api_base_url": "https://api.deepseek.com",
-      "api_key": "${DEEPSEEK_API_KEY}",
-      "models": ["deepseek-chat", "deepseek-reasoner"]
-    },
-    {
-      "name": "openrouter",
-      "api_base_url": "https://openrouter.ai/api/v1",
-      "api_key": "${OPENROUTER_API_KEY}",
-      "models": [
-        "inclusionai/ling-2.6-flash:free",
-        "minimax/minimax-m2.5:free"
-      ],
-      "transformer": {
-        "use": ["anthropic", "openrouter"]
-      }
-    }
-  ],
+  "Providers": [{
+    "name": "zai",
+    "api_base_url": "https://api.z.ai/api/anthropic/v1",
+    "api_key": "${ZAI_API_KEY}",
+    "protocol": "anthropic",
+    "auth_header": "authorization",
+    "models": ["glm-5.3"]
+  }],
   "Router": {
-    "default": "deepseek,deepseek-chat",
-    "tiers": [
-      "deepseek,deepseek-chat",
-      "openrouter,inclusionai/ling-2.6-flash:free"
-    ]
+    "default": "zai,glm-5.3",
+    "tiers": ["zai,glm-5.3"]
   },
-  "PORT": 3456,
-  "HOST": "127.0.0.1"
+  "HOST": "127.0.0.1",
+  "PORT": 3456
 }
 ```
 
-### What this config means
+Verify the endpoint/model against your own plan. OpenAI-compatible providers
+can also be used; CCR translates Claude's Anthropic requests for them. Add
+provider-specific transformers only where the upstream needs them.
 
-- `Providers` lists the upstream APIs CCR-Rust is allowed to call.
-- `Router.default` is the first provider/model it should try.
-- `Router.tiers` is the fallback order.
-- The `openrouter` transformer chain tells CCR-Rust how to adapt Anthropic-style Claude Code requests for OpenRouter.
-
-If you only want one backup provider at first, that is fine. Start simple.
-
-## Step 3: add your provider keys
-
-Use environment variables in your shell or in a local `.env` file that CCR-Rust can load.
-
-Example:
+Load `ZAI_API_KEY` into the **router's** environment using your secret manager
+or a private, trusted shell file. CCR does not load `.env` itself. Before
+starting, check presence without printing the key:
 
 ```bash
-export DEEPSEEK_API_KEY="your-deepseek-key"
-export OPENROUTER_API_KEY="your-openrouter-key"
+: "${ZAI_API_KEY:?Load ZAI_API_KEY before starting CCR}"
+ccr-rust --config "$HOME/.claude-code-router/config.json" validate
+ccr-rust --config "$HOME/.claude-code-router/config.json" start --host 127.0.0.1 --port 3456
 ```
 
-CCR-Rust expands `${ENV_VAR}` placeholders from the config file at startup.
+In another terminal, verify `curl --fail http://127.0.0.1:3456/health`.
+Passing `validate` or health does not prove the provider accepts the key.
 
-## Step 4: start CCR-Rust
+## Opt in for one Claude session
 
 ```bash
-ccr-rust start
+ANTHROPIC_BASE_URL=http://127.0.0.1:3456 \
+ANTHROPIC_AUTH_TOKEN=ccr-local ANTHROPIC_API_KEY=ccr-local \
+ANTHROPIC_MODEL=zai,glm-5.3 \
+ANTHROPIC_DEFAULT_OPUS_MODEL=zai,glm-5.3 \
+ANTHROPIC_DEFAULT_SONNET_MODEL=zai,glm-5.3 \
+ANTHROPIC_DEFAULT_HAIKU_MODEL=zai,glm-5.3 claude
 ```
 
-Quick checks:
+The default model overrides keep secondary Claude requests on the chosen
+model. Replace every route above if using a different provider. These variables
+apply only to this process; avoid global localhost overrides in shell startup
+files or normal Claude settings.
 
-```bash
-ccr-rust status
-curl http://127.0.0.1:3456/health
-```
+The dummy client token satisfies client-side key requirements. CCR's HTTP
+listener does not authenticate clients; it chooses upstream credentials from
+its config. Keep it on loopback. A custom model name may produce an
+`unrecognized_model` warning in Claude; verify the actual request and tool
+behavior rather than treating the warning alone as failure.
 
-Expected health response:
+If your normal setup uses Bedrock, Vertex, Foundry, or another host-managed
+provider, inspect those client overrides too. This example assumes the ordinary
+Anthropic-compatible transport and does not override organization policies.
 
-```text
-ok
-```
+## Verify a real tool round trip
 
-## Step 5: point Claude Code at CCR-Rust
+Check `claude --version`, then use a disposable directory and the
+[file-reading probe](local-operation.md#prove-the-selected-path). Confirm
+Claude called `Read`, received the file contents, and returned the exact marker.
+Compare CCR frontend and per-tier metrics before and after. A successful curl
+or plain greeting is insufficient to claim Claude's tools work.
 
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"
-claude
-```
+Claude Code 2.1.276 completed this probe with the example Z.AI route on
+September 17, 2026. Repeat it when changing the CLI or provider.
 
-If your Claude Code version also insists on `ANTHROPIC_API_KEY` being present locally, keep that variable set too. CCR-Rust still uses the provider keys from `~/.claude-code-router/config.json`.
+## Fallback and account selection
 
-## Step 6: what happens now?
+Add providers to `Router.tiers` when fallback between them is intended. A 429
+stops attempts for that tier and allows later eligible tiers; if every candidate
+is rate-limited, CCR returns a 429.
 
-When you run `claude`, the flow looks like this:
-
-1. Claude Code sends an Anthropic-style request to CCR-Rust.
-2. CCR-Rust checks your routing config.
-3. It tries the first configured provider/model.
-4. If the upstream API uses a different format, CCR-Rust translates the request.
-5. It returns a Claude-compatible response back to Claude Code.
-
-So from your point of view, **you are still using Claude Code**. CCR-Rust is just the local layer deciding which model actually answers.
-
-## Step 7: get maximum value after Claude usage limits hit
-
-The easiest pattern is:
-
-- put a **cheap or free model first** for routine work,
-- keep a **better fallback model second** for when the first one is overloaded or weak,
-- and keep using Claude Code as the front-end you already know.
-
-Example mindset:
-
-- everyday edits: `deepseek,deepseek-chat`
-- backup: `openrouter,inclusionai/ling-2.6-flash:free`
-
-You can refine later. The important part is that you do **not** need to learn a new client every time you change providers.
-
-## Optional: prefer Anthropic first, then fall back
-
-If you also want CCR-Rust to try Anthropic first when available, add an Anthropic provider explicitly and mark it as Anthropic protocol:
-
-```json
-{
-  "name": "anthropic",
-  "api_base_url": "https://api.anthropic.com/v1/messages",
-  "api_key": "${ANTHROPIC_API_KEY}",
-  "protocol": "anthropic",
-  "models": ["claude-3-5-sonnet-20241022"]
-}
-```
-
-Then put it first in `Router.default` / `Router.tiers`.
-
-This is optional. Many people will get value from CCR-Rust even without using Anthropic as an upstream at all.
-
-## Common questions
-
-### “Why not just use another client directly?”
-
-Because the value here is keeping one interface:
-
-- same Claude Code workflow,
-- same editor habits,
-- same commands,
-- different providers behind the curtain.
-
-### “What does failover actually mean?”
-
-If the first provider errors or times out, CCR-Rust can try the next configured tier.
-
-That is why giving it at least two choices is useful.
-
-### “Do I need a huge config?”
-
-No. Start with one provider, then add one fallback. You can make it fancy later.
+An explicit `provider,model` selection already in the tier list retains other
+fallback candidates. Keep personal and corporate accounts in separate
+processes/configs if requests must not cross accounts. For native Claude
+subscription login switching, use separate Claude homes as described in
+[Authentication suites](auth-suites.md); CCR does not sign in to those plans.
 
 ## Troubleshooting
 
-### CCR-Rust is not running
+- Connection refused: verify service and client use the same host/port.
+- Authentication failure: check the router environment and upstream endpoint;
+  do not print provider keys or credential files.
+- Unexpected provider: inspect tiers and model/search overrides, then check
+  actual per-tier usage counters.
+- Tool failure: inspect the client trace, model tool support, and translation
+  path, including streaming and non-streaming where applicable.
 
-```bash
-ccr-rust status
-curl http://127.0.0.1:3456/health
-```
-
-If the health check fails, start it again:
-
-```bash
-ccr-rust start
-```
-
-### Claude Code cannot connect
-
-Check your base URL:
-
-```bash
-echo "$ANTHROPIC_BASE_URL"
-```
-
-For this guide it should be:
-
-```bash
-http://127.0.0.1:3456
-```
-
-### The provider key is missing or wrong
-
-Validate the config structure:
-
-```bash
-ccr-rust validate
-```
-
-Then make sure the provider environment variables are actually set:
-
-```bash
-echo "$DEEPSEEK_API_KEY"
-echo "$OPENROUTER_API_KEY"
-```
-
-### I want to see what CCR-Rust is doing
-
-Use the built-in status and observability tools:
-
-```bash
-ccr-rust status
-ccr-rust dashboard
-curl http://127.0.0.1:3456/metrics
-```
-
-## Where to go next
-
-- [Configuration](./configuration.md) — full config reference
-- [CLI reference](./cli.md) — available commands
-- [Troubleshooting](./troubleshooting.md) — deeper operational fixes
-- [Observability](./observability.md) — dashboard and metrics
+See [Observability](observability.md), [CLI reference](cli.md), and
+[Troubleshooting](troubleshooting.md) for more operational checks.
