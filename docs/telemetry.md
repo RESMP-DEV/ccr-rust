@@ -1,6 +1,8 @@
 # Optional OpenTelemetry export
 
 CCR keeps its local logs and Prometheus endpoint when telemetry is disabled.
+Build with `--features telemetry` (or `--all-features`) to include the exporter.
+Default builds omit its dependencies. Only server commands initialize it.
 To send minimal request spans to a local OpenTelemetry Collector, set:
 
 ```sh
@@ -8,6 +10,7 @@ CCR_OTEL_ENDPOINT=http://127.0.0.1:4318/v1/traces ccr-rust start
 ```
 
 Only literal loopback HTTP endpoints ending in `/v1/traces` are accepted.
+The exporter disables redirects and proxy discovery to preserve this boundary.
 Configure the Collector's Azure Monitor exporter with the Application Insights
 connection string; CCR does not need Azure credentials. The Collector can also
 scrape `http://127.0.0.1:3456/metrics` for existing request, token, cache,
@@ -18,9 +21,8 @@ template, HTTP status, and whether the body reached end of stream. They exclude
 raw URLs and query strings, path parameters, headers, request/response bodies,
 error strings, tool outputs, and source-file locations. Request spans last until
 the response body completes or is dropped; cancelled bodies remain incomplete.
-HTTP 4xx/5xx and body errors mark the span as an error. Empty bodies may be
-dropped without polling, so `stream.completed=false` alone does not prove a
-client cancellation. Trace completion measures body production, not receipt by
+HTTP 4xx/5xx and body errors mark the span as an error. Both end-of-stream polls
+and final-frame size hints record completion. Trace completion measures body production, not receipt by
 the remote client.
 
 Only the `ccr_telemetry` tracing target reaches the exporter. Local logging's

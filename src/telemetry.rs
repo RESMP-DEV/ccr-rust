@@ -1,43 +1,26 @@
 //! Optional, bounded export of deliberately minimal request spans to a local Collector.
-use axum::{body::Body, extract::MatchedPath, http::Request, Router};
-use opentelemetry_otlp::WithExportConfig;
+use axum::{
+    body::{Body, HttpBody},
+    extract::MatchedPath,
+    http::Request,
+    middleware::Next,
+    response::Response,
+    Router,
+};
+use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::{
     trace::{BatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider},
     Resource,
 };
 use std::{
+    pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
+    task::{Context, Poll},
     time::Duration,
 };
-use tower_http::{
-    classify::{ClassifiedResponse, ClassifyEos, ClassifyResponse, SharedClassifier},
-    trace::TraceLayer,
-};
-use tracing::{field::Empty, Span};
+use tracing::{field::Empty, Instrument, Span};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-
-// The stock HTTP status classifier finishes at headers and suppresses on_eos.
-// Wait for body completion without recording error strings or changing frames.
-#[derive(Clone)]
-struct CompletionClassifier;
-
-impl ClassifyResponse for CompletionClassifier {
-    type FailureClass = ();
-    type ClassifyEos = Self;
-    fn classify_response<B>(self, _: &axum::http::Response<B>) -> ClassifiedResponse<(), Self> {
-        ClassifiedResponse::RequiresEos(self)
-    }
-    fn classify_error<E: std::fmt::Display + 'static>(self, _: &E) {}
-}
-
-impl ClassifyEos for CompletionClassifier {
-    type FailureClass = ();
-    fn classify_eos(self, _: Option<&axum::http::HeaderMap>) -> Result<(), ()> {
-        Ok(())
-    }
-    fn classify_error<E: std::fmt::Display + 'static>(self, _: &E) {}
-}
 
 fn valid_endpoint(value: &str) -> bool {
     reqwest::Url::parse(value).is_ok_and(|url| {
@@ -54,12 +37,30 @@ fn valid_endpoint(value: &str) -> bool {
 /// Construct on a blocking thread: the SDK owns its bounded export worker.
 pub fn provider_from_env() -> Option<SdkTracerProvider> {
     let endpoint = std::env::var("CCR_OTEL_ENDPOINT").ok()?;
-    if !valid_endpoint(&endpoint) {
+    provider_for_endpoint(&endpoint)
+}
+
+/// Build the production exporter for an explicit loopback endpoint.
+pub fn provider_for_endpoint(endpoint: &str) -> Option<SdkTracerProvider> {
+    if !valid_endpoint(endpoint) {
         eprintln!("CCR telemetry disabled: endpoint must be a loopback HTTP /v1/traces URL");
         return None;
     }
+    let client = match reqwest_otel::blocking::Client::builder()
+        .redirect(reqwest_otel::redirect::Policy::none())
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            eprintln!("CCR telemetry disabled: HTTP client initialization failed");
+            return None;
+        }
+    };
     let exporter = match opentelemetry_otlp::SpanExporter::builder()
         .with_http()
+        .with_http_client(client)
         .with_endpoint(endpoint)
         .with_timeout(Duration::from_secs(2))
         .build()
@@ -117,28 +118,69 @@ pub fn instrument(app: Router, enabled: bool) -> Router {
     if !enabled {
         return app;
     }
-    app.layer(
-        TraceLayer::new(SharedClassifier::new(CompletionClassifier))
-            .make_span_with(request_span as fn(&Request<Body>) -> Span)
-            .on_request(())
-            .on_body_chunk(())
-            .on_response(
-                |response: &axum::http::Response<Body>, _: Duration, span: &Span| {
-                    span.record("http.response.status_code", response.status().as_u16());
-                    if response.status().is_client_error() || response.status().is_server_error() {
-                        span.record("otel.status_code", "ERROR");
-                    }
-                },
-            )
-            .on_eos(
-                |_: Option<&axum::http::HeaderMap>, _: Duration, span: &Span| {
-                    span.record("stream.completed", true);
-                },
-            )
-            .on_failure(|_: (), _: Duration, span: &Span| {
-                span.record("otel.status_code", "ERROR");
-            }),
+    app.layer(axum::middleware::from_fn(observe))
+}
+
+async fn observe(request: Request<Body>, next: Next) -> Response {
+    let span = request_span(&request);
+    let response = next.run(request).instrument(span.clone()).await;
+    span.record("http.response.status_code", response.status().as_u16());
+    if response.status().is_client_error() || response.status().is_server_error() {
+        span.record("otel.status_code", "ERROR");
+    }
+    if response.body().is_end_stream() {
+        span.record("stream.completed", true);
+    }
+    let (parts, inner) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::new(ObservedBody {
+            inner,
+            span,
+            failed: false,
+        }),
     )
+}
+
+// Forward every frame, error and size hint. Hyper can finish at the final frame
+// without polling None, so check is_end_stream after polling as well.
+struct ObservedBody {
+    inner: Body,
+    span: Span,
+    failed: bool,
+}
+
+impl HttpBody for ObservedBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        let _entered = this.span.enter();
+        let result = Pin::new(&mut this.inner).poll_frame(cx);
+        match &result {
+            Poll::Ready(Some(Err(_))) => {
+                this.failed = true;
+                this.span.record("otel.status_code", "ERROR");
+            }
+            Poll::Ready(None | Some(Ok(_))) if !this.failed && this.inner.is_end_stream() => {
+                this.span.record("stream.completed", true);
+            }
+            Poll::Ready(None) if !this.failed => {
+                this.span.record("stream.completed", true);
+            }
+            _ => {}
+        }
+        result
+    }
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 #[cfg(test)]

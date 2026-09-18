@@ -5,8 +5,10 @@ use axum::{
     routing::{get, post},
     Router,
 };
+#[cfg(feature = "telemetry")]
 use ccr_rust::telemetry;
 use clap::{Parser, Subcommand};
+#[cfg(feature = "telemetry")]
 use opentelemetry::trace::TracerProvider;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
@@ -479,6 +481,7 @@ async fn run_server(
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
+    #[cfg(feature = "telemetry")]
     let app = telemetry::instrument(app, telemetry::enabled());
 
     let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
@@ -579,9 +582,16 @@ async fn check_status(host: &str, port: u16) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let telemetry_provider = tokio::task::spawn_blocking(telemetry::provider_from_env)
-        .await
-        .unwrap_or(None);
+    let cli = Cli::parse();
+    #[cfg(feature = "telemetry")]
+    let telemetry_provider = if matches!(&cli.command, None | Some(Commands::Start { .. })) {
+        tokio::task::spawn_blocking(telemetry::provider_from_env)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    #[cfg(feature = "telemetry")]
     let telemetry_layer = telemetry_provider.as_ref().map(|provider| {
         tracing_opentelemetry::layer()
             .with_tracer(provider.tracer("ccr-rust"))
@@ -591,17 +601,15 @@ async fn main() -> Result<()> {
                 metadata.target() == "ccr_telemetry"
             }))
     });
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer().with_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "ccr_rust=info,tower_http=info".into()),
-            ),
-        )
-        .with(telemetry_layer)
-        .init();
-
-    let cli = Cli::parse();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer().with_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "ccr_rust=info,tower_http=info".into()),
+        ),
+    );
+    #[cfg(feature = "telemetry")]
+    let subscriber = subscriber.with(telemetry_layer);
+    subscriber.init();
     let config_path = cli
         .config
         .map(|p| shellexpand::tilde(&p).to_string())
@@ -684,6 +692,7 @@ async fn main() -> Result<()> {
             list_captures(&config_path, provider, limit, stats, output_dir, full)?;
         }
     }
+    #[cfg(feature = "telemetry")]
     if let Some(provider) = telemetry_provider {
         let result = tokio::task::spawn_blocking(move || {
             provider.shutdown_with_timeout(std::time::Duration::from_secs(3))
