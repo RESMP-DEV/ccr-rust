@@ -233,7 +233,20 @@ The `Router` section configures how incoming requests are routed to providers.
 | `tierRetries` | object | No | - | Per-tier retry configuration. |
 | `forceNonStreaming` | boolean | No | false | Disable streaming for agent workloads. |
 | `ignoreDirect` | boolean | No | false | Ignore client model targeting, enforce tier order. |
+| `modelAliases` | object | No | `{}` | Map exact bare client model IDs to configured `provider,model` routes. Ignored for routing when `ignoreDirect` is true. |
 | `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
+
+For example, `"modelAliases": {"gpt-6-astra": "azure,gpt-6-astra"}`
+preserves an existing client's Astra selection while `default` and `tiers`
+select `zai,glm-5.3` for other unqualified requests. Aliases are exact and do
+not chain. Targets must name a configured provider and model. Comma-qualified
+requests are never remapped. The resolved route follows normal direct-routing
+and fallback rules; this is not an account-isolation mechanism.
+
+Aliases select routes, not display metadata. CCR preserves upstream-reported
+response model IDs, but clients can still display their requested model or
+local catalog name. Verify the response model and `x-ccr-tier`, and configure
+client model catalogs separately when accurate labels and limits are needed.
 
 ### Cost-Aware GP Routing
 

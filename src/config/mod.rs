@@ -37,6 +37,38 @@ fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
     Ok(())
 }
 
+fn validate_model_aliases(router: &RouterConfig, providers: &[Provider]) -> Result<()> {
+    for (alias, target) in &router.model_aliases {
+        anyhow::ensure!(
+            !alias.trim().is_empty() && alias == alias.trim() && !alias.contains(','),
+            "Router.modelAliases alias '{alias}' must be a nonblank bare model name without surrounding whitespace"
+        );
+        anyhow::ensure!(
+            target == target.trim(),
+            "Router.modelAliases target '{target}' has surrounding whitespace"
+        );
+        let Some((provider, model)) = target.split_once(',') else {
+            anyhow::bail!(
+                "Router.modelAliases target '{target}' must be an explicit provider,model route"
+            );
+        };
+        anyhow::ensure!(
+            !provider.is_empty()
+                && !model.is_empty()
+                && !model.contains(',')
+                && provider == provider.trim()
+                && model == model.trim()
+                && providers.iter().any(|candidate| candidate.name == provider
+                    && candidate
+                        .models
+                        .iter()
+                        .any(|configured| configured == model)),
+            "Router.modelAliases target '{target}' must name a configured provider,model route"
+        );
+    }
+    Ok(())
+}
+
 /// Named routing preset with optional parameter overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PresetConfig {
@@ -199,6 +231,7 @@ impl Config {
         let file: ConfigFile =
             serde_json::from_str(&content).context("Failed to parse config JSON")?;
         validate_provider_contracts(&file.providers)?;
+        validate_model_aliases(&file.router, &file.providers)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
         let mut client_builder = reqwest::Client::builder()

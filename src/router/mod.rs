@@ -143,7 +143,17 @@ pub async fn handle_messages(
     // Check if the requested model explicitly targets a specific provider (e.g., "deepseek,deepseek-chat")
     // If so, route directly to that provider instead of cascading through tiers
     // (unless ignoreDirect is enabled)
-    let requested_model = request.model.clone();
+    let client_model = request.model.clone();
+    let requested_model = if client_model.contains(',') {
+        client_model.clone()
+    } else {
+        config
+            .router()
+            .model_aliases
+            .get(client_model.as_str())
+            .cloned()
+            .unwrap_or(client_model)
+    };
     if !config.router().ignore_direct && requested_model.contains(',') {
         // Explicit provider,model - find matching tier and prioritize it
         if let Some(pos) = ordered
