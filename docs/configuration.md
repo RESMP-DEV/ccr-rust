@@ -138,6 +138,25 @@ Each provider entry configures an upstream API endpoint.
 protocol. Configuration validation rejects unsupported values and other
 protocols before the router starts.
 
+### Reasoning controls across protocols
+
+For Anthropic-compatible upstreams, CCR preserves the native `thinking` and
+`output_config` objects, including numeric thinking budgets. OpenAI Chat
+`reasoning_effort` and Responses `reasoning.effort` map to
+`output_config.effort`; for example, `"max"` reaches the upstream as `"max"`.
+An explicitly supplied `output_config.effort` takes precedence, and other
+members of `output_config` remain intact. Requests without these controls do
+not acquire a reasoning setting.
+
+This mapping does not invent thinking budgets or infer a thinking mode from
+an effort label. The destination provider decides which effort strings and
+thinking modes its model accepts. CCR passes effort strings through without
+silently lowering them; unsupported values can therefore produce an upstream
+validation error. Native OpenAI/Responses passthrough retains its original
+request controls. When translating native Messages to OpenAI, an explicit
+`output_config.effort` maps back to `reasoning_effort` and overrides model-name
+heuristics. A Responses `reasoning` object without `effort` leaves effort unset.
+
 ### Provider and Model Pricing
 
 Pricing is optional. When configured, both `input_per_million_tokens` and

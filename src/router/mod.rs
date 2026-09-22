@@ -5,6 +5,7 @@ pub use types::*;
 mod usage_metrics;
 pub use usage_metrics::extract_normalized_usage;
 
+mod reasoning_controls;
 mod translate_request;
 
 mod translate_response;
@@ -581,6 +582,8 @@ mod tests {
             stream: Some(false),
             tools: None,
             openai_passthrough_body: None,
+            thinking: None,
+            output_config: None,
         };
 
         let openai_req = translate_request_anthropic_to_openai(&request, "gpt-4");
@@ -613,6 +616,8 @@ mod tests {
             stream: Some(true),
             tools: None,
             openai_passthrough_body: None,
+            thinking: None,
+            output_config: None,
         };
 
         let openai_req = translate_request_anthropic_to_openai(&request, "deepseek-reasoner");
@@ -875,6 +880,8 @@ mod tests {
             stream: None,
             tools: None,
             openai_passthrough_body: None,
+            thinking: None,
+            output_config: None,
         };
 
         let openai_req = translate_request_anthropic_to_openai(&request, "gpt-4");
@@ -931,6 +938,8 @@ mod tests {
             stream: Some(false),
             tools: None,
             openai_passthrough_body: None,
+            thinking: None,
+            output_config: None,
         };
 
         let openai_req = translate_request_anthropic_to_openai(&request, "deepseek-reasoner");
@@ -972,6 +981,8 @@ mod tests {
             stream: Some(false),
             tools: None,
             openai_passthrough_body: None,
+            thinking: None,
+            output_config: None,
         };
 
         let openai_req = translate_request_anthropic_to_openai(&request, "deepseek-reasoner");

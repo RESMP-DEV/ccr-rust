@@ -346,11 +346,13 @@ pub(super) fn translate_request_anthropic_to_openai(
         temperature: anthropic_req.temperature,
         stream: anthropic_req.stream,
         tools: convert_anthropic_tools_to_openai(&anthropic_req.tools),
-        reasoning_effort: if is_reasoning_model {
-            Some("high".to_string())
-        } else {
-            None
-        },
+        reasoning_effort: anthropic_req
+            .output_config
+            .as_ref()
+            .and_then(|output| output.get("effort"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| is_reasoning_model.then(|| "high".to_string())),
         thinking: if is_deepseek && !is_reasoning_model {
             Some(serde_json::json!({"type": "disabled"}))
         } else {

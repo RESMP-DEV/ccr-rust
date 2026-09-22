@@ -31,6 +31,8 @@ use super::{
 pub(super) fn internal_request_to_anthropic_request(
     req: crate::frontend::InternalRequest,
 ) -> AnthropicRequest {
+    let (thinking, output_config) =
+        super::reasoning_controls::from_extra_params(req.extra_params.as_ref());
     AnthropicRequest {
         model: req.model,
         messages: req
@@ -59,6 +61,8 @@ pub(super) fn internal_request_to_anthropic_request(
                 .collect()
         }),
         openai_passthrough_body: None,
+        thinking,
+        output_config,
     }
 }
 
