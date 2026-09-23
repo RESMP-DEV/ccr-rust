@@ -346,13 +346,18 @@ pub(super) fn translate_request_anthropic_to_openai(
         temperature: anthropic_req.temperature,
         stream: anthropic_req.stream,
         tools: convert_anthropic_tools_to_openai(&anthropic_req.tools),
-        reasoning_effort: anthropic_req
+        reasoning_effort: match anthropic_req
             .output_config
             .as_ref()
             .and_then(|output| output.get("effort"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| is_reasoning_model.then(|| "high".to_string())),
+        {
+            None | Some(serde_json::Value::Null) => is_reasoning_model.then(|| "high".to_string()),
+            Some(serde_json::Value::String(effort)) => Some(effort.to_owned()),
+            // A present non-string effort cannot be represented by OpenAI's
+            // typed string field; emit nothing rather than substituting a
+            // synthesized default.
+            Some(_) => None,
+        },
         thinking: if is_deepseek && !is_reasoning_model {
             Some(serde_json::json!({"type": "disabled"}))
         } else {

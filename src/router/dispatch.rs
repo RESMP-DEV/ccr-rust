@@ -1083,6 +1083,11 @@ pub(super) async fn try_request_via_anthropic_protocol(
     if let Some(obj) = normalized_request_value.as_object_mut() {
         // The tool-message round trip normalizes messages, not request controls.
         // Its OpenAI intermediate cannot represent native budgets/output format.
+        // Discard synthetic model defaults and translated controls before
+        // restoring only those supplied on the original Anthropic request.
+        obj.remove("reasoning_effort");
+        obj.remove("thinking");
+        obj.remove("output_config");
         if let Some(thinking) = request.thinking {
             obj.insert("thinking".to_string(), thinking);
         }

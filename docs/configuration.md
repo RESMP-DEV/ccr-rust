@@ -144,9 +144,11 @@ For Anthropic-compatible upstreams, CCR preserves the native `thinking` and
 `output_config` objects, including numeric thinking budgets. OpenAI Chat
 `reasoning_effort` and Responses `reasoning.effort` map to
 `output_config.effort`; for example, `"max"` reaches the upstream as `"max"`.
-An explicitly supplied `output_config.effort` takes precedence, and other
-members of `output_config` remain intact. Requests without these controls do
-not acquire a reasoning setting.
+A non-null `output_config.effort` takes precedence, and other members of
+`output_config` remain intact. A null effort allows an explicit OpenAI effort
+to fill it. Malformed native controls remain intact for Anthropic provider
+validation. Requests without these controls do not acquire a reasoning setting,
+including during tool-result normalization for DeepSeek-named models.
 
 This mapping does not invent thinking budgets or infer a thinking mode from
 an effort label. The destination provider decides which effort strings and
@@ -154,8 +156,11 @@ thinking modes its model accepts. CCR passes effort strings through without
 silently lowering them; unsupported values can therefore produce an upstream
 validation error. Native OpenAI/Responses passthrough retains its original
 request controls. When translating native Messages to OpenAI, an explicit
-`output_config.effort` maps back to `reasoning_effort` and overrides model-name
-heuristics. A Responses `reasoning` object without `effort` leaves effort unset.
+string `output_config.effort` maps back to `reasoning_effort` and overrides
+model-name heuristics. A non-null, non-string effort suppresses the heuristic
+and is omitted because the translated OpenAI field accepts strings only;
+missing or null effort retains the existing model defaults. A Responses
+`reasoning` object without `effort` leaves effort unset.
 
 ### Provider and Model Pricing
 

@@ -17,8 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstreams. Native Messages requests retain `thinking` and `output_config`;
   translated Responses/Chat requests map explicit reasoning effort to
   `output_config.effort`, including `max`. Controls survive tool-result
-  normalization, and absent controls remain absent. Added outbound HTTP
-  regression coverage for streaming and non-streaming requests.
+  normalization, which removes synthetic DeepSeek controls added by the
+  tool-message intermediate. Null native effort permits explicit OpenAI effort
+  to fill it; malformed explicit effort does
+  not trigger a guessed OpenAI default. Added outbound HTTP regression
+  coverage for streaming and non-streaming requests.
 
 - Added Kimi/GLM plan-switching instructions and a two-provider example, with
   live client verification and the existing `maxtoken` transformer needed for

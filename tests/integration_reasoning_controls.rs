@@ -19,7 +19,7 @@ fn make_anthropic_config(mock_url: &str) -> String {
                 "name": "mock",
                 "api_base_url": mock_url,
                 "api_key": "test-key",
-                "models": ["test-model"],
+                "models": ["deepseek-chat", "test-reasoner-model", "test-model"],
                 "protocol": "anthropic",
                 "anthropic_version": "2023-06-01"
             }
@@ -33,6 +33,13 @@ fn make_anthropic_config(mock_url: &str) -> String {
 }
 
 fn build_app(config: ccr_rust::config::Config) -> Router {
+    build_app_with_capture(config, None)
+}
+
+fn build_app_with_capture(
+    config: ccr_rust::config::Config,
+    debug_capture: Option<std::sync::Arc<ccr_rust::debug_capture::DebugCapture>>,
+) -> Router {
     let ewma_tracker = std::sync::Arc::new(ccr_rust::routing::EwmaTracker::new());
     let transformer_registry =
         std::sync::Arc::new(ccr_rust::transformer::TransformerRegistry::new());
@@ -47,7 +54,7 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
         max_streams: 0,
         ratelimit_tracker,
         shutdown_timeout: 30,
-        debug_capture: None,
+        debug_capture,
     };
 
     Router::new()
@@ -173,6 +180,45 @@ fn assert_no_openai_or_internal_control_keys(upstream: &Value) {
             "Anthropic wire request unexpectedly contains {key}: {upstream}"
         );
     }
+}
+
+fn tool_message_request(model: &str) -> Value {
+    json!({
+        "model": format!("mock,{model}"),
+        "messages": [
+            {"role": "user", "content": "Continue the tool workflow."},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_time",
+                    "type": "function",
+                    "function": {
+                        "name": "get_time",
+                        "arguments": "{\"timezone\":\"UTC\"}"
+                    }
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_time",
+                "content": "12:34"
+            }
+        ],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "get_time",
+                "description": "Get the current time",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"timezone": {"type": "string"}}
+                }
+            }
+        }],
+        "max_tokens": 128_000,
+        "stream": false
+    })
 }
 
 #[tokio::test]
@@ -456,6 +502,95 @@ async fn tool_result_normalization_preserves_anthropic_reasoning_controls() {
         upstream["output_config"],
         json!({"effort": "high", "format": format})
     );
+    assert_no_openai_or_internal_control_keys(&upstream);
+}
+
+#[tokio::test]
+async fn tool_result_normalization_does_not_leak_synthesized_controls_when_absent() {
+    for model in ["deepseek-chat", "test-reasoner-model"] {
+        let mock_server = MockServer::start().await;
+        mount_anthropic_json_success(&mock_server).await;
+        let app = app_for_mock(&mock_server);
+
+        let response = send_json(app, "/v1/chat/completions", tool_message_request(model)).await;
+        let response = successful_json_response(response).await;
+        assert_eq!(response["choices"][0]["message"]["content"], "ok");
+        let upstream = captured_upstream_json(&mock_server).await;
+        for key in ["thinking", "output_config"] {
+            assert!(
+                upstream.get(key).is_none(),
+                "{model}: {key} was injected: {upstream}"
+            );
+        }
+        assert_no_openai_or_internal_control_keys(&upstream);
+    }
+}
+
+#[tokio::test]
+async fn tool_result_normalization_restores_explicit_controls_for_synthesizing_models() {
+    let thinking = json!({"type": "enabled", "budget_tokens": 8_192});
+    let output_config = json!({"effort": "low", "include": ["reasoning"]});
+
+    for model in ["deepseek-chat", "test-reasoner-model"] {
+        let mock_server = MockServer::start().await;
+        mount_anthropic_json_success(&mock_server).await;
+        let app = app_for_mock(&mock_server);
+        let mut request = tool_message_request(model);
+        request["thinking"] = thinking.clone();
+        request["output_config"] = output_config.clone();
+
+        let response = send_json(app, "/v1/chat/completions", request).await;
+        let response = successful_json_response(response).await;
+        assert_eq!(response["choices"][0]["message"]["content"], "ok");
+        let upstream = captured_upstream_json(&mock_server).await;
+        assert_eq!(upstream["thinking"], thinking, "{model}");
+        assert_eq!(upstream["output_config"], output_config, "{model}");
+        assert_no_openai_or_internal_control_keys(&upstream);
+    }
+}
+
+#[tokio::test]
+async fn debug_capture_records_sanitized_anthropic_tool_normalization() {
+    let mock_server = MockServer::start().await;
+    mount_anthropic_json_success(&mock_server).await;
+    let capture_dir = tempfile::tempdir().unwrap();
+    let capture = std::sync::Arc::new(
+        ccr_rust::debug_capture::DebugCapture::new(ccr_rust::debug_capture::DebugCaptureConfig {
+            enabled: true,
+            providers: vec!["mock".to_string()],
+            output_dir: capture_dir.path().display().to_string(),
+            capture_success: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let config: ccr_rust::config::Config = {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.json");
+        std::fs::write(&config_path, make_anthropic_config(&mock_server.uri())).unwrap();
+        ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap()
+    };
+    let app = build_app_with_capture(config, Some(capture.clone()));
+
+    let response = send_json(
+        app,
+        "/v1/chat/completions",
+        tool_message_request("test-reasoner-model"),
+    )
+    .await;
+    successful_json_response(response).await;
+
+    let captures = capture.list_captures(Some("mock"), 1).unwrap();
+    assert_eq!(captures.len(), 1, "successful request should be captured");
+    let captured_request = &captures[0].request_body;
+    assert_eq!(captured_request["model"], "test-reasoner-model");
+    for key in ["thinking", "output_config", "reasoning_effort"] {
+        assert!(
+            captured_request.get(key).is_none(),
+            "debug capture retained {key}: {captured_request}"
+        );
+    }
+    let upstream = captured_upstream_json(&mock_server).await;
     assert_no_openai_or_internal_control_keys(&upstream);
 }
 

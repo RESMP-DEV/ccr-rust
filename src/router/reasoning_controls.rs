@@ -18,14 +18,15 @@ pub(super) fn from_extra_params(extra: Option<&Value>) -> (Option<Value>, Option
         .cloned();
     if let Some(effort) = extra.get("reasoning_effort").and_then(Value::as_str) {
         let output = output_config.get_or_insert_with(|| Value::Object(Map::new()));
-        // Keep malformed native values intact for upstream validation as well.
-        // An explicit native effort takes precedence over the translated field.
+        // Preserve malformed native values for Anthropic provider validation.
+        // A non-null native effort wins; null behaves like an absent member.
         if let Some(object) = output.as_object_mut() {
-            object
-                .entry("effort")
-                .or_insert_with(|| Value::String(effort.to_owned()));
+            if object.get("effort").is_none_or(Value::is_null) {
+                object.insert("effort".to_owned(), Value::String(effort.to_owned()));
+            }
         }
     }
+
     (thinking, output_config)
 }
 
@@ -80,6 +81,77 @@ mod tests {
                 &request, model,
             );
             assert_eq!(translated.reasoning_effort.as_deref(), Some("max"));
+        }
+    }
+
+    #[test]
+    fn null_effort_is_merged_while_preserving_output_config_members() {
+        let (thinking, output) = from_extra_params(Some(&json!({
+            "output_config": {
+                "effort": null,
+                "format": {"type": "json_schema", "schema": {"type": "object"}}
+            },
+            "reasoning_effort": "low"
+        })));
+
+        assert_eq!(thinking, None);
+        assert_eq!(
+            output,
+            Some(json!({
+                "effort": "low",
+                "format": {"type": "json_schema", "schema": {"type": "object"}}
+            }))
+        );
+    }
+
+    #[test]
+    fn malformed_native_controls_are_preserved_for_provider_validation() {
+        let malformed_output = json!(["unexpected"]);
+        let (thinking, output) = from_extra_params(Some(&json!({
+            "output_config": malformed_output,
+            "reasoning_effort": "low"
+        })));
+        assert_eq!(thinking, None);
+        assert_eq!(output, Some(malformed_output));
+
+        let (_, output) = from_extra_params(Some(&json!({
+            "output_config": {"effort": {"value": 7}, "native": true},
+            "reasoning_effort": "low"
+        })));
+        assert_eq!(
+            output,
+            Some(json!({"effort": {"value": 7}, "native": true}))
+        );
+    }
+
+    #[test]
+    fn invalid_native_effort_suppresses_openai_model_default() {
+        let request = serde_json::from_value(json!({
+            "model": "test",
+            "messages": [],
+            "output_config": {"effort": {"value": 7}}
+        }))
+        .unwrap();
+        let translated = super::super::translate_request::translate_request_anthropic_to_openai(
+            &request,
+            "deepseek-reasoner",
+        );
+        assert_eq!(translated.reasoning_effort, None);
+    }
+
+    #[test]
+    fn absent_or_null_native_effort_keeps_reasoning_model_default() {
+        for output_config in [None, Some(json!({"effort": null}))] {
+            let mut request_json = json!({"model": "test", "messages": []});
+            if let Some(output_config) = output_config {
+                request_json["output_config"] = output_config;
+            }
+            let request = serde_json::from_value(request_json).unwrap();
+            let translated = super::super::translate_request::translate_request_anthropic_to_openai(
+                &request,
+                "deepseek-reasoner",
+            );
+            assert_eq!(translated.reasoning_effort.as_deref(), Some("high"));
         }
     }
 }
