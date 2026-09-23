@@ -138,6 +138,43 @@ Each provider entry configures an upstream API endpoint.
 protocol. Configuration validation rejects unsupported values and other
 protocols before the router starts.
 
+### Reasoning controls across protocols
+
+For Anthropic-compatible upstreams, CCR preserves the native `thinking` and
+`output_config` objects, including numeric thinking budgets. OpenAI Chat
+`reasoning_effort` and Responses `reasoning.effort` map to
+`output_config.effort`; for example, `"max"` reaches the upstream as `"max"`.
+A non-null `output_config.effort` takes precedence, and other members of
+`output_config` remain intact. A null effort allows an explicit OpenAI effort
+to fill it. Malformed native controls remain intact for Anthropic provider
+validation. Requests without these controls do not acquire a reasoning setting,
+including during tool-result normalization for DeepSeek-named models.
+
+This mapping does not invent thinking budgets or infer a thinking mode from
+an effort label. The destination provider decides which effort strings and
+thinking modes its model accepts. CCR passes effort strings through without
+silently lowering them; unsupported values can therefore produce an upstream
+validation error. The native-effort precedence above applies when translating
+to Anthropic. Native OpenAI/Responses passthrough retains its original request
+controls, including any mixed-protocol fields; it does not reconcile a supplied
+Anthropic `output_config` with OpenAI reasoning controls. Use the destination
+protocol's native controls on passthrough requests.
+
+When translating native Messages to OpenAI, an explicit
+string `output_config.effort` maps back to `reasoning_effort` and overrides
+model-name heuristics. A non-null, non-string effort suppresses the heuristic
+and is omitted because the translated OpenAI field accepts strings only;
+missing or null effort retains the existing model defaults. A Responses
+`reasoning` object without `effort` leaves effort unset.
+
+Messages-to-OpenAI translation maps only `output_config.effort`. Other members,
+including `output_config.format`, are omitted; CCR does not convert the
+Anthropic schema format to OpenAI `response_format`. Structured-output
+constraints therefore do not survive this translation, including failover to
+an OpenAI-protocol provider. For requests that require schema enforcement, keep
+Messages requests on compatible Anthropic providers, or send native OpenAI
+Chat requests with `response_format` through an OpenAI passthrough route.
+
 ### Provider and Model Pricing
 
 Pricing is optional. When configured, both `input_per_million_tokens` and

@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed reasoning controls being silently dropped on Anthropic-compatible
+  upstreams. Native Messages requests retain `thinking` and `output_config`;
+  translated Responses/Chat requests map explicit reasoning effort to
+  `output_config.effort`, including `max`. Controls survive tool-result
+  normalization, which removes synthetic DeepSeek controls added by the
+  tool-message intermediate. Null native effort permits explicit OpenAI effort
+  to fill it; malformed explicit effort does
+  not trigger a guessed OpenAI default. Added outbound HTTP regression
+  coverage for streaming and non-streaming requests. Documented native
+  passthrough precedence and the existing structured-output limitation when
+  translating Messages to OpenAI.
+
 - Added Kimi/GLM plan-switching instructions and a two-provider example, with
   live client verification and the existing `maxtoken` transformer needed for
   Codex-to-Kimi Anthropic requests. Refreshed Kimi/Z.AI endpoint and credential

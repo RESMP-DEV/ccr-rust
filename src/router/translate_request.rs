@@ -346,10 +346,20 @@ pub(super) fn translate_request_anthropic_to_openai(
         temperature: anthropic_req.temperature,
         stream: anthropic_req.stream,
         tools: convert_anthropic_tools_to_openai(&anthropic_req.tools),
-        reasoning_effort: if is_reasoning_model {
-            Some("high".to_string())
-        } else {
-            None
+        // Only effort is translated from output_config. Other members, including
+        // format, are omitted: this path does not map structured-output schemas
+        // to OpenAI response_format. See docs/configuration.md for routing limits.
+        reasoning_effort: match anthropic_req
+            .output_config
+            .as_ref()
+            .and_then(|output| output.get("effort"))
+        {
+            None | Some(serde_json::Value::Null) => is_reasoning_model.then(|| "high".to_string()),
+            Some(serde_json::Value::String(effort)) => Some(effort.to_owned()),
+            // A present non-string effort cannot be represented by OpenAI's
+            // typed string field; emit nothing rather than substituting a
+            // synthesized default.
+            Some(_) => None,
         },
         thinking: if is_deepseek && !is_reasoning_model {
             Some(serde_json::json!({"type": "disabled"}))
