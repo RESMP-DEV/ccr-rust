@@ -346,6 +346,9 @@ pub(super) fn translate_request_anthropic_to_openai(
         temperature: anthropic_req.temperature,
         stream: anthropic_req.stream,
         tools: convert_anthropic_tools_to_openai(&anthropic_req.tools),
+        // Only effort is translated from output_config. Other members, including
+        // format, are omitted: this path does not map structured-output schemas
+        // to OpenAI response_format. See docs/configuration.md for routing limits.
         reasoning_effort: match anthropic_req
             .output_config
             .as_ref()

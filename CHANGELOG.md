@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool-message intermediate. Null native effort permits explicit OpenAI effort
   to fill it; malformed explicit effort does
   not trigger a guessed OpenAI default. Added outbound HTTP regression
-  coverage for streaming and non-streaming requests.
+  coverage for streaming and non-streaming requests. Documented native
+  passthrough precedence and the existing structured-output limitation when
+  translating Messages to OpenAI.
 
 - Added Kimi/GLM plan-switching instructions and a two-provider example, with
   live client verification and the existing `maxtoken` transformer needed for
