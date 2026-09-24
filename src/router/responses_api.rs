@@ -671,16 +671,53 @@ pub(super) fn responses_request_to_openai_chat_request(
                 // `agent_message` items instead of plain `message` items.
                 // Map them to assistant messages so worker/delegation
                 // requests containing only agent_message items no longer
-                // fail with "requires 'input' or 'instructions'".
+                // fail with "requires 'input' or 'instructions'". Chat and
+                // Anthropic-compatible upstreams reject conversations that
+                // open with an assistant turn, so frame a leading agent
+                // message with a user turn and merge consecutive ones.
                 "agent_message" => {
                     let content = item
                         .get("content")
                         .map(responses_content_to_openai_content)
                         .unwrap_or_else(|| serde_json::Value::String(String::new()));
-                    messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": content
-                    }));
+                    let opens_conversation =
+                        messages.iter().all(|message| message["role"] == "system");
+                    if opens_conversation {
+                        let author = item
+                            .get("author")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("agent");
+                        let recipient = item
+                            .get("recipient")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("user");
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": format!("Message from agent '{author}' to '{recipient}':")
+                        }));
+                    }
+                    let content_text = match &content {
+                        serde_json::Value::String(text) => Some(text.clone()),
+                        _ => None,
+                    };
+                    let merge_with_last = messages
+                        .last()
+                        .is_some_and(|message| message["role"] == "assistant");
+                    if merge_with_last && content_text.is_some() {
+                        let appended = content_text.unwrap_or_default();
+                        let last = messages.last_mut().expect("checked above");
+                        let existing = last["content"].as_str().unwrap_or_default().to_string();
+                        last["content"] = if existing.is_empty() {
+                            serde_json::json!(appended)
+                        } else {
+                            serde_json::json!(format!("{existing}\n\n{appended}"))
+                        };
+                    } else {
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": content
+                        }));
+                    }
                 }
                 _ => {}
             }
@@ -1884,8 +1921,34 @@ mod agent_message_tests {
         });
         let request = responses_request_to_openai_chat_request(&body)
             .expect("agent_message-only input must convert");
-        assert_eq!(request["messages"][0]["role"], "assistant");
-        assert_eq!(request["messages"][0]["content"], "task done");
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(
+            messages[0]["content"],
+            "Message from agent 'worker' to 'user':"
+        );
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "task done");
+    }
+
+    #[test]
+    fn consecutive_agent_messages_merge_into_one_assistant_turn() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "agent_message", "author": "worker", "recipient": "user",
+                 "content": [{"type": "output_text", "text": "first"}]},
+                {"type": "agent_message", "author": "worker", "recipient": "user",
+                 "content": [{"type": "output_text", "text": "second"}]}
+            ]
+        });
+        let request = responses_request_to_openai_chat_request(&body).unwrap();
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "first\n\nsecond");
     }
 
     #[test]
