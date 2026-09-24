@@ -397,10 +397,20 @@ fn responses_content_to_openai_content(content: &serde_json::Value) -> serde_jso
                         }
                     }
                     "input_image" => {
-                        if let Some(image_url) = item.get("image_url").and_then(|v| v.as_str()) {
+                        // The Responses API spells `image_url` as a plain
+                        // string; some clients send the chat-completions
+                        // object form instead. Accept both.
+                        let url_value = match item.get("image_url") {
+                            Some(serde_json::Value::String(url)) => {
+                                Some(serde_json::json!({ "url": url }))
+                            }
+                            Some(other @ serde_json::Value::Object(_)) => Some(other.clone()),
+                            _ => None,
+                        };
+                        if let Some(url_value) = url_value {
                             blocks.push(serde_json::json!({
                                 "type": "image_url",
-                                "image_url": {"url": image_url}
+                                "image_url": url_value
                             }));
                         }
                     }
@@ -1807,5 +1817,37 @@ mod tests {
             assert_eq!(terminal["response"]["status"], status);
             assert_eq!(terminal["response"]["output"][0]["id"], "msg_resp_original");
         }
+    }
+}
+
+#[cfg(test)]
+mod image_content_tests {
+    use super::*;
+
+    #[test]
+    fn input_image_accepts_string_and_object_forms() {
+        let content = serde_json::json!([
+            {"type": "input_text", "text": "see:"},
+            {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+            {"type": "input_image", "image_url": {"url": "https://example.test/x.png", "detail": "low"}}
+        ]);
+        let converted = responses_content_to_openai_content(&content);
+        let blocks = converted.as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image_url");
+        assert_eq!(blocks[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(blocks[2]["type"], "image_url");
+        assert_eq!(blocks[2]["image_url"]["url"], "https://example.test/x.png");
+    }
+
+    #[test]
+    fn input_image_without_url_is_dropped() {
+        let content = serde_json::json!([
+            {"type": "input_text", "text": "hi"},
+            {"type": "input_image"}
+        ]);
+        let converted = responses_content_to_openai_content(&content);
+        // The surviving single text block collapses to a plain string.
+        assert_eq!(converted, serde_json::json!("hi"));
     }
 }

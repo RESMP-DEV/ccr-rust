@@ -52,6 +52,14 @@ pub(super) fn normalize_message_content(content: &serde_json::Value) -> serde_js
                             }
                         }
                     }
+                    "image_url" => {
+                        // OpenAI-style image block already in OpenAI form
+                        // (arrives here from Codex/chat frontends whose raw
+                        // content was kept). Preserve it instead of letting
+                        // the unknown-block fallback stringify the payload
+                        // as text.
+                        openai_blocks.push(block.clone());
+                    }
                     "thinking" => {
                         if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
                             if !text_fallback.is_empty() {
@@ -107,6 +115,51 @@ pub(super) fn has_nonempty_content(content: &serde_json::Value) -> bool {
         serde_json::Value::Object(o) => !o.is_empty(),
         _ => true,
     }
+}
+
+/// Convert an OpenAI-style `image_url` content block into the Anthropic
+/// `image` block form. `"image_url"` may be a plain string or an object
+/// with a `url` field (the OpenAI chat-completions shape). Returns `None`
+/// for anything that is not an OpenAI image block.
+///
+/// `data:<media_type>;base64,<payload>` sources become Anthropic base64
+/// sources; every other URL becomes an Anthropic url source.
+pub(super) fn openai_image_block_to_anthropic(
+    block: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if block.get("type").and_then(|t| t.as_str()) != Some("image_url") {
+        return None;
+    }
+    let image_url = block.get("image_url")?;
+    let url = image_url
+        .as_str()
+        .or_else(|| image_url.get("url").and_then(|u| u.as_str()))?;
+    if let Some(rest) = url.strip_prefix("data:") {
+        if let Some((media_type, data)) = rest.split_once(";base64,") {
+            if !data.is_empty() {
+                let media_type = if media_type.is_empty() {
+                    "image/jpeg"
+                } else {
+                    media_type
+                };
+                return Some(serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data
+                    }
+                }));
+            }
+        }
+    }
+    Some(serde_json::json!({
+        "type": "image",
+        "source": {
+            "type": "url",
+            "url": url
+        }
+    }))
 }
 
 /// Convert Anthropic tool format to OpenAI tool format.
@@ -356,5 +409,55 @@ pub(super) fn translate_request_anthropic_to_openai(
         } else {
             None
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn openai_image_block_string_data_url_becomes_base64_source() {
+        let block = json!({
+            "type": "image_url",
+            "image_url": "data:image/png;base64,AAAA"
+        });
+        let converted = openai_image_block_to_anthropic(&block).unwrap();
+        assert_eq!(converted["type"], "image");
+        assert_eq!(converted["source"]["type"], "base64");
+        assert_eq!(converted["source"]["media_type"], "image/png");
+        assert_eq!(converted["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn openai_image_block_object_url_becomes_url_source() {
+        let block = json!({
+            "type": "image_url",
+            "image_url": {"url": "https://example.test/pic.png", "detail": "low"}
+        });
+        let converted = openai_image_block_to_anthropic(&block).unwrap();
+        assert_eq!(converted["type"], "image");
+        assert_eq!(converted["source"]["type"], "url");
+        assert_eq!(converted["source"]["url"], "https://example.test/pic.png");
+    }
+
+    #[test]
+    fn openai_image_block_ignores_non_image_blocks() {
+        assert!(openai_image_block_to_anthropic(&json!({"type": "text", "text": "hi"})).is_none());
+        assert!(openai_image_block_to_anthropic(&json!({"type": "image_url"})).is_none());
+    }
+
+    #[test]
+    fn normalize_message_content_preserves_openai_image_blocks() {
+        let content = json!([
+            {"type": "text", "text": "look:"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+        ]);
+        let converted = normalize_message_content(&content);
+        let blocks = converted.as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1]["type"], "image_url");
+        assert_eq!(blocks[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 }

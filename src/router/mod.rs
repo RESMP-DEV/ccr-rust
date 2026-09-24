@@ -1146,3 +1146,70 @@ mod tests {
         assert_eq!(body["stream"], false);
     }
 }
+
+/// End-to-end image transport: a `/v1/responses` request containing an
+/// `input_image` must reach Anthropic-protocol providers as a native
+/// Anthropic `image` block, both on the first turn (no tool messages) and
+/// after the tool-loop normalization round-trip.
+#[cfg(test)]
+mod image_transport_tests {
+    use super::openai_compat::internal_request_to_anthropic_request;
+    use super::responses_api::responses_request_to_openai_chat_request;
+    use super::translate_request::translate_request_anthropic_to_openai;
+    use crate::frontend::codex::CodexFrontend;
+    use crate::frontend::Frontend;
+    use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
+    use crate::transformer::Transformer;
+
+    #[test]
+    fn responses_image_requests_deliver_anthropic_image_blocks() {
+
+    let responses_body = serde_json::json!({
+        "model": "glm-5.3",
+        "stream": false,
+        "input": [
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "what is in this image?"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+            ]}
+        ]
+    });
+
+    // Full /v1/responses pipeline: Responses -> chat -> frontend -> anthropic.
+    let chat =
+        responses_request_to_openai_chat_request(&responses_body).expect("responses conversion");
+    let internal = CodexFrontend::new().parse_request(chat).expect("frontend parse");
+    let anthropic = internal_request_to_anthropic_request(internal);
+    let content = &anthropic.messages[0].content;
+    let blocks = content.as_array().expect("array content");
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(
+        blocks[1]["type"], "image",
+        "first-turn image must be Anthropic-shaped, got: {content}"
+    );
+    assert_eq!(blocks[1]["source"]["type"], "base64");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    assert_eq!(blocks[1]["source"]["data"], "AAAA");
+
+    // Tool-loop normalization round-trip (the needs_normalization path).
+    let roundtrip_openai =
+        translate_request_anthropic_to_openai(&anthropic, "glm-5.3");
+    let roundtrip_value = serde_json::to_value(&roundtrip_openai).unwrap();
+    let transformed = OpenAiToAnthropicTransformer
+        .transform_request(roundtrip_value)
+        .expect("transform");
+    let message = &transformed["messages"][0];
+    let roundtrip_blocks = message["content"].as_array().expect("round-trip array content");
+    let image_blocks: Vec<_> = roundtrip_blocks
+        .iter()
+        .filter(|b| b["type"] == "image")
+        .collect();
+    assert_eq!(
+        image_blocks.len(),
+        1,
+        "image must survive the tool round-trip, got: {message}"
+    );
+    assert_eq!(image_blocks[0]["source"]["media_type"], "image/png");
+    assert_eq!(image_blocks[0]["source"]["data"], "AAAA");
+}
+}
