@@ -13,9 +13,48 @@ use crate::debug_capture::DebugCaptureConfig;
 const REASONING_EFFORT_VALUES: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// Refuse to start with credentials that still contain unexpanded `${VAR}`
+/// references.
+///
+/// shellexpand only substitutes variables present in the process
+/// environment. A router started outside the credential launcher (raw
+/// `ccr-rust start` instead of `serve.py`) keeps the literal placeholder as
+/// the key, and every provider then returns 401s indistinguishable from
+/// expired credentials, which derails diagnosis (2026-09-23 incident).
+/// Failing fast at startup turns that into an immediate, self-explaining
+/// error. Set `CCR_ALLOW_UNEXPANDED_CREDENTIALS=true` to override for
+/// intentionally keyless local setups.
+fn validate_provider_credentials(file: &ConfigFile, allow_unexpanded: bool) -> Result<()> {
+    if allow_unexpanded {
+        return Ok(());
+    }
+    let mut offenders: Vec<String> = Vec::new();
+    for provider in &file.providers {
+        if provider.api_key.contains("${") {
+            offenders.push(format!("provider '{}' api_key", provider.name));
+        }
+        if let Some(headers) = &provider.extra_headers {
+            for (header_name, value) in headers {
+                if value.contains("${") {
+                    offenders.push(format!("provider '{}' header '{}'", provider.name, header_name));
+                }
+            }
+        }
+    }
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "unexpanded credential references: {}. Start via the credential launcher (serve.py) \
+         or export the referenced variables; requests would authenticate with the literal \
+         placeholder and every provider would return 401. \
+         Set CCR_ALLOW_UNEXPANDED_CREDENTIALS=true to override.",
+        offenders.join(", ")
+    );
+}
+
 /// Validate cross-field provider requirements before the router accepts traffic.
-fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
-    for provider in providers {
+fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {    for provider in providers {
         let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
             continue;
         };
@@ -259,6 +298,9 @@ impl Config {
             serde_json::from_str(&content).context("Failed to parse config JSON")?;
         validate_provider_contracts(&file.providers)?;
         validate_model_aliases(&file.router, &file.providers)?;
+        let allow_unexpanded_credentials = std::env::var("CCR_ALLOW_UNEXPANDED_CREDENTIALS")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+        validate_provider_credentials(&file, allow_unexpanded_credentials)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
         let mut client_builder = reqwest::Client::builder()
@@ -898,5 +940,46 @@ mod tests {
             Some("redis://127.0.0.1:6379/0")
         );
         assert_eq!(config.persistence.redis_prefix, "ccr:test");
+    }
+}
+
+#[cfg(test)]
+mod credential_guard_tests {
+    use super::*;
+
+    fn file_with_api_key(api_key: &str) -> ConfigFile {
+        serde_json::from_str(&format!(
+            r#"{{"Providers": [{{"name": "p1", "api_base_url": "http://x", "api_key": "{api_key}", "models": ["m"]}}], "Router": {{"default": "p1,m"}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn unexpanded_api_key_is_rejected() {
+        let file = file_with_api_key("${CCR_DEFINITELY_MISSING_KEY}");
+        let error = validate_provider_credentials(&file, false).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("provider 'p1' api_key"), "{message}");
+        assert!(message.contains("CCR_ALLOW_UNEXPANDED_CREDENTIALS"), "{message}");
+    }
+
+    #[test]
+    fn override_allows_unexpanded_keys() {
+        let file = file_with_api_key("${CCR_DEFINITELY_MISSING_KEY}");
+        validate_provider_credentials(&file, true).unwrap();
+    }
+
+    #[test]
+    fn expanded_and_inline_keys_pass() {
+        validate_provider_credentials(&file_with_api_key("real-key"), false).unwrap();
+        validate_provider_credentials(&file_with_api_key(""), false).unwrap();
+    }
+
+    #[test]
+    fn unexpanded_extra_header_is_rejected() {
+        let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"api-key": "${CCR_AZURE_API_KEY}"}}], "Router": {"default": "p1,m"}}"#;
+        let file: ConfigFile = serde_json::from_str(raw).unwrap();
+        let error = validate_provider_credentials(&file, false).unwrap_err();
+        assert!(error.to_string().contains("header 'api-key'"));
     }
 }

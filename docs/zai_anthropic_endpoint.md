@@ -54,13 +54,13 @@ still receive the final text.
 
 ## Model behavior observed
 
-- **glm-5.3 via this endpoint has weak color perception.** Structured
-  two-half images are segmented correctly (the model reliably answers with a
-  left/right structure), but exact colors are frequently wrong: solid blue
-  read as "green"/"purple", red as "blue". The same images read correctly by
-  glm-5.3-flashx through the OpenAI-compatible endpoint and by Azure
-  gpt-6-astra. Treat glm-5.3 vision as layout-capable, color-unreliable;
-  prefer flashx on the OpenAI endpoint for image-accuracy workloads.
+- **Vision policy: use glm-5.3 flash (flashx) for image workloads, never
+  glm-5.3 standard.** Flash has native (offloaded) vision and read structured
+  probes correctly through the OpenAI-compatible endpoint. glm-5.3 standard
+  segments image layout reliably (it answers with the correct left/right
+  structure) but misreads colors: solid blue read as "green"/"purple", red as
+  "blue", across both zai endpoint styles. Treat standard's image answers as
+  unreliable regardless of transport.
 - Solid single-color tiny images (1x1) are misclassified even by otherwise
   accurate models; use structured probes when verifying image transport.
 
@@ -117,6 +117,14 @@ Check for in-flight `codex exec` workers before restarting 3457; drain first.
 Verify after restart: `curl -s :PORT/health`, one cheap completion per
 provider, and `ps eww <pid> | tr ' ' '\n' | grep '^CCR_'` must show the
 injected variables.
+
+CCR-Rust also refuses to start (`unexpanded credential references: ...`) when
+a provider `api_key` or `extra_headers` value still contains a `${VAR}`
+placeholder after environment expansion, so a raw `ccr-rust start` without
+the launcher fails immediately instead of serving placeholder-key 401s.
+`CCR_ALLOW_UNEXPANDED_CREDENTIALS=true` overrides for intentionally keyless
+setups, and any 401 that still occurs with a placeholder key carries a
+restart hint in the router log.
 
 ## Related
 

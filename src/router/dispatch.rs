@@ -644,6 +644,20 @@ fn should_preserve_responses_response(
             .is_some()
 }
 
+/// A 401 from a provider whose configured key still contains an unexpanded
+/// `${VAR}` placeholder almost always means the router was started without
+/// its credential environment rather than the key being invalid.
+fn credential_placeholder_hint(provider: &crate::config::Provider) -> Option<&'static str> {
+    let has_placeholder = provider.api_key.contains("${")
+        || provider
+            .extra_headers
+            .as_ref()
+            .is_some_and(|headers| headers.values().any(|value| value.contains("${")));
+    has_placeholder.then(|| {
+        " (configured key is an unexpanded ${VAR} placeholder; restart via the credential launcher or export the variable)"
+    })
+}
+
 pub(super) async fn try_request_via_openai_protocol(
     config: &Config,
     provider: &crate::config::Provider,
@@ -810,11 +824,18 @@ pub(super) async fn try_request_via_openai_protocol(
             return Err(TryRequestError::RateLimited(retry_after));
         }
 
+        let credential_hint = if status == reqwest::StatusCode::UNAUTHORIZED {
+            credential_placeholder_hint(provider).unwrap_or_default()
+        } else {
+            ""
+        };
+
         return Err(TryRequestError::Other(anyhow::anyhow!(
-            "Provider returned {} from {}: {}",
+            "Provider returned {} from {}: {}{}",
             status,
             url,
-            body
+            body,
+            credential_hint
         )));
     }
 
@@ -1180,11 +1201,18 @@ pub(super) async fn try_request_via_anthropic_protocol(
             return Err(TryRequestError::RateLimited(retry_after));
         }
 
+        let credential_hint = if status == reqwest::StatusCode::UNAUTHORIZED {
+            credential_placeholder_hint(provider).unwrap_or_default()
+        } else {
+            ""
+        };
+
         return Err(TryRequestError::Other(anyhow::anyhow!(
-            "Provider returned {} from {}: {}",
+            "Provider returned {} from {}: {}{}",
             status,
             url,
-            body
+            body,
+            credential_hint
         )));
     }
 
