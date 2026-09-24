@@ -94,6 +94,14 @@ pub struct AnthropicRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,
 
+    /// Native thinking controls, including provider-supported modes and budgets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<serde_json::Value>,
+
+    /// Native output controls. Preserve members such as effort and format intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<serde_json::Value>,
+
     /// When the original inbound request was already OpenAI-formatted (e.g. from
     /// a Codex frontend), we stash the raw JSON here so that
     /// `try_request_via_openai_protocol` can send it directly to an

@@ -543,6 +543,8 @@ mod tests {
             stream: Some(false),
             tools: None,
             openai_passthrough_body: None,
+            thinking: None,
+            output_config: None,
         }
     }
 

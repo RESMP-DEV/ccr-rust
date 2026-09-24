@@ -154,7 +154,7 @@ mod tests {
             "reasoning": {"summary": "auto"}
         }))
         .unwrap();
-        assert_eq!(default_reasoning["reasoning_effort"], "medium");
+        assert!(default_reasoning.get("reasoning_effort").is_none());
 
         let invalid_reasoning = responses_request_to_openai_chat_request(&json!({
             "model": "test",

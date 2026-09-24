@@ -785,13 +785,12 @@ pub(super) fn responses_request_to_openai_chat_request(
         let reasoning = reasoning
             .as_object()
             .ok_or_else(|| "responses request 'reasoning' must be an object".to_string())?;
-        let effort = match reasoning.get("effort").filter(|value| !value.is_null()) {
-            Some(effort) => effort.as_str().ok_or_else(|| {
+        if let Some(effort) = reasoning.get("effort").filter(|value| !value.is_null()) {
+            let effort = effort.as_str().ok_or_else(|| {
                 "responses request 'reasoning.effort' must be a string".to_string()
-            })?,
-            None => "medium",
-        };
-        request["reasoning_effort"] = serde_json::Value::String(effort.to_string());
+            })?;
+            request["reasoning_effort"] = serde_json::Value::String(effort.to_string());
+        }
     }
     if let Some(previous_response_id) = body
         .get("previous_response_id")

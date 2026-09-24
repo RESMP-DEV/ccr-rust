@@ -1,0 +1,7 @@
+# CodeRabbit configuration.
+# Auto-review every base branch used by this repository PR flow.
+reviews:
+  auto_review:
+    enabled: true
+    base_branches:
+      - main
