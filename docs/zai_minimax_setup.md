@@ -128,8 +128,28 @@ blocks do not need a format-conversion transformer solely because of the name.
 
 MiniMax's current reference lists M3 and M2.x models with different context,
 multimodal, and thinking behavior. Check that reference for the chosen model;
-do not copy one model's settings to another. This documentation refresh checked
-the official reference but did **not** run a new MiniMax account or CLI test.
+do not copy one model's settings to another.
+
+### Live verification (2026-09-23)
+
+The provider fragment above was wired into the workstation router
+(`minimax` provider, `MiniMax-M3` alias) and exercised end-to-end through
+CCR's Anthropic path. Transport is verified; the account is not:
+
+- Routing, credential plumbing, and the Anthropic protocol path all work:
+  requests reach `https://api.minimax.io/anthropic/v1/messages` and return
+  structured MiniMax errors with a `request_id`.
+- A malformed key (for example a shell-quoted value from a `.env` file, which
+  silently includes the surrounding quotes) returns
+  `401 authentication_error: "login fail: Please carry the API secret..."`.
+  Strip surrounding quotes when copying keys into
+  `runtime-credentials.json`.
+- The local `MM_API_KEY` is a pay-as-you-go key with zero balance: every
+  request returns `402 insufficient_balance_error: "insufficient balance
+  (1008)"`. Vision, streaming, and usage behavior could not be exercised
+  until the account is funded or a coding-plan key is provided.
+- CCR's config loader expands `${VAR}` per value after JSON parsing, so keys
+  containing quotes or backslashes no longer corrupt the config document.
 
 ## Credentials and fallback
 

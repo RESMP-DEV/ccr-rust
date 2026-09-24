@@ -103,20 +103,29 @@ placeholder string as the key; the failure looks exactly like an expired
 credential. This happened on 2026-09-23 after a manual restart and was
 misdiagnosed as key expiry before the env loss was found.
 
-Canonical restarts:
+Canonical restarts on this workstation are **launchd**, not manual shells:
+`com.kearm.ccr-rust` (port 3456, config.json) and `com.kearm.ccr-glm-workers`
+(port 3457, glm-workers.json via `CCR_CONFIG_FILE`) both run `serve.py` with
+`KeepAlive`, so a manually started listener fights the agent (recurring
+"Address already in use") and the agent reclaims the port within seconds of
+any manual process exiting.
 
 ```bash
-cd ~/.claude-code-router
-nohup /opt/homebrew/bin/python3 serve.py start --host 127.0.0.1 --port 3456 >> ccr-3456.log 2>&1 &
-
-CCR_CONFIG_FILE=~/.claude-code-router/glm-workers.json \
-  nohup /opt/homebrew/bin/python3 serve.py start --host 127.0.0.1 --port 3457 >> ccr-3457.log 2>&1 &
+launchctl kickstart -k gui/$(id -u)/com.kearm.ccr-rust
+launchctl kickstart -k gui/$(id -u)/com.kearm.ccr-glm-workers
 ```
 
-Check for in-flight `codex exec` workers before restarting 3457; drain first.
-Verify after restart: `curl -s :PORT/health`, one cheap completion per
-provider, and `ps eww <pid> | tr ' ' '\n' | grep '^CCR_'` must show the
-injected variables.
+Service logs land in `~/.claude-code-router/logs/service.stdout.log` and
+`service.stderr.log`, not the manual `ccr-34xx.log` files. `serve.py` reads
+`runtime-credentials.json` (mode 0600; entries limited to `CCR_ZAI_API_KEY`,
+`CCR_AZURE_API_KEY`, `CCR_MINIMAX_API_KEY`) and injects them before exec, so
+launchd-spawned processes always carry credentials. If you must start
+manually, use `serve.py` the same way — never raw `ccr-rust start`.
+
+Check for in-flight `codex exec` workers before restarting the 3457 service;
+drain first. Verify after restart: `curl -s :PORT/health`, one cheap
+completion per provider, and `ps eww <pid> | tr ' ' '\n' | grep '^CCR_'`
+must show the injected variables.
 
 CCR-Rust also refuses to start (`unexpanded credential references: ...`) when
 a provider `api_key` or `extra_headers` value still contains a `${VAR}`
