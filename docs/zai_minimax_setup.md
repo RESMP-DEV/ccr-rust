@@ -130,24 +130,27 @@ MiniMax's current reference lists M3 and M2.x models with different context,
 multimodal, and thinking behavior. Check that reference for the chosen model;
 do not copy one model's settings to another.
 
-### Live verification (2026-09-23)
+### Live verification (2026-09-23, coding-plan key)
 
-The provider fragment above was wired into the workstation router
-(`minimax` provider, `MiniMax-M3` alias) and exercised end-to-end through
-CCR's Anthropic path. Transport is verified; the account is not:
+The provider fragment above is wired into the workstation router
+(`minimax` provider, `MiniMax-M3` alias) and fully verified end-to-end
+through CCR's Anthropic path with a coding-plan key (`sk-cp-...`):
 
-- Routing, credential plumbing, and the Anthropic protocol path all work:
-  requests reach `https://api.minimax.io/anthropic/v1/messages` and return
-  structured MiniMax errors with a `request_id`.
-- A malformed key (for example a shell-quoted value from a `.env` file, which
-  silently includes the surrounding quotes) returns
-  `401 authentication_error: "login fail: Please carry the API secret..."`.
-  Strip surrounding quotes when copying keys into
-  `runtime-credentials.json`.
-- The local `MM_API_KEY` is a pay-as-you-go key with zero balance: every
-  request returns `402 insufficient_balance_error: "insufficient balance
-  (1008)"`. Vision, streaming, and usage behavior could not be exercised
-  until the account is funded or a coding-plan key is provided.
+- Text: exact-answer probe completed with usage accounting flowing through
+  CCR's token audit (40 in / 2 out on the smoke prompt).
+- Vision: **MiniMax-M3 reads structured images correctly through both
+  ingress shapes** — `/v1/responses` `input_image` (233 input tokens) and
+  `/v1/messages` native Anthropic `image` blocks (108 input tokens) both
+  answered `left=red, right=blue` on the two-color probe. Unlike glm-5.3
+  standard, M3 is safe for color-level vision answers.
+- Streaming: standard Responses SSE through the conversion pipeline
+  (`response.created` -> `output_item.added` -> `output_text.delta` ->
+  `*.done` -> `response.completed`).
+- Failure signatures worth knowing: a malformed key (for example a
+  shell-quoted `.env` value that keeps its surrounding quotes) returns
+  `401 authentication_error: "login fail: Please carry the API secret..."`;
+  an unfunded pay-as-you-go key returns `402 insufficient_balance_error:
+  "insufficient balance (1008)"`. Both include a `request_id`.
 - CCR's config loader expands `${VAR}` per value after JSON parsing, so keys
   containing quotes or backslashes no longer corrupt the config document.
 
