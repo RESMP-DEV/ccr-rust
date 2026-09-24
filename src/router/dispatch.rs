@@ -644,6 +644,47 @@ fn should_preserve_responses_response(
             .is_some()
 }
 
+/// Build the upstream failure error, appending the credential-placeholder
+/// hint on 401s. Shared by both protocol paths so their messages stay in
+/// lockstep.
+fn provider_upstream_error(
+    status: reqwest::StatusCode,
+    url: &str,
+    body: &str,
+    provider: &crate::config::Provider,
+) -> TryRequestError {
+    let credential_hint = if status == reqwest::StatusCode::UNAUTHORIZED {
+        credential_placeholder_hint(provider).unwrap_or_default()
+    } else {
+        ""
+    };
+    TryRequestError::Other(anyhow::anyhow!(
+        "Provider returned {} from {}: {}{}",
+        status,
+        url,
+        body,
+        credential_hint
+    ))
+}
+
+/// A 401 from a provider whose configured credentials still contain an
+/// unexpanded env placeholder almost always means the router was started
+/// without its credential environment rather than the key being invalid.
+fn credential_placeholder_hint(provider: &crate::config::Provider) -> Option<&'static str> {
+    let has_placeholder = crate::config::contains_env_placeholder(&provider.api_key)
+        || provider
+            .extra_headers
+            .as_ref()
+            .is_some_and(|headers| {
+                headers
+                    .values()
+                    .any(|value| crate::config::contains_env_placeholder(value))
+            });
+    has_placeholder.then(|| {
+        " (the configured api_key or an extra header is an unexpanded env placeholder; restart via the credential launcher or export the variable)"
+    })
+}
+
 pub(super) async fn try_request_via_openai_protocol(
     config: &Config,
     provider: &crate::config::Provider,
@@ -810,12 +851,7 @@ pub(super) async fn try_request_via_openai_protocol(
             return Err(TryRequestError::RateLimited(retry_after));
         }
 
-        return Err(TryRequestError::Other(anyhow::anyhow!(
-            "Provider returned {} from {}: {}",
-            status,
-            url,
-            body
-        )));
+        return Err(provider_upstream_error(status, &url, &body, provider));
     }
 
     // Handle streaming vs non-streaming.
@@ -1193,12 +1229,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
             return Err(TryRequestError::RateLimited(retry_after));
         }
 
-        return Err(TryRequestError::Other(anyhow::anyhow!(
-            "Provider returned {} from {}: {}",
-            status,
-            url,
-            body
-        )));
+        return Err(provider_upstream_error(status, &url, &body, provider));
     }
 
     if request.stream.unwrap_or(false) {

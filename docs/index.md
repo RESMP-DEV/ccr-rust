@@ -27,6 +27,7 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 - [OpenAI SDK](openai_sdk_setup.md) — Python/JavaScript OpenAI client setup
 - [Kimi](kimi_setup.md) — Kimi Code keys, current model IDs, and Claude/Codex requirements
 - [Gemini](gemini-integration.md) — Google Gemini routing
+- [Z.AI Anthropic endpoint](zai_anthropic_endpoint.md) — verified wire contract, image handling, vision caveats, and the credential-safe restart runbook
 
 ## Operations
 

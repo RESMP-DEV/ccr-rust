@@ -298,6 +298,103 @@ fn get_tier_retry_with_custom_and_fallback() {
     assert_eq!(tier1.max_backoff_ms, defaults.max_backoff_ms);
 }
 
+#[test]
+fn model_aliases_default_to_empty_and_parse_exact_entries() {
+    let json = json!({
+        "Providers": [{
+            "name": "azure",
+            "api_base_url": "http://127.0.0.1:1234/v1",
+            "api_key": "test-key",
+            "models": ["gpt-6-astra"]
+        }],
+        "Router": {
+            "default": "zai,glm-5.3",
+            "modelAliases": {"gpt-6-astra": "azure,gpt-6-astra"}
+        }
+    });
+
+    let config: ccr_rust::config::ConfigFile = serde_json::from_value(json).unwrap();
+    let without_aliases: ccr_rust::config::RouterConfig =
+        serde_json::from_value(json!({"default": "zai,glm-5.3"})).unwrap();
+    assert!(without_aliases.model_aliases.is_empty());
+    assert_eq!(
+        config.router.model_aliases.get("gpt-6-astra").unwrap(),
+        "azure,gpt-6-astra"
+    );
+}
+
+#[test]
+fn model_alias_targets_must_be_explicit_configured_routes() {
+    let invalid_cases = [
+        ("gpt-6-astra", "azure"),
+        ("gpt-6-astra", "azure,"),
+        ("gpt-6-astra", "unknown,gpt-6-astra"),
+        ("gpt-6-astra", "azure,unknown"),
+        ("", "azure,gpt-6-astra"),
+        (" ", "azure,gpt-6-astra"),
+        (" gpt-6-astra", "azure,gpt-6-astra"),
+        ("azure,gpt-6-astra", "azure,gpt-6-astra"),
+        ("gpt-6-astra", ""),
+        ("gpt-6-astra", "azure,gpt-6-astra "),
+        ("gpt-6-astra", "azure, gpt-6-astra"),
+        ("gpt-6-astra", "azure,gpt-6-astra,extra"),
+    ];
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.json");
+
+    for (alias, target) in invalid_cases {
+        let config_json = json!({
+            "Providers": [{
+                "name": "azure",
+                "api_base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "test-key",
+                "models": ["gpt-6-astra"]
+            }],
+            "Router": {
+                "default": "azure,gpt-6-astra",
+                "modelAliases": {alias: target}
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&config_json).unwrap()).unwrap();
+        let error = ccr_rust::config::Config::from_file(path.to_str().unwrap())
+            .expect_err("model alias validation should reject invalid configuration");
+        assert!(
+            error.to_string().contains("Router.modelAliases"),
+            "unexpected error for {alias:?} -> {target:?}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn model_alias_targets_may_not_chain_through_another_alias() {
+    let config_json = json!({
+        "Providers": [{
+            "name": "azure",
+            "api_base_url": "http://127.0.0.1:1234/v1",
+            "api_key": "test-key",
+            "models": ["gpt-6-astra"]
+        }],
+        "Router": {
+            "default": "azure,gpt-6-astra",
+            "modelAliases": {
+                "gpt-6-astra": "azure,gpt-6-astra",
+                "astra": "azure,gpt-6-astra",
+                "bare": "azure,astra"
+            }
+        }
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.json");
+    std::fs::write(&path, serde_json::to_string(&config_json).unwrap()).unwrap();
+
+    let error = ccr_rust::config::Config::from_file(path.to_str().unwrap())
+        .expect_err("model alias validation should reject chained aliases");
+    assert!(error
+        .to_string()
+        .contains("configured provider,model route"));
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests: full HTTP routing with wiremock backends
 // ---------------------------------------------------------------------------
@@ -703,6 +800,86 @@ async fn multi_tier_cascade_on_failure() {
 
     // Should succeed via tier-1 after tier-0 exhaustion
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn model_alias_routing_preserves_explicit_routes_and_ignore_direct() {
+    use wiremock::matchers::body_partial_json;
+    for ignore_direct in [false, true] {
+        let azure = MockServer::start().await;
+        let glm = MockServer::start().await;
+        for (server, model, count) in [
+            (&azure, "gpt-6-astra", if ignore_direct { 0 } else { 2 }),
+            (&glm, "glm-5.3", if ignore_direct { 4 } else { 2 }),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(json!({"model": model})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "response-test", "object": "chat.completion", "model": model,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": model}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                })))
+                .expect(count)
+                .mount(server).await;
+        }
+        let config = json!({
+            "Providers": [
+                {"name": "azure", "api_base_url": azure.uri(), "api_key": "test", "models": ["gpt-6-astra"]},
+                {"name": "zai", "api_base_url": glm.uri(), "api_key": "test", "models": ["glm-5.3"]}
+            ],
+            "Router": {
+                "default": "zai,glm-5.3", "tiers": ["zai,glm-5.3"], "ignoreDirect": ignore_direct,
+                "modelAliases": {"gpt-6-astra": "azure,gpt-6-astra"}
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let app = build_app(ccr_rust::config::Config::from_file(path.to_str().unwrap()).unwrap());
+        for requested in [
+            "gpt-6-astra",
+            "azure,gpt-6-astra",
+            "zai,glm-5.3",
+            "unspecified",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/messages")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&json!({
+                                "model": requested, "max_tokens": 50,
+                                "messages": [{"role": "user", "content": "test"}]
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{requested}, ignoreDirect={ignore_direct}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let expected = if !ignore_direct && requested.contains("astra") {
+                "gpt-6-astra"
+            } else {
+                "glm-5.3"
+            };
+            assert_eq!(body["model"], expected);
+        }
+        azure.verify().await;
+        glm.verify().await;
+    }
 }
 
 // ---------------------------------------------------------------------------

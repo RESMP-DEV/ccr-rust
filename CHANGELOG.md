@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coverage for streaming and non-streaming requests. Documented native
   passthrough precedence and the existing structured-output limitation when
   translating Messages to OpenAI.
+- Added optional exact `Router.modelAliases` mappings to configured
+  `provider,model` routes. This lets existing clients keep their model IDs
+  when the router default changes. Explicit routes and `ignoreDirect` retain
+  their existing behavior; invalid aliases fail configuration validation.
 
 - Added Kimi/GLM plan-switching instructions and a two-provider example, with
   live client verification and the existing `maxtoken` transformer needed for
