@@ -13,6 +13,30 @@ use crate::debug_capture::DebugCaptureConfig;
 const REASONING_EFFORT_VALUES: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// Recursively expand `${VAR}` references in every string value of a parsed
+/// JSON document. Values whose variables are missing keep their raw text and
+/// record the failure; `validate_provider_credentials` decides whether the
+/// leftovers are acceptable.
+fn expand_env_references(value: &mut serde_json::Value, failures: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => match shellexpand::env(text) {
+            Ok(expanded) => *text = expanded.into_owned(),
+            Err(error) => failures.push(error.to_string()),
+        },
+        serde_json::Value::Array(items) => {
+            for item in items {
+                expand_env_references(item, failures);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                expand_env_references(item, failures);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Refuse to start with credentials that still contain unexpanded `${VAR}`
 /// references.
 ///
@@ -287,15 +311,23 @@ impl Config {
     pub fn from_file(path: &str) -> Result<Self> {
         let raw_content =
             fs::read_to_string(path).context(format!("Failed to read config file: {}", path))?;
-        // Expand ${VAR} env var references in config values (e.g., api_key: "${ZAI_API_KEY}")
-        let content = shellexpand::env(&raw_content)
-            .map(|s| s.into_owned())
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to expand env vars in config, using raw: {e}");
-                raw_content.clone()
-            });
+        // Parse the JSON first, then expand ${VAR} references per string value.
+        // Expanding into the raw text before parsing breaks the document
+        // whenever a substituted value contains JSON-hostile characters such
+        // as a double quote (observed with a real MiniMax API key), which
+        // surfaces as a misleading "expected `,` or `}`" parse error.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&raw_content).context("Failed to parse config JSON")?;
+        let mut expansion_failures: Vec<String> = Vec::new();
+        expand_env_references(&mut value, &mut expansion_failures);
+        if !expansion_failures.is_empty() {
+            tracing::warn!(
+                "Failed to expand env vars in config, using raw: {}",
+                expansion_failures.join("; ")
+            );
+        }
         let file: ConfigFile =
-            serde_json::from_str(&content).context("Failed to parse config JSON")?;
+            serde_json::from_value(value).context("Failed to parse config JSON")?;
         validate_provider_contracts(&file.providers)?;
         validate_model_aliases(&file.router, &file.providers)?;
         let allow_unexpanded_credentials = std::env::var("CCR_ALLOW_UNEXPANDED_CREDENTIALS")
@@ -981,5 +1013,33 @@ mod credential_guard_tests {
         let file: ConfigFile = serde_json::from_str(raw).unwrap();
         let error = validate_provider_credentials(&file, false).unwrap_err();
         assert!(error.to_string().contains("header 'api-key'"));
+    }
+}
+
+#[cfg(test)]
+mod env_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn quoted_env_value_expands_into_config_safely() {
+        let dir = std::env::temp_dir().join(format!("ccr-cfg-quoted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "${CCR_TEST_QUOTED_KEY_9271}", "models": ["m"]}], "Router": {"default": "p1,m"}}"#,
+        )
+        .unwrap();
+        // A value with JSON-hostile characters; textual pre-parse expansion
+        // used to corrupt the document. Unique name; removed before asserts.
+        std::env::set_var("CCR_TEST_QUOTED_KEY_9271", "sk-with\"quote-and\\backslash");
+        let result = Config::from_file(path.to_str().unwrap());
+        std::env::remove_var("CCR_TEST_QUOTED_KEY_9271");
+        let config = result.expect("config with quoted env value must parse");
+        assert_eq!(
+            config.providers()[0].api_key,
+            "sk-with\"quote-and\\backslash"
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 }
