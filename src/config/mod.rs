@@ -84,6 +84,14 @@ pub struct PresetConfig {
     pub temperature: Option<f32>,
 }
 
+/// Default maximum accepted request body size (64 MiB), applied to wire
+/// bytes and to decoded content. Agent sessions with long histories exceed
+/// the previous 10 MiB cap.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Hard ceiling for a configured `MAX_REQUEST_BODY_BYTES` (1 GiB).
+pub const HARD_MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024 * 1024;
+
 /// Parsed JSON configuration (deserializable).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigFile {
@@ -146,6 +154,14 @@ pub struct ConfigFile {
     #[serde(default)]
     #[serde(rename = "BROKER_SOCKET")]
     pub broker_socket: Option<String>,
+
+    /// Maximum accepted request body size in bytes, enforced on the wire and
+    /// after content decoding across all API endpoints. Large agent sessions
+    /// routinely exceed tens of MiB. Zero falls back to the default and
+    /// values above `HARD_MAX_REQUEST_BODY_BYTES` are clamped.
+    #[serde(default = "default_max_request_body_bytes")]
+    #[serde(rename = "MAX_REQUEST_BODY_BYTES")]
+    pub max_request_body_bytes: usize,
 }
 
 /// Runtime configuration shared across all handlers via Axum state.
@@ -198,6 +214,17 @@ impl Config {
     /// Debug capture settings.
     pub fn debug_capture(&self) -> &DebugCaptureConfig {
         &self.inner.file.debug_capture
+    }
+
+    /// Effective maximum request body size in bytes after defaulting and
+    /// clamping.
+    pub fn max_request_body_bytes(&self) -> usize {
+        let requested = self.inner.file.max_request_body_bytes;
+        if requested == 0 {
+            DEFAULT_MAX_REQUEST_BODY_BYTES
+        } else {
+            requested.min(HARD_MAX_REQUEST_BODY_BYTES)
+        }
     }
 
     /// Resolve the broker socket path.
@@ -356,9 +383,63 @@ fn default_sse_buffer_size() -> usize {
     32
 }
 
+fn default_max_request_body_bytes() -> usize {
+    DEFAULT_MAX_REQUEST_BODY_BYTES
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_request_body_bytes_defaults_zero_and_clamps() {
+        let dir = std::env::temp_dir().join(format!("ccr-cfg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let base = r#"{"Providers": [], "Router": {"default": "unused"}}"#;
+
+        std::fs::write(&path, base).unwrap();
+        let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            config.max_request_body_bytes(),
+            DEFAULT_MAX_REQUEST_BODY_BYTES
+        );
+
+        std::fs::write(
+            &path,
+            r#"{"Providers": [], "Router": {"default": "unused"}, "MAX_REQUEST_BODY_BYTES": 1048576}"#,
+        )
+        .unwrap();
+        let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(config.max_request_body_bytes(), 1048576);
+
+        std::fs::write(
+            &path,
+            r#"{"Providers": [], "Router": {"default": "unused"}, "MAX_REQUEST_BODY_BYTES": 0}"#,
+        )
+        .unwrap();
+        let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            config.max_request_body_bytes(),
+            DEFAULT_MAX_REQUEST_BODY_BYTES
+        );
+
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"Providers": [], "Router": {{"default": "unused"}}, "MAX_REQUEST_BODY_BYTES": {}}}"#,
+                HARD_MAX_REQUEST_BODY_BYTES * 4
+            ),
+        )
+        .unwrap();
+        let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            config.max_request_body_bytes(),
+            HARD_MAX_REQUEST_BODY_BYTES
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
 
     /// Helper: parse a `ProviderTransformer` from a JSON string.
     fn parse_transformer(json: &str) -> ProviderTransformer {

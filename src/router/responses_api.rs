@@ -25,8 +25,22 @@ mod incremental_stream;
 pub use handler::handle_responses;
 use incremental_stream::ResponsesStreamConverter;
 
-pub(super) const MAX_RESPONSES_BODY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RESPONSES_ZSTD_WINDOW_LOG: u32 = 24;
+
+/// Per-response body budget attached by `handle_responses` so upstream
+/// response reading and the stream adapter honor the configured
+/// `MAX_REQUEST_BODY_BYTES` instead of a fixed local constant.
+#[derive(Clone, Copy)]
+pub(super) struct ResponsesBodyBudget(pub usize);
+
+fn responses_body_budget(parts: &axum::http::response::Parts) -> usize {
+    parts
+        .extensions
+        .get::<ResponsesBodyBudget>()
+        .map(|budget| budget.0)
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(crate::config::DEFAULT_MAX_REQUEST_BODY_BYTES)
+}
 
 #[derive(Debug)]
 pub(super) enum DecodeRequestBodyError {
@@ -94,6 +108,7 @@ fn looks_like_sse_payload(payload: &str) -> bool {
 pub(super) fn decode_request_body(
     bytes: &[u8],
     headers: &HeaderMap,
+    max_decoded_bytes: usize,
 ) -> Result<Vec<u8>, DecodeRequestBodyError> {
     let content_encoding = headers
         .get(axum::http::header::CONTENT_ENCODING)
@@ -124,7 +139,7 @@ pub(super) fn decode_request_body(
             })?;
         let mut decoded = Vec::new();
         decoder
-            .take((MAX_RESPONSES_BODY_BYTES + 1) as u64)
+            .take((max_decoded_bytes + 1) as u64)
             .read_to_end(&mut decoded)
             .map_err(|e| {
                 DecodeRequestBodyError::Invalid(format!(
@@ -132,10 +147,10 @@ pub(super) fn decode_request_body(
                     e
                 ))
             })?;
-        if decoded.len() > MAX_RESPONSES_BODY_BYTES {
+        if decoded.len() > max_decoded_bytes {
             return Err(DecodeRequestBodyError::PayloadTooLarge(format!(
-                "Decoded request body exceeds {} bytes",
-                MAX_RESPONSES_BODY_BYTES
+                "Decoded request body exceeds {} bytes; raise MAX_REQUEST_BODY_BYTES in the ccr-rust config if this is a legitimate large agent request",
+                max_decoded_bytes
             )));
         }
         return Ok(decoded);
@@ -807,6 +822,7 @@ async fn convert_openai_json_response_to_responses(response: Response) -> Respon
 
 async fn convert_openai_stream_response_to_responses(response: Response) -> Response {
     let (mut parts, body) = response.into_parts();
+    let body_budget = responses_body_budget(&parts);
     let preserved_response = parts
         .extensions
         .get::<super::TrustedResponsesResponse>()
@@ -820,7 +836,7 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
             return Response::from_parts(parts, body);
         }
 
-        let body_bytes = match to_bytes(body, MAX_RESPONSES_BODY_BYTES).await {
+        let body_bytes = match to_bytes(body, body_budget).await {
             Ok(bytes) => bytes,
             Err(err) => {
                 error!("Failed to read OpenAI stream error body: {}", err);
@@ -911,7 +927,7 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
                 }
             };
             received_bytes = received_bytes.saturating_add(bytes.len());
-            if received_bytes > MAX_RESPONSES_BODY_BYTES {
+            if received_bytes > body_budget {
                 let failed = responses_stream_adapter_failed_event(
                     converter.response_id(),
                     "Upstream stream exceeded the Responses adapter limit",
@@ -1338,12 +1354,13 @@ mod tests {
             })
         );
         let body = Body::from_stream(futures::stream::iter([
-            Ok::<Bytes, std::io::Error>(Bytes::from(first)),
-            Ok(Bytes::from(vec![b'x'; MAX_RESPONSES_BODY_BYTES])),
+            Ok::<Bytes, std::io::Error>(Bytes::from(first.clone())),
+            Ok(Bytes::from(vec![b'x'; 1024])),
         ]));
         let upstream = Response::builder()
             .status(StatusCode::OK)
             .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+            .extension(ResponsesBodyBudget(first.len()))
             .body(body)
             .unwrap();
 

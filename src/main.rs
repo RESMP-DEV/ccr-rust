@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use anyhow::{anyhow, Result};
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     routing::{get, post},
     Router,
 };
@@ -438,6 +438,10 @@ async fn run_server(
         None
     };
 
+    // Capture the effective request-body limit before `config` moves into
+    // the router state so every endpoint shares one configured bound.
+    let max_request_body_bytes = config.max_request_body_bytes();
+
     let state = AppState {
         config,
         ewma_tracker,
@@ -476,6 +480,7 @@ async fn run_server(
         .route("/metrics", get(metrics::metrics_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .with_state(state);
 
     let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
