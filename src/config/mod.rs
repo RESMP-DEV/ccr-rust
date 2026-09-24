@@ -299,6 +299,9 @@ pub struct Config {
 struct ConfigInner {
     file: ConfigFile,
     http_client: reqwest::Client,
+    /// Effective request-body limit, computed (and warned about) once at
+    /// load so the accessor stays side-effect free per request.
+    effective_max_request_body_bytes: usize,
 }
 
 impl Config {
@@ -340,26 +343,10 @@ impl Config {
     }
 
     /// Effective maximum request body size in bytes after defaulting and
-    /// clamping.
+    /// clamping. Computed once at load time; see
+    /// `compute_max_request_body_bytes`.
     pub fn max_request_body_bytes(&self) -> usize {
-        let requested = self.inner.file.max_request_body_bytes;
-        if requested == 0 {
-            tracing::warn!(
-                requested,
-                default = DEFAULT_MAX_REQUEST_BODY_BYTES,
-                "MAX_REQUEST_BODY_BYTES is zero; using the default"
-            );
-            DEFAULT_MAX_REQUEST_BODY_BYTES
-        } else if requested > HARD_MAX_REQUEST_BODY_BYTES {
-            tracing::warn!(
-                requested,
-                maximum = HARD_MAX_REQUEST_BODY_BYTES,
-                "MAX_REQUEST_BODY_BYTES exceeds the hard limit; clamping"
-            );
-            HARD_MAX_REQUEST_BODY_BYTES
-        } else {
-            requested
-        }
+        self.inner.effective_max_request_body_bytes
     }
 
     /// Resolve the broker socket path.
@@ -426,9 +413,16 @@ impl Config {
 
         let http_client = client_builder.build()?;
         let presets = file.presets.clone();
+        let effective_max_request_body_bytes = compute_max_request_body_bytes(
+            file.max_request_body_bytes,
+        );
 
         Ok(Config {
-            inner: Arc::new(ConfigInner { file, http_client }),
+            inner: Arc::new(ConfigInner {
+                file,
+                http_client,
+                effective_max_request_body_bytes,
+            }),
             presets,
         })
     }
@@ -537,6 +531,29 @@ fn default_sse_buffer_size() -> usize {
 
 fn default_max_request_body_bytes() -> usize {
     DEFAULT_MAX_REQUEST_BODY_BYTES
+}
+
+/// Resolve the configured `MAX_REQUEST_BODY_BYTES` into the effective limit,
+/// warning once at load time when the configured value is missing or beyond
+/// the hard cap so operators see fat-fingered values immediately.
+fn compute_max_request_body_bytes(requested: usize) -> usize {
+    if requested == 0 {
+        tracing::warn!(
+            requested,
+            default = DEFAULT_MAX_REQUEST_BODY_BYTES,
+            "MAX_REQUEST_BODY_BYTES is zero; using the default"
+        );
+        DEFAULT_MAX_REQUEST_BODY_BYTES
+    } else if requested > HARD_MAX_REQUEST_BODY_BYTES {
+        tracing::warn!(
+            requested,
+            maximum = HARD_MAX_REQUEST_BODY_BYTES,
+            "MAX_REQUEST_BODY_BYTES exceeds the hard limit; clamping"
+        );
+        HARD_MAX_REQUEST_BODY_BYTES
+    } else {
+        requested
+    }
 }
 
 #[cfg(test)]

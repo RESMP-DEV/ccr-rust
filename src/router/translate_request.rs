@@ -57,8 +57,18 @@ pub(super) fn normalize_message_content(content: &serde_json::Value) -> serde_js
                         // (arrives here from Codex/chat frontends whose raw
                         // content was kept). Preserve it instead of letting
                         // the unknown-block fallback stringify the payload
-                        // as text.
-                        openai_blocks.push(block.clone());
+                        // as text, and normalize the shorthand string form
+                        // into the object the Chat Completions contract
+                        // requires.
+                        let mut normalized = block.clone();
+                        if let Some(url) = normalized
+                            .get("image_url")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            normalized["image_url"] =
+                                serde_json::json!({ "url": url });
+                        }
+                        openai_blocks.push(normalized);
                     }
                     "thinking" => {
                         if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
@@ -494,5 +504,26 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[1]["type"], "image_url");
         assert_eq!(blocks[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+}
+
+#[cfg(test)]
+mod string_image_url_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_message_content_wraps_string_image_url_into_object_form() {
+        let content = json!([
+            {"type": "text", "text": "see:"},
+            {"type": "image_url", "image_url": "data:image/png;base64,AAAA"}
+        ]);
+        let converted = normalize_message_content(&content);
+        let blocks = converted.as_array().unwrap();
+        assert_eq!(blocks[1]["type"], "image_url");
+        assert_eq!(
+            blocks[1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
     }
 }
