@@ -24,6 +24,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coverage for streaming and non-streaming requests. Documented native
   passthrough precedence and the existing structured-output limitation when
   translating Messages to OpenAI.
+- Added a configurable `MAX_REQUEST_BODY_BYTES` request limit (default
+  64 MiB, hard cap 1 GiB) that bounds wire bytes, zstd-decoded bodies,
+  upstream response reads, the Responses stream adapter, and a global
+  extractor body limit; 413 responses name the configured limit.
+- Delivered images to Anthropic-protocol providers from Responses and chat
+  clients: OpenAI `image_url` blocks convert to Anthropic `image` blocks at
+  the internal boundary and survive the tool round-trip instead of being
+  dropped or stringified; shorthand and object URL forms are accepted and
+  media types normalized for Anthropic; assistant images serialize as text
+  markers instead of vanishing.
+- Converted Codex V2 `agent_message` input items to assistant turns with
+  user framing for role-strict upstreams, fixing agent_message-only 400s
+  and restoring native multi-agent task assignment through the router.
+- Hardened credentials and config loading: startup rejects provider
+  credentials whose environment references failed expansion (keyed by
+  recorded failures, not text scans), 401s with placeholder keys carry a
+  restart hint, and environment expansion runs per value after JSON
+  parsing so keys containing quotes no longer corrupt the document.
+- Documented the verified Z.AI Anthropic endpoint contract (auth, content
+  blocks, streaming, vision caveats, credential-safe restart runbook) and
+  live MiniMax provider verification results.
 - Added optional exact `Router.modelAliases` mappings to configured
   `provider,model` routes. This lets existing clients keep their model IDs
   when the router default changes. Explicit routes and `ignoreDirect` retain
