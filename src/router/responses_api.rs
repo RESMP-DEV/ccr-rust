@@ -438,6 +438,39 @@ fn responses_content_to_openai_content(content: &serde_json::Value) -> serde_jso
     }
 }
 
+/// Merge a converted chat content value into the previous assistant turn's
+/// content without losing either side: two plain strings join with a blank
+/// line; anything else normalizes to a concatenated block array.
+fn merge_chat_contents(
+    existing: &serde_json::Value,
+    appended: &serde_json::Value,
+) -> serde_json::Value {
+    let as_blocks = |value: &serde_json::Value| -> Vec<serde_json::Value> {
+        match value {
+            serde_json::Value::String(text) if text.is_empty() => Vec::new(),
+            serde_json::Value::String(text) => {
+                vec![serde_json::json!({"type": "text", "text": text})]
+            }
+            serde_json::Value::Array(blocks) => blocks.clone(),
+            other => vec![serde_json::json!({"type": "text", "text": other.to_string()})],
+        }
+    };
+    if let (serde_json::Value::String(left), serde_json::Value::String(right)) =
+        (existing, appended)
+    {
+        if left.is_empty() {
+            return appended.clone();
+        }
+        if right.is_empty() {
+            return existing.clone();
+        }
+        return serde_json::Value::String(format!("{left}\n\n{right}"));
+    }
+    let mut blocks = as_blocks(existing);
+    blocks.extend(as_blocks(appended));
+    serde_json::Value::Array(blocks)
+}
+
 fn normalize_tool_output(output: &serde_json::Value) -> String {
     match output {
         serde_json::Value::String(s) => s.clone(),
@@ -696,22 +729,13 @@ pub(super) fn responses_request_to_openai_chat_request(
                             "content": format!("Message from agent '{author}' to '{recipient}':")
                         }));
                     }
-                    let content_text = match &content {
-                        serde_json::Value::String(text) => Some(text.clone()),
-                        _ => None,
-                    };
                     let merge_with_last = messages
                         .last()
                         .is_some_and(|message| message["role"] == "assistant");
-                    if merge_with_last && content_text.is_some() {
-                        let appended = content_text.unwrap_or_default();
+                    if merge_with_last {
                         let last = messages.last_mut().expect("checked above");
-                        let existing = last["content"].as_str().unwrap_or_default().to_string();
-                        last["content"] = if existing.is_empty() {
-                            serde_json::json!(appended)
-                        } else {
-                            serde_json::json!(format!("{existing}\n\n{appended}"))
-                        };
+                        let previous = last["content"].clone();
+                        last["content"] = merge_chat_contents(&previous, &content);
                     } else {
                         messages.push(serde_json::json!({
                             "role": "assistant",
@@ -781,11 +805,12 @@ pub(super) fn responses_request_to_openai_chat_request(
 
 async fn convert_openai_json_response_to_responses(response: Response) -> Response {
     let (mut parts, body) = response.into_parts();
+    let body_budget = responses_body_budget(&parts);
     let preserved_response = parts
         .extensions
         .get::<super::TrustedResponsesResponse>()
         .map(|response| response.0.clone());
-    let body_bytes = match to_bytes(body, usize::MAX).await {
+    let body_bytes = match to_bytes(body, body_budget).await {
         Ok(bytes) => bytes,
         Err(err) => {
             error!("Failed to read OpenAI response: {}", err);
@@ -1949,6 +1974,35 @@ mod agent_message_tests {
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[1]["role"], "assistant");
         assert_eq!(messages[1]["content"], "first\n\nsecond");
+    }
+
+    #[test]
+    fn merging_into_array_content_keeps_existing_blocks() {
+        let image_block = serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"}
+        });
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "agent_message", "author": "w", "recipient": "user",
+                 "content": [
+                     {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+                     {"type": "output_text", "text": "screenshot"}
+                 ]},
+                {"type": "agent_message", "author": "w", "recipient": "user",
+                 "content": [{"type": "output_text", "text": "follow-up"}]}
+            ]
+        });
+        let request = responses_request_to_openai_chat_request(&body).unwrap();
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "assistant");
+        let blocks = messages[1]["content"].as_array().expect("array content");
+        assert_eq!(blocks.len(), 3, "must keep image, first text, and appended text");
+        assert_eq!(blocks[0], image_block);
+        assert_eq!(blocks[1]["text"], "screenshot");
+        assert_eq!(blocks[2]["text"], "follow-up");
     }
 
     #[test]

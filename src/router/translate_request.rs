@@ -135,12 +135,20 @@ pub(super) fn openai_image_block_to_anthropic(
         .as_str()
         .or_else(|| image_url.get("url").and_then(|u| u.as_str()))?;
     if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((media_type, data)) = rest.split_once(";base64,") {
+        if let Some((raw_media_type, data)) = rest.split_once(";base64,") {
             if !data.is_empty() {
-                let media_type = if media_type.is_empty() {
-                    "image/jpeg"
-                } else {
-                    media_type
+                // Anthropic accepts only bare image media types; strip data
+                // URL parameters (e.g. `image/png;charset=utf-8`) and
+                // normalize the common `image/jpg` alias.
+                let bare_media_type = raw_media_type
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                let media_type = match bare_media_type {
+                    "" => "image/jpeg",
+                    "image/jpg" => "image/jpeg",
+                    other => other,
                 };
                 return Some(serde_json::json!({
                     "type": "image",
@@ -440,6 +448,23 @@ mod tests {
         assert_eq!(converted["type"], "image");
         assert_eq!(converted["source"]["type"], "url");
         assert_eq!(converted["source"]["url"], "https://example.test/pic.png");
+    }
+
+    #[test]
+    fn openai_image_block_normalizes_anthropic_media_types() {
+        let with_params = json!({
+            "type": "image_url",
+            "image_url": "data:image/png;charset=utf-8;base64,AAAA"
+        });
+        let converted = openai_image_block_to_anthropic(&with_params).unwrap();
+        assert_eq!(converted["source"]["media_type"], "image/png");
+
+        let jpg_alias = json!({
+            "type": "image_url",
+            "image_url": {"url": "data:image/jpg;base64,AAAA"}
+        });
+        let converted = openai_image_block_to_anthropic(&jpg_alias).unwrap();
+        assert_eq!(converted["source"]["media_type"], "image/jpeg");
     }
 
     #[test]

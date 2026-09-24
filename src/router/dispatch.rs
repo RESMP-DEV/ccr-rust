@@ -644,17 +644,21 @@ fn should_preserve_responses_response(
             .is_some()
 }
 
-/// A 401 from a provider whose configured key still contains an unexpanded
-/// `${VAR}` placeholder almost always means the router was started without
-/// its credential environment rather than the key being invalid.
+/// A 401 from a provider whose configured credentials still contain an
+/// unexpanded env placeholder almost always means the router was started
+/// without its credential environment rather than the key being invalid.
 fn credential_placeholder_hint(provider: &crate::config::Provider) -> Option<&'static str> {
-    let has_placeholder = provider.api_key.contains("${")
+    let has_placeholder = crate::config::contains_env_placeholder(&provider.api_key)
         || provider
             .extra_headers
             .as_ref()
-            .is_some_and(|headers| headers.values().any(|value| value.contains("${")));
+            .is_some_and(|headers| {
+                headers
+                    .values()
+                    .any(|value| crate::config::contains_env_placeholder(value))
+            });
     has_placeholder.then(|| {
-        " (configured key is an unexpanded ${VAR} placeholder; restart via the credential launcher or export the variable)"
+        " (the configured api_key or an extra header is an unexpanded env placeholder; restart via the credential launcher or export the variable)"
     })
 }
 

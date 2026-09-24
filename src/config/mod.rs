@@ -37,8 +37,39 @@ fn expand_env_references(value: &mut serde_json::Value, failures: &mut Vec<Strin
     }
 }
 
-/// Refuse to start with credentials that still contain unexpanded `${VAR}`
-/// references.
+/// Detect a leftover environment reference in either shellexpand syntax:
+/// `${VAR}` or braceless `$VAR`. Used to reject credentials that would be
+/// sent as literal placeholder text.
+pub(crate) fn contains_env_placeholder(text: &str) -> bool {
+    if text.contains("${") {
+        return true;
+    }
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'$' {
+            continue;
+        }
+        let mut cursor = index + 1;
+        if cursor >= bytes.len() {
+            break;
+        }
+        let first = bytes[cursor];
+        if !(first.is_ascii_alphabetic() || first == b'_') {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
+        {
+            cursor += 1;
+        }
+        return true;
+    }
+    false
+}
+
+/// Refuse to start with credentials that still contain unexpanded
+/// environment references.
 ///
 /// shellexpand only substitutes variables present in the process
 /// environment. A router started outside the credential launcher (raw
@@ -54,13 +85,16 @@ fn validate_provider_credentials(file: &ConfigFile, allow_unexpanded: bool) -> R
     }
     let mut offenders: Vec<String> = Vec::new();
     for provider in &file.providers {
-        if provider.api_key.contains("${") {
+        if contains_env_placeholder(&provider.api_key) {
             offenders.push(format!("provider '{}' api_key", provider.name));
         }
         if let Some(headers) = &provider.extra_headers {
             for (header_name, value) in headers {
-                if value.contains("${") {
-                    offenders.push(format!("provider '{}' header '{}'", provider.name, header_name));
+                if contains_env_placeholder(value) {
+                    offenders.push(format!(
+                        "provider '{}' header '{}'",
+                        provider.name, header_name
+                    ));
                 }
             }
         }
@@ -1005,6 +1039,20 @@ mod credential_guard_tests {
     fn expanded_and_inline_keys_pass() {
         validate_provider_credentials(&file_with_api_key("real-key"), false).unwrap();
         validate_provider_credentials(&file_with_api_key(""), false).unwrap();
+    }
+
+    #[test]
+    fn braceless_env_references_are_detected() {
+        assert!(contains_env_placeholder("$CCR_MISSING_KEY"));
+        assert!(contains_env_placeholder("prefix-${CCR_MISSING_KEY}"));
+        assert!(contains_env_placeholder("bearer $AZURE_KEY extra"));
+        assert!(!contains_env_placeholder("sk-real-key-123"));
+        assert!(!contains_env_placeholder("cost $5 and $$ only"));
+        assert!(!contains_env_placeholder(""));
+
+        let file = file_with_api_key("$CCR_MISSING_KEY");
+        let error = validate_provider_credentials(&file, false).unwrap_err();
+        assert!(error.to_string().contains("provider 'p1' api_key"));
     }
 
     #[test]

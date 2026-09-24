@@ -138,11 +138,12 @@ through CCR's Anthropic path with a coding-plan key (`sk-cp-...`):
 
 - Text: exact-answer probe completed with usage accounting flowing through
   CCR's token audit (40 in / 2 out on the smoke prompt).
-- Vision: **MiniMax-M3 reads structured images correctly through both
-  ingress shapes** — `/v1/responses` `input_image` (233 input tokens) and
-  `/v1/messages` native Anthropic `image` blocks (108 input tokens) both
-  answered `left=red, right=blue` on the two-color probe. Unlike glm-5.3
-  standard, M3 is safe for color-level vision answers.
+- Vision: on the structured two-color probe, **MiniMax-M3 answered exactly
+  (`left=red, right=blue`) through both ingress shapes** — `/v1/responses`
+  `input_image` (233 input tokens) and `/v1/messages` native Anthropic
+  `image` blocks (108 input tokens) — where glm-5.3 standard misread the
+  same probe's colors. That is the tested scope: structured color questions
+  on this probe, not a general vision-quality claim.
 - Streaming: standard Responses SSE through the conversion pipeline
   (`response.created` -> `output_item.added` -> `output_text.delta` ->
   `*.done` -> `response.completed`).

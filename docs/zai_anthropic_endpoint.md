@@ -123,9 +123,11 @@ launchd-spawned processes always carry credentials. If you must start
 manually, use `serve.py` the same way — never raw `ccr-rust start`.
 
 Check for in-flight `codex exec` workers before restarting the 3457 service;
-drain first. Verify after restart: `curl -s :PORT/health`, one cheap
-completion per provider, and `ps eww <pid> | tr ' ' '\n' | grep '^CCR_'`
-must show the injected variables.
+drain first. Verify after restart: `curl -s http://127.0.0.1:PORT/health`,
+one cheap completion per provider, and
+`ps eww <pid> | tr ' ' '\n' | grep '^CCR_' | sed 's/=.*/=<set>/'` must show
+the injected variable names (the `sed` redaction keeps values out of the
+terminal and any captured logs).
 
 CCR-Rust also refuses to start (`unexpanded credential references: ...`) when
 a provider `api_key` or `extra_headers` value still contains a `${VAR}`
