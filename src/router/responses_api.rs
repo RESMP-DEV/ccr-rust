@@ -667,6 +667,21 @@ pub(super) fn responses_request_to_openai_chat_request(
                         }]
                     }));
                 }
+                // Codex V2 multi-agent turns describe an agent's message with
+                // `agent_message` items instead of plain `message` items.
+                // Map them to assistant messages so worker/delegation
+                // requests containing only agent_message items no longer
+                // fail with "requires 'input' or 'instructions'".
+                "agent_message" => {
+                    let content = item
+                        .get("content")
+                        .map(responses_content_to_openai_content)
+                        .unwrap_or_else(|| serde_json::Value::String(String::new()));
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": content
+                    }));
+                }
                 _ => {}
             }
         }
@@ -1849,5 +1864,44 @@ mod image_content_tests {
         let converted = responses_content_to_openai_content(&content);
         // The surviving single text block collapses to a plain string.
         assert_eq!(converted, serde_json::json!("hi"));
+    }
+}
+
+#[cfg(test)]
+mod agent_message_tests {
+    use super::*;
+
+    #[test]
+    fn agent_message_items_convert_to_assistant_messages() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [{
+                "type": "agent_message",
+                "author": "worker",
+                "recipient": "user",
+                "content": [{"type": "output_text", "text": "task done"}]
+            }]
+        });
+        let request = responses_request_to_openai_chat_request(&body)
+            .expect("agent_message-only input must convert");
+        assert_eq!(request["messages"][0]["role"], "assistant");
+        assert_eq!(request["messages"][0]["content"], "task done");
+    }
+
+    #[test]
+    fn agent_message_mixed_input_preserves_order() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "message", "role": "user", "content": "run it"},
+                {"type": "agent_message", "author": "worker", "recipient": "user",
+                 "content": [{"type": "output_text", "text": "ran"}]}
+            ]
+        });
+        let request = responses_request_to_openai_chat_request(&body).unwrap();
+        assert_eq!(request["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(request["messages"][0]["role"], "user");
+        assert_eq!(request["messages"][1]["role"], "assistant");
+        assert_eq!(request["messages"][1]["content"], "ran");
     }
 }

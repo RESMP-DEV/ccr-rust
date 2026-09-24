@@ -358,8 +358,20 @@ impl Frontend for CodexFrontend {
                 ContentBlock::ToolResult { .. } => {
                     // Tool results are typically in user messages, not assistant responses
                 }
-                ContentBlock::Image { .. } => {
-                    // Images in response are not standard in OpenAI chat completions
+                ContentBlock::Image { source } => {
+                    // OpenAI chat completions has no assistant-image output.
+                    // Emit a text marker instead of silently dropping the
+                    // block so clients can tell an image was produced.
+                    let reference = match source {
+                        crate::frontend::ImageSource::Base64 { media_type, .. } => {
+                            media_type.clone()
+                        }
+                        crate::frontend::ImageSource::Url { url } => url.clone(),
+                    };
+                    if !content.is_empty() {
+                        content.push('\n');
+                    }
+                    content.push_str(&format!("[image: {reference}]"));
                 }
                 ContentBlock::Thinking { thinking, .. } => {
                     // Accumulate thinking content separately for the reasoning_content field
@@ -966,5 +978,36 @@ mod tests {
         let json: Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(json["choices"][0]["finish_reason"], "length");
+    }
+
+    #[test]
+    fn test_serialize_response_image_emits_marker() {
+        let frontend = create_frontend();
+        let response = InternalResponse {
+            id: "chatcmpl-img".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            model: "gpt-4".to_string(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "Here you go:".to_string(),
+                },
+                ContentBlock::Image {
+                    source: crate::frontend::ImageSource::Base64 {
+                        media_type: "image/png".to_string(),
+                        data: "AAAA".to_string(),
+                    },
+                },
+            ],
+            stop_reason: Some("end_turn".to_string()),
+            usage: None,
+            extra_data: None,
+        };
+
+        let bytes = frontend.serialize_response(response).unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+        let content = json["choices"][0]["message"]["content"].as_str().unwrap();
+        assert_eq!(content, "Here you go:\n[image: image/png]");
     }
 }
