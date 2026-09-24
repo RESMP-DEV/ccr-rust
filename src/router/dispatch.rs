@@ -644,6 +644,29 @@ fn should_preserve_responses_response(
             .is_some()
 }
 
+/// Build the upstream failure error, appending the credential-placeholder
+/// hint on 401s. Shared by both protocol paths so their messages stay in
+/// lockstep.
+fn provider_upstream_error(
+    status: reqwest::StatusCode,
+    url: &str,
+    body: &str,
+    provider: &crate::config::Provider,
+) -> TryRequestError {
+    let credential_hint = if status == reqwest::StatusCode::UNAUTHORIZED {
+        credential_placeholder_hint(provider).unwrap_or_default()
+    } else {
+        ""
+    };
+    TryRequestError::Other(anyhow::anyhow!(
+        "Provider returned {} from {}: {}{}",
+        status,
+        url,
+        body,
+        credential_hint
+    ))
+}
+
 /// A 401 from a provider whose configured credentials still contain an
 /// unexpanded env placeholder almost always means the router was started
 /// without its credential environment rather than the key being invalid.
@@ -828,19 +851,7 @@ pub(super) async fn try_request_via_openai_protocol(
             return Err(TryRequestError::RateLimited(retry_after));
         }
 
-        let credential_hint = if status == reqwest::StatusCode::UNAUTHORIZED {
-            credential_placeholder_hint(provider).unwrap_or_default()
-        } else {
-            ""
-        };
-
-        return Err(TryRequestError::Other(anyhow::anyhow!(
-            "Provider returned {} from {}: {}{}",
-            status,
-            url,
-            body,
-            credential_hint
-        )));
+        return Err(provider_upstream_error(status, &url, &body, provider));
     }
 
     // Handle streaming vs non-streaming.
@@ -1218,19 +1229,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
             return Err(TryRequestError::RateLimited(retry_after));
         }
 
-        let credential_hint = if status == reqwest::StatusCode::UNAUTHORIZED {
-            credential_placeholder_hint(provider).unwrap_or_default()
-        } else {
-            ""
-        };
-
-        return Err(TryRequestError::Other(anyhow::anyhow!(
-            "Provider returned {} from {}: {}{}",
-            status,
-            url,
-            body,
-            credential_hint
-        )));
+        return Err(provider_upstream_error(status, &url, &body, provider));
     }
 
     if request.stream.unwrap_or(false) {

@@ -13,33 +13,40 @@ use crate::debug_capture::DebugCaptureConfig;
 const REASONING_EFFORT_VALUES: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/// Recursively expand `${VAR}` references in every string value of a parsed
-/// JSON document. Values whose variables are missing keep their raw text and
-/// record the failure; `validate_provider_credentials` decides whether the
-/// leftovers are acceptable.
-fn expand_env_references(value: &mut serde_json::Value, failures: &mut Vec<String>) {
+/// Recursively expand `${VAR}` and `$VAR` references in every string value
+/// of a parsed JSON document. Values whose variables are missing keep their
+/// raw text and record `(json pointer, error)`; the credential gate decides
+/// whether the leftovers are acceptable.
+fn expand_env_references(
+    value: &mut serde_json::Value,
+    failures: &mut Vec<(String, String)>,
+    pointer: &str,
+) {
     match value {
         serde_json::Value::String(text) => match shellexpand::env(text) {
             Ok(expanded) => *text = expanded.into_owned(),
-            Err(error) => failures.push(error.to_string()),
+            Err(error) => failures.push((pointer.to_string(), error.to_string())),
         },
         serde_json::Value::Array(items) => {
-            for item in items {
-                expand_env_references(item, failures);
+            for (index, item) in items.iter_mut().enumerate() {
+                expand_env_references(item, failures, &format!("{pointer}/{index}"));
             }
         }
         serde_json::Value::Object(map) => {
-            for item in map.values_mut() {
-                expand_env_references(item, failures);
+            for (key, item) in map.iter_mut() {
+                let escaped = key.replace('~', "~0").replace('/', "~1");
+                expand_env_references(item, failures, &format!("{pointer}/{escaped}"));
             }
         }
         _ => {}
     }
 }
 
-/// Detect a leftover environment reference in either shellexpand syntax:
-/// `${VAR}` or braceless `$VAR`. Used to reject credentials that would be
-/// sent as literal placeholder text.
+/// Heuristic scan for leftover `${VAR}` or braceless `$VAR` text. Used only
+/// for the runtime 401 hint: it may false-positive on values that
+/// legitimately contain `$word`, which is acceptable for a log hint but is
+/// never used to block startup (the credential gate consumes recorded
+/// expansion failures instead).
 pub(crate) fn contains_env_placeholder(text: &str) -> bool {
     if text.contains("${") {
         return true;
@@ -49,7 +56,7 @@ pub(crate) fn contains_env_placeholder(text: &str) -> bool {
         if *byte != b'$' {
             continue;
         }
-        let mut cursor = index + 1;
+        let cursor = index + 1;
         if cursor >= bytes.len() {
             break;
         }
@@ -57,44 +64,60 @@ pub(crate) fn contains_env_placeholder(text: &str) -> bool {
         if !(first.is_ascii_alphabetic() || first == b'_') {
             continue;
         }
-        cursor += 1;
-        while cursor < bytes.len()
-            && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
-        {
-            cursor += 1;
-        }
         return true;
     }
     false
 }
 
-/// Refuse to start with credentials that still contain unexpanded
-/// environment references.
+/// Interpret `CCR_ALLOW_UNEXPANDED_CREDENTIALS`; accept the usual truthy
+/// spellings so an operator is never surprised by a silently inert override.
+fn allow_unexpanded_credentials_override() -> bool {
+    std::env::var("CCR_ALLOW_UNEXPANDED_CREDENTIALS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Refuse to start when a provider credential failed environment expansion.
 ///
 /// shellexpand only substitutes variables present in the process
 /// environment. A router started outside the credential launcher (raw
 /// `ccr-rust start` instead of `serve.py`) keeps the literal placeholder as
 /// the key, and every provider then returns 401s indistinguishable from
 /// expired credentials, which derails diagnosis (2026-09-23 incident).
-/// Failing fast at startup turns that into an immediate, self-explaining
-/// error. Set `CCR_ALLOW_UNEXPANDED_CREDENTIALS=true` to override for
+/// The gate consumes the recorded expansion failures, so values that
+/// expanded successfully are never rejected for their content.
+/// Set `CCR_ALLOW_UNEXPANDED_CREDENTIALS=true` to override for
 /// intentionally keyless local setups.
-fn validate_provider_credentials(file: &ConfigFile, allow_unexpanded: bool) -> Result<()> {
+fn validate_provider_credentials(
+    config: &serde_json::Value,
+    expansion_failures: &[(String, String)],
+    allow_unexpanded: bool,
+) -> Result<()> {
     if allow_unexpanded {
         return Ok(());
     }
+    let providers = config
+        .get("Providers")
+        .and_then(serde_json::Value::as_array);
     let mut offenders: Vec<String> = Vec::new();
-    for provider in &file.providers {
-        if contains_env_placeholder(&provider.api_key) {
-            offenders.push(format!("provider '{}' api_key", provider.name));
-        }
-        if let Some(headers) = &provider.extra_headers {
-            for (header_name, value) in headers {
-                if contains_env_placeholder(value) {
-                    offenders.push(format!(
-                        "provider '{}' header '{}'",
-                        provider.name, header_name
-                    ));
+    if let Some(providers) = providers {
+        for (index, provider) in providers.iter().enumerate() {
+            let name = provider
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            let api_key_pointer = format!("/Providers/{index}/api_key");
+            let header_prefix = format!("/Providers/{index}/extra_headers/");
+            for (pointer, _error) in expansion_failures {
+                if pointer == &api_key_pointer {
+                    offenders.push(format!("provider '{name}' api_key"));
+                } else if let Some(header) = pointer.strip_prefix(&header_prefix) {
+                    offenders.push(format!("provider '{name}' header '{header}'"));
                 }
             }
         }
@@ -102,6 +125,8 @@ fn validate_provider_credentials(file: &ConfigFile, allow_unexpanded: bool) -> R
     if offenders.is_empty() {
         return Ok(());
     }
+    offenders.sort();
+    offenders.dedup();
     anyhow::bail!(
         "unexpanded credential references: {}. Start via the credential launcher (serve.py) \
          or export the referenced variables; requests would authenticate with the literal \
@@ -112,7 +137,8 @@ fn validate_provider_credentials(file: &ConfigFile, allow_unexpanded: bool) -> R
 }
 
 /// Validate cross-field provider requirements before the router accepts traffic.
-fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {    for provider in providers {
+fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
+    for provider in providers {
         let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
             continue;
         };
@@ -318,9 +344,21 @@ impl Config {
     pub fn max_request_body_bytes(&self) -> usize {
         let requested = self.inner.file.max_request_body_bytes;
         if requested == 0 {
+            tracing::warn!(
+                requested,
+                default = DEFAULT_MAX_REQUEST_BODY_BYTES,
+                "MAX_REQUEST_BODY_BYTES is zero; using the default"
+            );
             DEFAULT_MAX_REQUEST_BODY_BYTES
+        } else if requested > HARD_MAX_REQUEST_BODY_BYTES {
+            tracing::warn!(
+                requested,
+                maximum = HARD_MAX_REQUEST_BODY_BYTES,
+                "MAX_REQUEST_BODY_BYTES exceeds the hard limit; clamping"
+            );
+            HARD_MAX_REQUEST_BODY_BYTES
         } else {
-            requested.min(HARD_MAX_REQUEST_BODY_BYTES)
+            requested
         }
     }
 
@@ -352,21 +390,27 @@ impl Config {
         // surfaces as a misleading "expected `,` or `}`" parse error.
         let mut value: serde_json::Value =
             serde_json::from_str(&raw_content).context("Failed to parse config JSON")?;
-        let mut expansion_failures: Vec<String> = Vec::new();
-        expand_env_references(&mut value, &mut expansion_failures);
+        let mut expansion_failures: Vec<(String, String)> = Vec::new();
+        expand_env_references(&mut value, &mut expansion_failures, "");
         if !expansion_failures.is_empty() {
             tracing::warn!(
                 "Failed to expand env vars in config, using raw: {}",
-                expansion_failures.join("; ")
+                expansion_failures
+                    .iter()
+                    .map(|(pointer, error)| format!("{pointer}: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             );
         }
+        // The credential gate keys off real expansion failures, never off
+        // substring scans of the resulting values: a key that legitimately
+        // expands to text containing `$word` must not block startup.
+        let allow_unexpanded_credentials = allow_unexpanded_credentials_override();
+        validate_provider_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
         let file: ConfigFile =
             serde_json::from_value(value).context("Failed to parse config JSON")?;
         validate_provider_contracts(&file.providers)?;
         validate_model_aliases(&file.router, &file.providers)?;
-        let allow_unexpanded_credentials = std::env::var("CCR_ALLOW_UNEXPANDED_CREDENTIALS")
-            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
-        validate_provider_credentials(&file, allow_unexpanded_credentials)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
         let mut client_builder = reqwest::Client::builder()
@@ -1013,54 +1057,89 @@ mod tests {
 mod credential_guard_tests {
     use super::*;
 
-    fn file_with_api_key(api_key: &str) -> ConfigFile {
+    fn config_value_with_api_key(api_key: &str) -> serde_json::Value {
         serde_json::from_str(&format!(
             r#"{{"Providers": [{{"name": "p1", "api_base_url": "http://x", "api_key": "{api_key}", "models": ["m"]}}], "Router": {{"default": "p1,m"}}}}"#
         ))
         .unwrap()
     }
 
+    fn expand_and_validate(
+        config: serde_json::Value,
+        allow_unexpanded: bool,
+    ) -> Result<()> {
+        let mut value = config;
+        let mut failures = Vec::new();
+        expand_env_references(&mut value, &mut failures, "");
+        validate_provider_credentials(&value, &failures, allow_unexpanded)
+    }
+
     #[test]
     fn unexpanded_api_key_is_rejected() {
-        let file = file_with_api_key("${CCR_DEFINITELY_MISSING_KEY}");
-        let error = validate_provider_credentials(&file, false).unwrap_err();
+        let error = expand_and_validate(
+            config_value_with_api_key("${CCR_DEFINITELY_MISSING_KEY}"),
+            false,
+        )
+        .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("provider 'p1' api_key"), "{message}");
         assert!(message.contains("CCR_ALLOW_UNEXPANDED_CREDENTIALS"), "{message}");
     }
 
     #[test]
+    fn unexpanded_extra_header_is_rejected() {
+        let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"api-key": "${CCR_AZURE_API_KEY}"}}], "Router": {"default": "p1,m"}}"#;
+        let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
+        assert!(error.to_string().contains("header 'api-key'"));
+    }
+
+    #[test]
     fn override_allows_unexpanded_keys() {
-        let file = file_with_api_key("${CCR_DEFINITELY_MISSING_KEY}");
-        validate_provider_credentials(&file, true).unwrap();
+        expand_and_validate(
+            config_value_with_api_key("${CCR_DEFINITELY_MISSING_KEY}"),
+            true,
+        )
+        .unwrap();
     }
 
     #[test]
     fn expanded_and_inline_keys_pass() {
-        validate_provider_credentials(&file_with_api_key("real-key"), false).unwrap();
-        validate_provider_credentials(&file_with_api_key(""), false).unwrap();
+        expand_and_validate(config_value_with_api_key("real-key"), false).unwrap();
+        expand_and_validate(config_value_with_api_key(""), false).unwrap();
     }
 
     #[test]
     fn braceless_env_references_are_detected() {
         assert!(contains_env_placeholder("$CCR_MISSING_KEY"));
         assert!(contains_env_placeholder("prefix-${CCR_MISSING_KEY}"));
-        assert!(contains_env_placeholder("bearer $AZURE_KEY extra"));
         assert!(!contains_env_placeholder("sk-real-key-123"));
         assert!(!contains_env_placeholder("cost $5 and $$ only"));
         assert!(!contains_env_placeholder(""));
 
-        let file = file_with_api_key("$CCR_MISSING_KEY");
-        let error = validate_provider_credentials(&file, false).unwrap_err();
+        let error = expand_and_validate(config_value_with_api_key("$CCR_MISSING_KEY"), false)
+            .unwrap_err();
         assert!(error.to_string().contains("provider 'p1' api_key"));
     }
 
+    /// Regression (CodeRabbit round 2): a credential whose *expanded* value
+    /// contains dollar-prefixed text must not be rejected; only real
+    /// expansion failures block startup.
     #[test]
-    fn unexpanded_extra_header_is_rejected() {
-        let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"api-key": "${CCR_AZURE_API_KEY}"}}], "Router": {"default": "p1,m"}}"#;
-        let file: ConfigFile = serde_json::from_str(raw).unwrap();
-        let error = validate_provider_credentials(&file, false).unwrap_err();
-        assert!(error.to_string().contains("header 'api-key'"));
+    fn expanded_value_containing_dollar_text_is_accepted() {
+        let dir = std::env::temp_dir().join(format!("ccr-cfg-dollar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "${CCR_TEST_DOLLAR_KEY_9272}", "models": ["m"]}], "Router": {"default": "p1,m"}}"#,
+        )
+        .unwrap();
+        std::env::set_var("CCR_TEST_DOLLAR_KEY_9272", "pa$ssword");
+        let result = Config::from_file(path.to_str().unwrap());
+        std::env::remove_var("CCR_TEST_DOLLAR_KEY_9272");
+        let config = result.expect("expanded $-containing value must pass the gate");
+        assert_eq!(config.providers()[0].api_key, "pa$ssword");
+        std::fs::remove_file(&path).unwrap();
     }
 }
 

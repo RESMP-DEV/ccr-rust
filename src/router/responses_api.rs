@@ -438,37 +438,43 @@ fn responses_content_to_openai_content(content: &serde_json::Value) -> serde_jso
     }
 }
 
+/// Normalize a chat content value into a block array, consuming the value
+/// (no deep clones).
+fn content_into_blocks(value: serde_json::Value) -> Vec<serde_json::Value> {
+    match value {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::String(text) if text.is_empty() => Vec::new(),
+        serde_json::Value::String(text) => {
+            vec![serde_json::json!({"type": "text", "text": text})]
+        }
+        serde_json::Value::Array(blocks) => blocks,
+        other => vec![serde_json::json!({"type": "text", "text": other.to_string()})],
+    }
+}
+
 /// Merge a converted chat content value into the previous assistant turn's
 /// content without losing either side: two plain strings join with a blank
 /// line; anything else normalizes to a concatenated block array.
 fn merge_chat_contents(
-    existing: &serde_json::Value,
-    appended: &serde_json::Value,
+    existing: serde_json::Value,
+    appended: serde_json::Value,
 ) -> serde_json::Value {
-    let as_blocks = |value: &serde_json::Value| -> Vec<serde_json::Value> {
-        match value {
-            serde_json::Value::String(text) if text.is_empty() => Vec::new(),
-            serde_json::Value::String(text) => {
-                vec![serde_json::json!({"type": "text", "text": text})]
+    match (existing, appended) {
+        (serde_json::Value::String(left), serde_json::Value::String(right)) => {
+            if left.is_empty() {
+                return serde_json::Value::String(right);
             }
-            serde_json::Value::Array(blocks) => blocks.clone(),
-            other => vec![serde_json::json!({"type": "text", "text": other.to_string()})],
+            if right.is_empty() {
+                return serde_json::Value::String(left);
+            }
+            serde_json::Value::String(format!("{left}\n\n{right}"))
         }
-    };
-    if let (serde_json::Value::String(left), serde_json::Value::String(right)) =
-        (existing, appended)
-    {
-        if left.is_empty() {
-            return appended.clone();
+        (existing, appended) => {
+            let mut blocks = content_into_blocks(existing);
+            blocks.extend(content_into_blocks(appended));
+            serde_json::Value::Array(blocks)
         }
-        if right.is_empty() {
-            return existing.clone();
-        }
-        return serde_json::Value::String(format!("{left}\n\n{right}"));
     }
-    let mut blocks = as_blocks(existing);
-    blocks.extend(as_blocks(appended));
-    serde_json::Value::Array(blocks)
 }
 
 fn normalize_tool_output(output: &serde_json::Value) -> String {
@@ -734,8 +740,41 @@ pub(super) fn responses_request_to_openai_chat_request(
                         .is_some_and(|message| message["role"] == "assistant");
                     if merge_with_last {
                         let last = messages.last_mut().expect("checked above");
-                        let previous = last["content"].clone();
-                        last["content"] = merge_chat_contents(&previous, &content);
+                        // Extend the accumulated turn in place: string
+                        // appends amortize, array blocks move, and the only
+                        // rebuild happens on a shape change, so a long run
+                        // of agent messages stays linear.
+                        let slot = last
+                            .get_mut("content")
+                            .expect("assistant content slot exists");
+                        match (&mut *slot, content) {
+                            (
+                                serde_json::Value::String(accumulated),
+                                serde_json::Value::String(text),
+                            ) => {
+                                if accumulated.is_empty() {
+                                    *accumulated = text;
+                                } else {
+                                    accumulated.push_str("\n\n");
+                                    accumulated.push_str(&text);
+                                }
+                            }
+                            (slot_value, serde_json::Value::Array(new_blocks)) => {
+                                if !slot_value.is_array() {
+                                    let previous = std::mem::take(slot_value);
+                                    *slot_value =
+                                        serde_json::Value::Array(content_into_blocks(previous));
+                                }
+                                slot_value
+                                    .as_array_mut()
+                                    .expect("checked is_array")
+                                    .extend(new_blocks);
+                            }
+                            (slot_value, other) => {
+                                let previous = std::mem::take(slot_value);
+                                *slot_value = merge_chat_contents(previous, other);
+                            }
+                        }
                     } else {
                         messages.push(serde_json::json!({
                             "role": "assistant",

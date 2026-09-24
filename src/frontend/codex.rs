@@ -361,17 +361,19 @@ impl Frontend for CodexFrontend {
                 ContentBlock::Image { source } => {
                     // OpenAI chat completions has no assistant-image output.
                     // Emit a text marker instead of silently dropping the
-                    // block so clients can tell an image was produced.
-                    let reference = match source {
+                    // block so clients can tell an image was produced. URL
+                    // sources are never echoed back: they can embed data:
+                    // payloads or query-string credentials.
+                    let marker = match source {
                         crate::frontend::ImageSource::Base64 { media_type, .. } => {
-                            media_type.clone()
+                            format!("[image: {media_type}]")
                         }
-                        crate::frontend::ImageSource::Url { url } => url.clone(),
+                        crate::frontend::ImageSource::Url { .. } => "[image]".to_string(),
                     };
                     if !content.is_empty() {
                         content.push('\n');
                     }
-                    content.push_str(&format!("[image: {reference}]"));
+                    content.push_str(&marker);
                 }
                 ContentBlock::Thinking { thinking, .. } => {
                     // Accumulate thinking content separately for the reasoning_content field
