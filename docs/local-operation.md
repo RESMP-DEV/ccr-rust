@@ -6,6 +6,8 @@ For separate personal and corporate accounts, read [Authentication suites](auth-
 before adding credentials or fallback routes.
 See [Switching plans](switching-plans.md) for Kimi/GLM commands and the
 configuration needed for Codex tool calls through Kimi.
+Use [Worker inspection](worker-inspection.md) for bounded, offline summaries
+and incremental event inspection instead of loading full subagent transcripts.
 
 ## Existing workstation setup
 

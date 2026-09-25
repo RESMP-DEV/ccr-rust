@@ -26,6 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented the intentional reqwest version boundary and exact telemetry test
   gates. Redirect-path and timing coverage was strengthened without enabling
   telemetry CI.
+- Corrected the shared test SSE parser to preserve payload indentation and
+  tabs; delimiter-space regressions run within the existing stream test.
+
+- Consolidated Codex streaming integration helpers into a shared test-support
+  module while retaining protocol-specific upstream fixtures and all existing
+  test coverage.
+- Added offline `workers list/show/events/detail` CLI commands for inspecting
+  `codex-ccr-worker` artifacts without loading full transcripts. Bounded text
+  and JSON summaries expose reported usage, failures, activity, receipt state,
+  and final-report previews; byte cursors support incremental polling and
+  targeted tool-output inspection. Incomplete/malformed traces remain visible,
+  and worker completion is never presented as verified task success. Report,
+  selection, and rendering behavior use direct unit coverage, with a small
+  real-process CLI smoke suite instead of repeated subprocess-based assertions.
+  Non-UTF-8 run paths render lossily rather than panicking during inspection.
 - Fixed reasoning controls being silently dropped on Anthropic-compatible
   upstreams. Native Messages requests retain `thinking` and `output_config`;
   translated Responses/Chat requests map explicit reasoning effort to
