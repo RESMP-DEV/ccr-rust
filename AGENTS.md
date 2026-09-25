@@ -100,6 +100,20 @@ For new CLI commands:
 - hook it into the top-level dispatch,
 - and keep command behavior consistent with the existing subcommand style.
 
+## Worker inspection
+
+<worker_inspection>
+Use `ccr-rust workers list --limit 5` and `ccr-rust workers show RUN --json`
+to inspect native `codex-ccr-worker` artifacts without loading full JSONL
+transcripts. Keep the launcher's verbose stdout/stderr redirected to private
+files. Select an exact run ID or receipt path; `latest` can change when other
+workers start. For progress, use `workers events RUN --after CURSOR --limit 10
+--json` and retain `next_cursor`. Fetch individual evidence with `workers detail
+RUN EVENT_CURSOR --max-chars 2000`. Completion and final reports are claims,
+not verified success; inspect failed commands and verify the resulting diff
+and tests. See `docs/worker-inspection.md` for limits and exit semantics.
+</worker_inspection>
+
 ## Validation Expectations
 
 Run at least the relevant unit or integration tests for the area you changed. For routing, translation, or config work, `cargo test --all-features` is usually the minimum acceptable validation path. Changes under `vendor/gp-routing/` also run that package's own tests.

@@ -18,6 +18,25 @@ ccr-rust [GLOBAL_OPTIONS] <COMMAND> [COMMAND_OPTIONS]
 
 ## Commands
 
+### `workers`
+Inspect saved `codex-ccr-worker` runs offline, without contacting a model or
+loading router credentials. See [Worker inspection](worker-inspection.md) for
+the low-context agent workflow, output contract, and failure semantics.
+
+```bash
+ccr-rust workers list --limit 5
+ccr-rust workers show latest --json
+ccr-rust workers events RUN --after 0 --limit 10 --json
+ccr-rust workers detail RUN CURSOR --max-chars 2000
+```
+
+`--runs-dir PATH` (or `CCR_WORKER_RUNS_DIR`) overrides
+`~/.cache/ccr-worker-runs`. `--json` and `--runs-dir` work before or after the
+subcommand. Runs can be selected by directory name, directory path, JSON
+receipt path, or `latest`. Limits are validated: 1–100 events/runs, 1–16000
+characters per preview. Inspection exits 0 on successful reads even when the
+worker failed; invalid arguments exit 2 and operational errors exit 1.
+
 ### `start` (default)
 Start the CCR server. This is the default command if no subcommand is specified.
 
