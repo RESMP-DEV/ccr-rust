@@ -4,8 +4,19 @@ use std::path::Path;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+fn isolated_command(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ccr-rust"));
+    command.env_clear().env("HOME", root);
+    for variable in ["SystemRoot", "WINDIR", "PATH", "RUST_BACKTRACE"] {
+        if let Some(value) = std::env::var_os(variable) {
+            command.env(variable, value);
+        }
+    }
+    command
+}
+
 fn run_json(root: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ccr-rust"))
+    isolated_command(root)
         .args([
             "workers",
             "--runs-dir",
@@ -13,8 +24,6 @@ fn run_json(root: &Path, arguments: &[&str]) -> Output {
             "--json",
         ])
         .args(arguments)
-        .env_clear()
-        .env("HOME", root)
         .output()
         .expect("run ccr-rust workers")
 }
@@ -277,7 +286,7 @@ fn human_rendering_is_bounded_and_control_sanitized() {
         }})],
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ccr-rust"))
+    let output = isolated_command(root)
         .args([
             "workers",
             "--runs-dir",
@@ -285,7 +294,6 @@ fn human_rendering_is_bounded_and_control_sanitized() {
             "show",
             "human",
         ])
-        .env_clear()
         .output()
         .unwrap();
     assert!(output.status.success());

@@ -126,6 +126,28 @@ fn summarize_counts_failures_usage_and_bounds_final_report() {
     assert_eq!(shown["final_report"]["truncated"], true);
 }
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_missing_run_paths_are_safe_for_summary_events_and_listing() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let directory = TempDir::new().unwrap();
+    let run = directory
+        .path()
+        .join("missing-parent")
+        .join(OsString::from_vec(b"run-\xff".to_vec()));
+
+    for report in [
+        summarize(&run, 128).unwrap(),
+        events(&run, 0, 10, None, 128).unwrap(),
+    ] {
+        assert_eq!(report["run_dir"], run.to_string_lossy().as_ref());
+        assert_eq!(report["run_id"], "run-\u{fffd}");
+    }
+    assert_eq!(list_entry(&run).unwrap()["run_id"], "run-\u{fffd}");
+}
+
 #[test]
 fn events_page_by_absolute_cursor_until_eof() {
     let directory = TempDir::new().unwrap();

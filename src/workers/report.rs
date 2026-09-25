@@ -257,7 +257,7 @@ pub(super) fn summarize(path: &Path, max_chars: usize) -> Result<Value> {
         failed_commands.max(receipt["failed_tool_commands"].as_u64().unwrap_or(0));
     Ok(json!({
         "schema_version": 1, "run_id": path.file_name().unwrap_or_default().to_string_lossy(),
-        "run_dir": path, "thread_id": thread_id.or_else(|| receipt["thread_id"].as_str().map(|value| text(value, 128))),
+        "run_dir": path.to_string_lossy(), "thread_id": thread_id.or_else(|| receipt["thread_id"].as_str().map(|value| text(value, 128))),
         "outcome": text(outcome, 80), "task_verified": false,
         "needs_attention": outcome != "completed" || failed_commands > 0 || failed_items > 0 || errors > 0 || !warnings.is_empty(),
         "model_requested": receipt["model"].as_str().map(|value| text(value, 128)),
@@ -355,7 +355,7 @@ pub(super) fn events(
     })?;
     Ok(
         json!({"schema_version": 1, "run_id": path.file_name().unwrap_or_default().to_string_lossy(),
-        "run_dir": path, "events": events, "next_cursor": stats.next_cursor,
+        "run_dir": path.to_string_lossy(), "events": events, "next_cursor": stats.next_cursor,
         "has_more": stats.next_cursor < stats.file_bytes, "trace": stats}),
     )
 }

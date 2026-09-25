@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and worker completion is never presented as verified task success. Report,
   selection, and rendering behavior use direct unit coverage, with a small
   real-process CLI smoke suite instead of repeated subprocess-based assertions.
+  Non-UTF-8 run paths render lossily rather than panicking during inspection.
 - Fixed reasoning controls being silently dropped on Anthropic-compatible
   upstreams. Native Messages requests retain `thinking` and `output_config`;
   translated Responses/Chat requests map explicit reasoning effort to
