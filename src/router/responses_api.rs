@@ -25,8 +25,22 @@ mod incremental_stream;
 pub use handler::handle_responses;
 use incremental_stream::ResponsesStreamConverter;
 
-pub(super) const MAX_RESPONSES_BODY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RESPONSES_ZSTD_WINDOW_LOG: u32 = 24;
+
+/// Per-response body budget attached by `handle_responses` so upstream
+/// response reading and the stream adapter honor the configured
+/// `MAX_REQUEST_BODY_BYTES` instead of a fixed local constant.
+#[derive(Clone, Copy)]
+pub(super) struct ResponsesBodyBudget(pub usize);
+
+fn responses_body_budget(parts: &axum::http::response::Parts) -> usize {
+    parts
+        .extensions
+        .get::<ResponsesBodyBudget>()
+        .map(|budget| budget.0)
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(crate::config::DEFAULT_MAX_REQUEST_BODY_BYTES)
+}
 
 #[derive(Debug)]
 pub(super) enum DecodeRequestBodyError {
@@ -94,6 +108,7 @@ fn looks_like_sse_payload(payload: &str) -> bool {
 pub(super) fn decode_request_body(
     bytes: &[u8],
     headers: &HeaderMap,
+    max_decoded_bytes: usize,
 ) -> Result<Vec<u8>, DecodeRequestBodyError> {
     let content_encoding = headers
         .get(axum::http::header::CONTENT_ENCODING)
@@ -124,7 +139,7 @@ pub(super) fn decode_request_body(
             })?;
         let mut decoded = Vec::new();
         decoder
-            .take((MAX_RESPONSES_BODY_BYTES + 1) as u64)
+            .take((max_decoded_bytes + 1) as u64)
             .read_to_end(&mut decoded)
             .map_err(|e| {
                 DecodeRequestBodyError::Invalid(format!(
@@ -132,10 +147,10 @@ pub(super) fn decode_request_body(
                     e
                 ))
             })?;
-        if decoded.len() > MAX_RESPONSES_BODY_BYTES {
+        if decoded.len() > max_decoded_bytes {
             return Err(DecodeRequestBodyError::PayloadTooLarge(format!(
-                "Decoded request body exceeds {} bytes",
-                MAX_RESPONSES_BODY_BYTES
+                "Decoded request body exceeds {} bytes; raise MAX_REQUEST_BODY_BYTES in the ccr-rust config if this is a legitimate large agent request",
+                max_decoded_bytes
             )));
         }
         return Ok(decoded);
@@ -382,10 +397,20 @@ fn responses_content_to_openai_content(content: &serde_json::Value) -> serde_jso
                         }
                     }
                     "input_image" => {
-                        if let Some(image_url) = item.get("image_url").and_then(|v| v.as_str()) {
+                        // The Responses API spells `image_url` as a plain
+                        // string; some clients send the chat-completions
+                        // object form instead. Accept both.
+                        let url_value = match item.get("image_url") {
+                            Some(serde_json::Value::String(url)) => {
+                                Some(serde_json::json!({ "url": url }))
+                            }
+                            Some(other @ serde_json::Value::Object(_)) => Some(other.clone()),
+                            _ => None,
+                        };
+                        if let Some(url_value) = url_value {
                             blocks.push(serde_json::json!({
                                 "type": "image_url",
-                                "image_url": {"url": image_url}
+                                "image_url": url_value
                             }));
                         }
                     }
@@ -410,6 +435,45 @@ fn responses_content_to_openai_content(content: &serde_json::Value) -> serde_jso
         }
         serde_json::Value::String(text) => serde_json::Value::String(text.clone()),
         _ => serde_json::Value::String(content.to_string()),
+    }
+}
+
+/// Normalize a chat content value into a block array, consuming the value
+/// (no deep clones).
+fn content_into_blocks(value: serde_json::Value) -> Vec<serde_json::Value> {
+    match value {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::String(text) if text.is_empty() => Vec::new(),
+        serde_json::Value::String(text) => {
+            vec![serde_json::json!({"type": "text", "text": text})]
+        }
+        serde_json::Value::Array(blocks) => blocks,
+        other => vec![serde_json::json!({"type": "text", "text": other.to_string()})],
+    }
+}
+
+/// Merge a converted chat content value into the previous assistant turn's
+/// content without losing either side: two plain strings join with a blank
+/// line; anything else normalizes to a concatenated block array.
+fn merge_chat_contents(
+    existing: serde_json::Value,
+    appended: serde_json::Value,
+) -> serde_json::Value {
+    match (existing, appended) {
+        (serde_json::Value::String(left), serde_json::Value::String(right)) => {
+            if left.is_empty() {
+                return serde_json::Value::String(right);
+            }
+            if right.is_empty() {
+                return serde_json::Value::String(left);
+            }
+            serde_json::Value::String(format!("{left}\n\n{right}"))
+        }
+        (existing, appended) => {
+            let mut blocks = content_into_blocks(existing);
+            blocks.extend(content_into_blocks(appended));
+            serde_json::Value::Array(blocks)
+        }
     }
 }
 
@@ -642,6 +706,82 @@ pub(super) fn responses_request_to_openai_chat_request(
                         }]
                     }));
                 }
+                // Codex V2 multi-agent turns describe an agent's message with
+                // `agent_message` items instead of plain `message` items.
+                // Map them to assistant messages so worker/delegation
+                // requests containing only agent_message items no longer
+                // fail with "requires 'input' or 'instructions'". Chat and
+                // Anthropic-compatible upstreams reject conversations that
+                // open with an assistant turn, so frame a leading agent
+                // message with a user turn and merge consecutive ones.
+                "agent_message" => {
+                    let content = item
+                        .get("content")
+                        .map(responses_content_to_openai_content)
+                        .unwrap_or_else(|| serde_json::Value::String(String::new()));
+                    let opens_conversation =
+                        messages.iter().all(|message| message["role"] == "system");
+                    if opens_conversation {
+                        let author = item
+                            .get("author")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("agent");
+                        let recipient = item
+                            .get("recipient")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("user");
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": format!("Message from agent '{author}' to '{recipient}':")
+                        }));
+                    }
+                    let merge_with_last = messages
+                        .last()
+                        .is_some_and(|message| message["role"] == "assistant");
+                    if merge_with_last {
+                        let last = messages.last_mut().expect("checked above");
+                        // Extend the accumulated turn in place: string
+                        // appends amortize, array blocks move, and the only
+                        // rebuild happens on a shape change, so a long run
+                        // of agent messages stays linear.
+                        let slot = last
+                            .get_mut("content")
+                            .expect("assistant content slot exists");
+                        match (&mut *slot, content) {
+                            (
+                                serde_json::Value::String(accumulated),
+                                serde_json::Value::String(text),
+                            ) => {
+                                if accumulated.is_empty() {
+                                    *accumulated = text;
+                                } else {
+                                    accumulated.push_str("\n\n");
+                                    accumulated.push_str(&text);
+                                }
+                            }
+                            (slot_value, serde_json::Value::Array(new_blocks)) => {
+                                if !slot_value.is_array() {
+                                    let previous = std::mem::take(slot_value);
+                                    *slot_value =
+                                        serde_json::Value::Array(content_into_blocks(previous));
+                                }
+                                slot_value
+                                    .as_array_mut()
+                                    .expect("checked is_array")
+                                    .extend(new_blocks);
+                            }
+                            (slot_value, other) => {
+                                let previous = std::mem::take(slot_value);
+                                *slot_value = merge_chat_contents(previous, other);
+                            }
+                        }
+                    } else {
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": content
+                        }));
+                    }
+                }
                 _ => {}
             }
         }
@@ -684,13 +824,12 @@ pub(super) fn responses_request_to_openai_chat_request(
         let reasoning = reasoning
             .as_object()
             .ok_or_else(|| "responses request 'reasoning' must be an object".to_string())?;
-        let effort = match reasoning.get("effort").filter(|value| !value.is_null()) {
-            Some(effort) => effort.as_str().ok_or_else(|| {
+        if let Some(effort) = reasoning.get("effort").filter(|value| !value.is_null()) {
+            let effort = effort.as_str().ok_or_else(|| {
                 "responses request 'reasoning.effort' must be a string".to_string()
-            })?,
-            None => "medium",
-        };
-        request["reasoning_effort"] = serde_json::Value::String(effort.to_string());
+            })?;
+            request["reasoning_effort"] = serde_json::Value::String(effort.to_string());
+        }
     }
     if let Some(previous_response_id) = body
         .get("previous_response_id")
@@ -704,11 +843,12 @@ pub(super) fn responses_request_to_openai_chat_request(
 
 async fn convert_openai_json_response_to_responses(response: Response) -> Response {
     let (mut parts, body) = response.into_parts();
+    let body_budget = responses_body_budget(&parts);
     let preserved_response = parts
         .extensions
         .get::<super::TrustedResponsesResponse>()
         .map(|response| response.0.clone());
-    let body_bytes = match to_bytes(body, usize::MAX).await {
+    let body_bytes = match to_bytes(body, body_budget).await {
         Ok(bytes) => bytes,
         Err(err) => {
             error!("Failed to read OpenAI response: {}", err);
@@ -807,6 +947,7 @@ async fn convert_openai_json_response_to_responses(response: Response) -> Respon
 
 async fn convert_openai_stream_response_to_responses(response: Response) -> Response {
     let (mut parts, body) = response.into_parts();
+    let body_budget = responses_body_budget(&parts);
     let preserved_response = parts
         .extensions
         .get::<super::TrustedResponsesResponse>()
@@ -820,7 +961,7 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
             return Response::from_parts(parts, body);
         }
 
-        let body_bytes = match to_bytes(body, MAX_RESPONSES_BODY_BYTES).await {
+        let body_bytes = match to_bytes(body, body_budget).await {
             Ok(bytes) => bytes,
             Err(err) => {
                 error!("Failed to read OpenAI stream error body: {}", err);
@@ -911,7 +1052,7 @@ async fn convert_openai_stream_response_to_responses(response: Response) -> Resp
                 }
             };
             received_bytes = received_bytes.saturating_add(bytes.len());
-            if received_bytes > MAX_RESPONSES_BODY_BYTES {
+            if received_bytes > body_budget {
                 let failed = responses_stream_adapter_failed_event(
                     converter.response_id(),
                     "Upstream stream exceeded the Responses adapter limit",
@@ -1338,12 +1479,13 @@ mod tests {
             })
         );
         let body = Body::from_stream(futures::stream::iter([
-            Ok::<Bytes, std::io::Error>(Bytes::from(first)),
-            Ok(Bytes::from(vec![b'x'; MAX_RESPONSES_BODY_BYTES])),
+            Ok::<Bytes, std::io::Error>(Bytes::from(first.clone())),
+            Ok(Bytes::from(vec![b'x'; 1024])),
         ]));
         let upstream = Response::builder()
             .status(StatusCode::OK)
             .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+            .extension(ResponsesBodyBudget(first.len()))
             .body(body)
             .unwrap();
 
@@ -1790,5 +1932,131 @@ mod tests {
             assert_eq!(terminal["response"]["status"], status);
             assert_eq!(terminal["response"]["output"][0]["id"], "msg_resp_original");
         }
+    }
+}
+
+#[cfg(test)]
+mod image_content_tests {
+    use super::*;
+
+    #[test]
+    fn input_image_accepts_string_and_object_forms() {
+        let content = serde_json::json!([
+            {"type": "input_text", "text": "see:"},
+            {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+            {"type": "input_image", "image_url": {"url": "https://example.test/x.png", "detail": "low"}}
+        ]);
+        let converted = responses_content_to_openai_content(&content);
+        let blocks = converted.as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image_url");
+        assert_eq!(blocks[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(blocks[2]["type"], "image_url");
+        assert_eq!(blocks[2]["image_url"]["url"], "https://example.test/x.png");
+    }
+
+    #[test]
+    fn input_image_without_url_is_dropped() {
+        let content = serde_json::json!([
+            {"type": "input_text", "text": "hi"},
+            {"type": "input_image"}
+        ]);
+        let converted = responses_content_to_openai_content(&content);
+        // The surviving single text block collapses to a plain string.
+        assert_eq!(converted, serde_json::json!("hi"));
+    }
+}
+
+#[cfg(test)]
+mod agent_message_tests {
+    use super::*;
+
+    #[test]
+    fn agent_message_items_convert_to_assistant_messages() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [{
+                "type": "agent_message",
+                "author": "worker",
+                "recipient": "user",
+                "content": [{"type": "output_text", "text": "task done"}]
+            }]
+        });
+        let request = responses_request_to_openai_chat_request(&body)
+            .expect("agent_message-only input must convert");
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(
+            messages[0]["content"],
+            "Message from agent 'worker' to 'user':"
+        );
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "task done");
+    }
+
+    #[test]
+    fn consecutive_agent_messages_merge_into_one_assistant_turn() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "agent_message", "author": "worker", "recipient": "user",
+                 "content": [{"type": "output_text", "text": "first"}]},
+                {"type": "agent_message", "author": "worker", "recipient": "user",
+                 "content": [{"type": "output_text", "text": "second"}]}
+            ]
+        });
+        let request = responses_request_to_openai_chat_request(&body).unwrap();
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "first\n\nsecond");
+    }
+
+    #[test]
+    fn merging_into_array_content_keeps_existing_blocks() {
+        let image_block = serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"}
+        });
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "agent_message", "author": "w", "recipient": "user",
+                 "content": [
+                     {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+                     {"type": "output_text", "text": "screenshot"}
+                 ]},
+                {"type": "agent_message", "author": "w", "recipient": "user",
+                 "content": [{"type": "output_text", "text": "follow-up"}]}
+            ]
+        });
+        let request = responses_request_to_openai_chat_request(&body).unwrap();
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "assistant");
+        let blocks = messages[1]["content"].as_array().expect("array content");
+        assert_eq!(blocks.len(), 3, "must keep image, first text, and appended text");
+        assert_eq!(blocks[0], image_block);
+        assert_eq!(blocks[1]["text"], "screenshot");
+        assert_eq!(blocks[2]["text"], "follow-up");
+    }
+
+    #[test]
+    fn agent_message_mixed_input_preserves_order() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "message", "role": "user", "content": "run it"},
+                {"type": "agent_message", "author": "worker", "recipient": "user",
+                 "content": [{"type": "output_text", "text": "ran"}]}
+            ]
+        });
+        let request = responses_request_to_openai_chat_request(&body).unwrap();
+        assert_eq!(request["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(request["messages"][0]["role"], "user");
+        assert_eq!(request["messages"][1]["role"], "assistant");
+        assert_eq!(request["messages"][1]["content"], "ran");
     }
 }

@@ -14,13 +14,13 @@ use opentelemetry_sdk::{
 };
 use std::{
     pin::Pin,
-    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
 use tracing::{field::Empty, Instrument, Span};
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
+mod runtime;
+pub use runtime::{finish_command, initialize_provider};
 
 fn valid_endpoint(value: &str) -> bool {
     reqwest::Url::parse(value).is_ok_and(|url| {
@@ -88,12 +88,7 @@ pub fn provider_for_endpoint(endpoint: &str) -> Option<SdkTracerProvider> {
                 .build(),
         )
         .build();
-    ENABLED.store(true, Ordering::Relaxed);
     Some(provider)
-}
-
-pub fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
 }
 
 fn request_span(request: &Request<Body>) -> Span {
@@ -158,7 +153,6 @@ impl HttpBody for ObservedBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
-        let _entered = this.span.enter();
         let result = Pin::new(&mut this.inner).poll_frame(cx);
         match &result {
             Poll::Ready(Some(Err(_))) => {

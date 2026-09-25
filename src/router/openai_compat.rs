@@ -28,18 +28,44 @@ use super::{
     handle_messages, AnthropicContentBlock, AnthropicRequest, AnthropicResponse, AppState, Message,
 };
 
+/// Rewrite OpenAI-style `image_url` content blocks into Anthropic `image`
+/// blocks in place.
+///
+/// Everything downstream of `internal_request_to_anthropic_request` is
+/// Anthropic-shaped: Anthropic-protocol providers send message content
+/// directly, and the Anthropic→OpenAI translators only understand
+/// Anthropic-style `image` blocks. Frontends such as Codex keep OpenAI
+/// blocks raw inside that content, so without this rewrite first-turn
+/// images are silently ignored by Anthropic endpoints, and the
+/// tool-normalization round-trip stringifies them into text.
+fn anthropicize_openai_image_blocks(content: &mut serde_json::Value) {
+    let Some(blocks) = content.as_array_mut() else {
+        return;
+    };
+    for block in blocks.iter_mut() {
+        if let Some(converted) = super::translate_request::openai_image_block_to_anthropic(block) {
+            *block = converted;
+        }
+    }
+}
+
 pub(super) fn internal_request_to_anthropic_request(
     req: crate::frontend::InternalRequest,
 ) -> AnthropicRequest {
+    let (thinking, output_config) =
+        super::reasoning_controls::from_extra_params(req.extra_params.as_ref());
     AnthropicRequest {
         model: req.model,
         messages: req
             .messages
             .into_iter()
-            .map(|m| Message {
-                role: m.role,
-                content: m.content,
-                tool_call_id: m.tool_call_id,
+            .map(|mut m| {
+                anthropicize_openai_image_blocks(&mut m.content);
+                Message {
+                    role: m.role,
+                    content: m.content,
+                    tool_call_id: m.tool_call_id,
+                }
             })
             .collect(),
         system: req.system,
@@ -59,6 +85,8 @@ pub(super) fn internal_request_to_anthropic_request(
                 .collect()
         }),
         openai_passthrough_body: None,
+        thinking,
+        output_config,
     }
 }
 
@@ -636,5 +664,65 @@ mod tests {
         assert_eq!(first_start["index"], 0);
         assert_eq!(first_delta["index"], 0);
         assert_eq!(second_start["index"], 1);
+    }
+}
+
+#[cfg(test)]
+mod image_block_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn internal_with_content(content: serde_json::Value) -> crate::frontend::InternalRequest {
+        crate::frontend::InternalRequest {
+            model: "m".to_string(),
+            messages: vec![crate::frontend::Message {
+                role: "user".to_string(),
+                content,
+                tool_call_id: None,
+            }],
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            stream: None,
+            tools: None,
+            tool_choice: None,
+            stop_sequences: None,
+            extra_params: None,
+        }
+    }
+
+    #[test]
+    fn boundary_converts_openai_image_url_to_anthropic_image() {
+        let internal = internal_with_content(json!([
+            {"type": "text", "text": "look:"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+        ]));
+        let anthropic = internal_request_to_anthropic_request(internal);
+        let blocks = anthropic.messages[0].content.as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn boundary_leaves_anthropic_image_blocks_untouched() {
+        let content = json!([
+            {"type": "text", "text": "hi"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+        ]);
+        let internal = internal_with_content(content.clone());
+        let anthropic = internal_request_to_anthropic_request(internal);
+        assert_eq!(anthropic.messages[0].content, content);
+    }
+
+    #[test]
+    fn boundary_leaves_plain_strings_and_text_arrays_untouched() {
+        for content in [json!("plain"), json!([{"type": "text", "text": "a"}])] {
+            let internal = internal_with_content(content.clone());
+            let anthropic = internal_request_to_anthropic_request(internal);
+            assert_eq!(anthropic.messages[0].content, content);
+        }
     }
 }

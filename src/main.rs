@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use anyhow::{anyhow, Result};
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     routing::{get, post},
     Router,
 };
@@ -404,6 +404,7 @@ async fn run_server(
     port: u16,
     max_streams: usize,
     shutdown_timeout: u64,
+    telemetry_enabled: bool,
 ) -> anyhow::Result<()> {
     let config = Config::from_file(config_path)?;
     ensure_gp_build_support(&config)?;
@@ -442,6 +443,10 @@ async fn run_server(
         None
     };
 
+    // Capture the effective request-body limit before `config` moves into
+    // the router state so every endpoint shares one configured bound.
+    let max_request_body_bytes = config.max_request_body_bytes();
+
     let state = AppState {
         config,
         ewma_tracker,
@@ -463,7 +468,7 @@ async fn run_server(
         .route("/v1/responses", post(router::handle_responses))
         .route("/v1/models", get(router::list_models))
         .route(
-            "/preset/{name}/v1/messages",
+            "/preset/:name/v1/messages",
             post(router::handle_preset_messages),
         )
         .route("/v1/presets", get(router::list_presets))
@@ -480,9 +485,12 @@ async fn run_server(
         .route("/metrics", get(metrics::metrics_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .with_state(state);
     #[cfg(feature = "telemetry")]
-    let app = telemetry::instrument(app, telemetry::enabled());
+    let app = telemetry::instrument(app, telemetry_enabled);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = telemetry_enabled;
 
     let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
     tracing::info!("CCR-Rust listening on {}", addr);
@@ -571,11 +579,11 @@ async fn check_status(host: &str, port: u16) -> anyhow::Result<()> {
         }
         Ok(resp) => {
             eprintln!("✗ Server returned: {}", resp.status());
-            std::process::exit(1);
+            anyhow::bail!("server returned {}", resp.status());
         }
         Err(e) => {
             eprintln!("✗ Not running: {}", e);
-            std::process::exit(1);
+            Err(anyhow!("not running: {e}"))
         }
     }
 }
@@ -585,9 +593,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     #[cfg(feature = "telemetry")]
     let telemetry_provider = if matches!(&cli.command, None | Some(Commands::Start { .. })) {
-        tokio::task::spawn_blocking(telemetry::provider_from_env)
-            .await
-            .unwrap_or(None)
+        telemetry::initialize_provider(telemetry::provider_from_env).await
     } else {
         None
     };
@@ -601,6 +607,10 @@ async fn main() -> Result<()> {
                 metadata.target() == "ccr_telemetry"
             }))
     });
+    #[cfg(feature = "telemetry")]
+    let telemetry_enabled = telemetry_provider.is_some();
+    #[cfg(not(feature = "telemetry"))]
+    let telemetry_enabled = false;
     let subscriber = tracing_subscriber::registry().with(
         tracing_subscriber::fmt::layer().with_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -615,94 +625,111 @@ async fn main() -> Result<()> {
         .map(|p| shellexpand::tilde(&p).to_string())
         .unwrap_or_else(|| shellexpand::tilde("~/.claude-code-router/config.json").to_string());
 
-    match cli.command {
-        Some(Commands::Start {
-            host,
-            port,
-            max_streams,
-            shutdown_timeout,
-        }) => {
-            run_server(&config_path, host, port, max_streams, shutdown_timeout).await?;
-        }
-        None => {
-            // Default: start server with defaults
-            run_server(&config_path, "127.0.0.1".into(), 3456, 512, 30).await?;
-        }
-        Some(Commands::Status { host, port }) => {
-            check_status(&host, port).await?;
-        }
-        Some(Commands::Validate) => {
-            validate_config(&config_path)?;
-        }
-        #[cfg(feature = "dashboard")]
-        Some(Commands::Dashboard { host, port }) => {
-            dashboard::run_dashboard(host, port)?;
-        }
-        Some(Commands::Version) => {
-            show_version();
-        }
-        Some(Commands::ClearStats {
-            redis_url,
-            redis_prefix,
-        }) => {
-            clear_stats(&config_path, redis_url, redis_prefix)?;
-        }
-        Some(Commands::Mcp {
-            level,
-            backends,
-            include,
-            exclude,
-        }) => {
-            ccr_rust::mcp::server::run(ccr_rust::mcp::server::McpArgs {
+    let dispatch_result: Result<()> = async {
+        match cli.command {
+            Some(Commands::Start {
+                host,
+                port,
+                max_streams,
+                shutdown_timeout,
+            }) => {
+                run_server(
+                    &config_path,
+                    host,
+                    port,
+                    max_streams,
+                    shutdown_timeout,
+                    telemetry_enabled,
+                )
+                .await?;
+            }
+            None => {
+                run_server(
+                    &config_path,
+                    "127.0.0.1".into(),
+                    3456,
+                    512,
+                    30,
+                    telemetry_enabled,
+                )
+                .await?;
+            }
+            Some(Commands::Status { host, port }) => {
+                check_status(&host, port).await?;
+            }
+            Some(Commands::Validate) => {
+                validate_config(&config_path)?;
+            }
+            #[cfg(feature = "dashboard")]
+            Some(Commands::Dashboard { host, port }) => {
+                dashboard::run_dashboard(host, port)?;
+            }
+            Some(Commands::Version) => {
+                show_version();
+            }
+            Some(Commands::ClearStats {
+                redis_url,
+                redis_prefix,
+            }) => {
+                clear_stats(&config_path, redis_url, redis_prefix)?;
+            }
+            Some(Commands::Mcp {
                 level,
                 backends,
                 include,
                 exclude,
-            })
-            .await?;
-        }
-        Some(Commands::McpDaemon {
-            port,
-            host,
-            auth_token,
-            memory_dir,
-            pyright_root,
-            pyright_workspace_dir,
-        }) => {
-            ccr_rust::mcp::daemon::run(ccr_rust::mcp::daemon::DaemonArgs {
+            }) => {
+                ccr_rust::mcp::server::run(ccr_rust::mcp::server::McpArgs {
+                    level,
+                    backends,
+                    include,
+                    exclude,
+                })
+                .await?;
+            }
+            Some(Commands::McpDaemon {
                 port,
                 host,
                 auth_token,
-                memory_dir: memory_dir.map(std::path::PathBuf::from),
-                pyright_root: pyright_root.map(std::path::PathBuf::from),
-                pyright_workspace_dir: pyright_workspace_dir.map(std::path::PathBuf::from),
-                jina_api_key: None,
-                jina_search_base: None,
-                jina_reader_base: None,
-            })
-            .await?;
+                memory_dir,
+                pyright_root,
+                pyright_workspace_dir,
+            }) => {
+                ccr_rust::mcp::daemon::run(ccr_rust::mcp::daemon::DaemonArgs {
+                    port,
+                    host,
+                    auth_token,
+                    memory_dir: memory_dir.map(std::path::PathBuf::from),
+                    pyright_root: pyright_root.map(std::path::PathBuf::from),
+                    pyright_workspace_dir: pyright_workspace_dir.map(std::path::PathBuf::from),
+                    jina_api_key: None,
+                    jina_search_base: None,
+                    jina_reader_base: None,
+                })
+                .await?;
+            }
+            Some(Commands::Captures {
+                provider,
+                limit,
+                stats,
+                output_dir,
+                full,
+            }) => {
+                list_captures(&config_path, provider, limit, stats, output_dir, full)?;
+            }
         }
-        Some(Commands::Captures {
-            provider,
-            limit,
-            stats,
-            output_dir,
-            full,
-        }) => {
-            list_captures(&config_path, provider, limit, stats, output_dir, full)?;
-        }
+        Ok(())
     }
+    .await;
+
     #[cfg(feature = "telemetry")]
-    if let Some(provider) = telemetry_provider {
-        let result = tokio::task::spawn_blocking(move || {
-            provider.shutdown_with_timeout(std::time::Duration::from_secs(3))
-        })
-        .await;
-        if !matches!(result, Ok(Ok(()))) {
-            eprintln!("CCR telemetry shutdown timed out or failed; routing shutdown completed");
-        }
+    {
+        telemetry::finish_command(telemetry_provider, dispatch_result).await
     }
-    Ok(())
+    #[cfg(not(feature = "telemetry"))]
+    {
+        dispatch_result
+    }
 }
 
 async fn shutdown_signal(timeout: u64) {

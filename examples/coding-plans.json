@@ -1,0 +1,36 @@
+{
+  "Providers": [
+    {
+      "name": "zai",
+      "api_base_url": "https://api.z.ai/api/anthropic/v1",
+      "api_key": "${ZAI_API_KEY}",
+      "protocol": "anthropic",
+      "auth_header": "authorization",
+      "models": ["glm-5.3"],
+      "honor_ratelimit_headers": false
+    },
+    {
+      "name": "kimi",
+      "api_base_url": "https://api.kimi.com/coding/v1",
+      "api_key": "${KIMI_API_KEY}",
+      "protocol": "anthropic",
+      "models": ["kimi-for-coding", "k3-256k"],
+      "transformer": {
+        "use": [["maxtoken", {"max_tokens": 8192}]]
+      }
+    }
+  ],
+  "Router": {
+    "default": "zai,glm-5.3",
+    "tiers": ["zai,glm-5.3"],
+    "ignoreDirect": false
+  },
+  "Presets": {
+    "glm": {"route": "zai,glm-5.3"},
+    "kimi": {"route": "kimi,k3-256k"}
+  },
+  "Persistence": {"mode": "none"},
+  "DebugCapture": {"enabled": false},
+  "HOST": "127.0.0.1",
+  "PORT": 3456
+}

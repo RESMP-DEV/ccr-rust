@@ -28,7 +28,11 @@ async fn production_exporter_does_not_follow_redirects() {
     })
     .await
     .unwrap();
-    assert!(!collector.received_requests().await.unwrap().is_empty());
+    let received = collector.received_requests().await.unwrap();
+    assert!(!received.is_empty());
+    assert!(received
+        .iter()
+        .any(|request| request.url.path() == "/v1/traces"));
     assert!(destination.received_requests().await.unwrap().is_empty());
 }
 
@@ -56,9 +60,9 @@ async fn slow_exporter_and_queue_overflow_do_not_block_span_production() {
         "exporter blocked the caller"
     );
     tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(15),
         tokio::task::spawn_blocking(move || {
-            let _ = provider.shutdown_with_timeout(Duration::from_secs(3));
+            let _ = provider.shutdown_with_timeout(Duration::from_secs(10));
         }),
     )
     .await

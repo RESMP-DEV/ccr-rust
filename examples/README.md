@@ -8,6 +8,7 @@ before starting the router.
 | ---- | ------------- |
 | [`config.minimal.json`](config.minimal.json) | Smallest useful config: one provider, one route. |
 | [`config.multitier.json`](config.multitier.json) | Three-provider failover cascade, traffic-class routes, per-tier retries, and presets. |
+| [`coding-plans.json`](coding-plans.json) | Explicit Kimi/GLM selection, named Anthropic presets, and Kimi's required output limit for Codex. |
 | [`smoke-test.sh`](smoke-test.sh) | Checks a running router end-to-end: health, model list, and one Anthropic-style + one OpenAI-style request. |
 
 ## Try it
@@ -33,3 +34,8 @@ For the full config schema and every supported field, see
 [docs/configuration.md](../docs/configuration.md). For provider-specific
 setup guides (Claude Code, Codex, Kimi, Gemini, Z.AI/MiniMax), see
 [docs/index.md](../docs/index.md).
+
+For the Kimi/GLM example, load `KIMI_API_KEY` and `ZAI_API_KEY`, then follow
+[Switching coding plans](../docs/switching-plans.md). Use keys from the intended
+plan; Kimi Code and Moonshot Platform keys are distinct. The example deliberately
+does not put both providers in a shared fallback list.

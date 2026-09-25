@@ -3,6 +3,9 @@
 CCR keeps its local logs and Prometheus endpoint when telemetry is disabled.
 Build with `--features telemetry` (or `--all-features`) to include the exporter.
 Default builds omit its dependencies. Only server commands initialize it.
+The app uses reqwest 0.12; the exporter needs a separate pinned reqwest 0.13
+alias to match `opentelemetry-otlp` 0.32. Collapse that alias only during an
+app-wide reqwest upgrade.
 To send minimal request spans to a local OpenTelemetry Collector, set:
 
 ```sh
@@ -31,9 +34,10 @@ propagated in this initial integration.
 
 The SDK queues at most 1,024 spans, exports batches of at most 128 on its own
 worker, and applies a two-second HTTP timeout. Export failures can lose telemetry;
-they do not delay request handling. Normal CLI shutdown attempts a bounded
-three-second flush. An invalid endpoint or exporter initialization failure
-disables export and reports a fixed diagnostic without displaying configuration.
+they do not delay request handling. Successful and failed command dispatch both
+attempt a bounded three-second flush off the async runtime. An invalid endpoint
+or exporter initialization failure disables export and reports a fixed diagnostic
+without displaying configuration.
 
 Apply tail sampling at the Collector: retain error traces within bounded memory
 and queue limits, and sample 10% of successful traces. Keep Prometheus counters
@@ -44,6 +48,9 @@ Validation includes response preservation, secret sentinels in headers, bodies,
 path parameters and query strings, error status, streaming, cancellation and
 disabled-export routing. The Azure destination and Collector require separate
 deployment and live verification.
+Run `cargo test --locked --all-features` for the complete local validation gate;
+`cargo test --locked --features telemetry` is the minimum gate for the privacy
+and transport suites. No GitHub Actions telemetry test job is enabled.
 
 References:
 - https://learn.microsoft.com/azure/developer/rust/sdk/logging

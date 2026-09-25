@@ -534,6 +534,12 @@ pub struct RouterConfig {
     #[serde(default)]
     pub think: Option<String>,
 
+    /// Exact bare-model aliases for requests that do not use provider,model syntax.
+    /// Values must explicitly name a configured provider and model.
+    #[serde(default)]
+    #[serde(rename = "modelAliases")]
+    pub model_aliases: HashMap<String, String>,
+
     /// Force all requests to use non-streaming mode.
     /// Useful for agent workloads where SSE frame limits cause parsing errors.
     /// Default: false (preserve client's stream preference).

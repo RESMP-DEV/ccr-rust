@@ -11,7 +11,7 @@ use axum::{
 use super::{
     convert_openai_json_response_to_responses, convert_openai_stream_response_to_responses,
     decode_request_body, parse_json_payload, responses_request_to_openai_chat_request,
-    DecodeRequestBodyError, MAX_RESPONSES_BODY_BYTES,
+    DecodeRequestBodyError, ResponsesBodyBudget,
 };
 use crate::router::{openai_compat::handle_responses_chat_completions, AppState};
 
@@ -42,7 +42,8 @@ pub async fn handle_responses(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let body_bytes = match to_bytes(body, MAX_RESPONSES_BODY_BYTES).await {
+    let max_body_bytes = state.config.max_request_body_bytes();
+    let body_bytes = match to_bytes(body, max_body_bytes).await {
         Ok(bytes) => bytes,
         Err(err) => {
             let status = body_read_error_status(&err);
@@ -50,7 +51,10 @@ pub async fn handle_responses(
                 status,
                 Json(serde_json::json!({
                     "error": {
-                        "message": format!("Failed to read request body: {}", err)
+                        "message": format!(
+                            "Failed to read request body (limit {} bytes): {}; raise MAX_REQUEST_BODY_BYTES in the ccr-rust config if this is a legitimate large agent request",
+                            max_body_bytes, err
+                        )
                     }
                 })),
             )
@@ -58,7 +62,7 @@ pub async fn handle_responses(
         }
     };
 
-    let decoded = match decode_request_body(&body_bytes, &headers) {
+    let decoded = match decode_request_body(&body_bytes, &headers, max_body_bytes) {
         Ok(bytes) => bytes,
         Err(err) => {
             return (
@@ -96,13 +100,16 @@ pub async fn handle_responses(
         }
     };
 
-    let openai_response = handle_responses_chat_completions(
+    let mut openai_response = handle_responses_chat_completions(
         State(state),
         headers,
         Json(openai_chat_request),
         request_body,
     )
     .await;
+    openai_response
+        .extensions_mut()
+        .insert(ResponsesBodyBudget(max_body_bytes));
 
     if stream_requested {
         convert_openai_stream_response_to_responses(openai_response).await
@@ -147,7 +154,7 @@ mod tests {
             "reasoning": {"summary": "auto"}
         }))
         .unwrap();
-        assert_eq!(default_reasoning["reasoning_effort"], "medium");
+        assert!(default_reasoning.get("reasoning_effort").is_none());
 
         let invalid_reasoning = responses_request_to_openai_chat_request(&json!({
             "model": "test",
@@ -203,20 +210,34 @@ mod tests {
 
     #[test]
     fn zstd_request_decompression_is_bounded() {
-        let encoded = zstd::stream::encode_all(
-            std::io::Cursor::new(vec![0_u8; MAX_RESPONSES_BODY_BYTES + 1]),
-            1,
-        )
-        .unwrap();
+        let limit = 4096_usize;
+        let encoded = zstd::stream::encode_all(std::io::Cursor::new(vec![0_u8; limit + 1]), 1)
+            .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::CONTENT_ENCODING,
             axum::http::HeaderValue::from_static("zstd"),
         );
 
-        let error = decode_request_body(&encoded, &headers).unwrap_err();
+        let error = decode_request_body(&encoded, &headers, limit).unwrap_err();
         assert!(error.contains("exceeds"));
+        assert!(error.contains("MAX_REQUEST_BODY_BYTES"));
         assert_eq!(decode_error_status(&error), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn zstd_request_within_configured_limit_decodes() {
+        let limit = 8192_usize;
+        let encoded =
+            zstd::stream::encode_all(std::io::Cursor::new(vec![0_u8; limit - 1]), 1).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_ENCODING,
+            axum::http::HeaderValue::from_static("zstd"),
+        );
+
+        let decoded = decode_request_body(&encoded, &headers, limit).unwrap();
+        assert_eq!(decoded.len(), limit - 1);
     }
 
     #[test]
@@ -235,7 +256,7 @@ mod tests {
             axum::http::HeaderValue::from_static("zstd"),
         );
 
-        let error = decode_request_body(&encoded, &headers).unwrap_err();
+        let error = decode_request_body(&encoded, &headers, 4096).unwrap_err();
 
         assert!(
             error.contains("requires too much memory"),
@@ -251,7 +272,7 @@ mod tests {
             axum::http::HeaderValue::from_static("gzip"),
         );
 
-        let error = decode_request_body(b"{}", &headers).unwrap_err();
+        let error = decode_request_body(b"{}", &headers, 4096).unwrap_err();
 
         assert_eq!(
             decode_error_status(&error),
@@ -261,12 +282,10 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_request_body_maps_to_payload_too_large() {
-        let error = to_bytes(
-            Body::from(vec![0_u8; MAX_RESPONSES_BODY_BYTES + 1]),
-            MAX_RESPONSES_BODY_BYTES,
-        )
-        .await
-        .unwrap_err();
+        let limit = 4096_usize;
+        let error = to_bytes(Body::from(vec![0_u8; limit + 1]), limit)
+            .await
+            .unwrap_err();
 
         assert_eq!(
             body_read_error_status(&error),

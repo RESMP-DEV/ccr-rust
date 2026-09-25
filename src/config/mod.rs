@@ -13,6 +13,129 @@ use crate::debug_capture::DebugCaptureConfig;
 const REASONING_EFFORT_VALUES: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// Recursively expand `${VAR}` and `$VAR` references in every string value
+/// of a parsed JSON document. Values whose variables are missing keep their
+/// raw text and record `(json pointer, error)`; the credential gate decides
+/// whether the leftovers are acceptable.
+fn expand_env_references(
+    value: &mut serde_json::Value,
+    failures: &mut Vec<(String, String)>,
+    pointer: &str,
+) {
+    match value {
+        serde_json::Value::String(text) => match shellexpand::env(text) {
+            Ok(expanded) => *text = expanded.into_owned(),
+            Err(error) => failures.push((pointer.to_string(), error.to_string())),
+        },
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                expand_env_references(item, failures, &format!("{pointer}/{index}"));
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                let escaped = key.replace('~', "~0").replace('/', "~1");
+                expand_env_references(item, failures, &format!("{pointer}/{escaped}"));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Heuristic scan for leftover `${VAR}` or braceless `$VAR` text. Used only
+/// for the runtime 401 hint: it may false-positive on values that
+/// legitimately contain `$word`, which is acceptable for a log hint but is
+/// never used to block startup (the credential gate consumes recorded
+/// expansion failures instead).
+pub(crate) fn contains_env_placeholder(text: &str) -> bool {
+    if text.contains("${") {
+        return true;
+    }
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'$' {
+            continue;
+        }
+        let cursor = index + 1;
+        if cursor >= bytes.len() {
+            break;
+        }
+        let first = bytes[cursor];
+        if !(first.is_ascii_alphabetic() || first == b'_') {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Interpret `CCR_ALLOW_UNEXPANDED_CREDENTIALS`; accept the usual truthy
+/// spellings so an operator is never surprised by a silently inert override.
+fn allow_unexpanded_credentials_override() -> bool {
+    std::env::var("CCR_ALLOW_UNEXPANDED_CREDENTIALS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Refuse to start when a provider credential failed environment expansion.
+///
+/// shellexpand only substitutes variables present in the process
+/// environment. A router started outside the credential launcher (raw
+/// `ccr-rust start` instead of `serve.py`) keeps the literal placeholder as
+/// the key, and every provider then returns 401s indistinguishable from
+/// expired credentials, which derails diagnosis (2026-09-23 incident).
+/// The gate consumes the recorded expansion failures, so values that
+/// expanded successfully are never rejected for their content.
+/// Set `CCR_ALLOW_UNEXPANDED_CREDENTIALS=true` to override for
+/// intentionally keyless local setups.
+fn validate_provider_credentials(
+    config: &serde_json::Value,
+    expansion_failures: &[(String, String)],
+    allow_unexpanded: bool,
+) -> Result<()> {
+    if allow_unexpanded {
+        return Ok(());
+    }
+    let providers = config
+        .get("Providers")
+        .and_then(serde_json::Value::as_array);
+    let mut offenders: Vec<String> = Vec::new();
+    if let Some(providers) = providers {
+        for (index, provider) in providers.iter().enumerate() {
+            let name = provider
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            let api_key_pointer = format!("/Providers/{index}/api_key");
+            let header_prefix = format!("/Providers/{index}/extra_headers/");
+            for (pointer, _error) in expansion_failures {
+                if pointer == &api_key_pointer {
+                    offenders.push(format!("provider '{name}' api_key"));
+                } else if let Some(header) = pointer.strip_prefix(&header_prefix) {
+                    offenders.push(format!("provider '{name}' header '{header}'"));
+                }
+            }
+        }
+    }
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    offenders.sort();
+    offenders.dedup();
+    anyhow::bail!(
+        "unexpanded credential references: {}. Start via the credential launcher (serve.py) \
+         or export the referenced variables; requests would authenticate with the literal \
+         placeholder and every provider would return 401. \
+         Set CCR_ALLOW_UNEXPANDED_CREDENTIALS=true to override.",
+        offenders.join(", ")
+    );
+}
+
 /// Validate cross-field provider requirements before the router accepts traffic.
 fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
     for provider in providers {
@@ -37,6 +160,38 @@ fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
     Ok(())
 }
 
+fn validate_model_aliases(router: &RouterConfig, providers: &[Provider]) -> Result<()> {
+    for (alias, target) in &router.model_aliases {
+        anyhow::ensure!(
+            !alias.trim().is_empty() && alias == alias.trim() && !alias.contains(','),
+            "Router.modelAliases alias '{alias}' must be a nonblank bare model name without surrounding whitespace"
+        );
+        anyhow::ensure!(
+            target == target.trim(),
+            "Router.modelAliases target '{target}' has surrounding whitespace"
+        );
+        let Some((provider, model)) = target.split_once(',') else {
+            anyhow::bail!(
+                "Router.modelAliases target '{target}' must be an explicit provider,model route"
+            );
+        };
+        anyhow::ensure!(
+            !provider.is_empty()
+                && !model.is_empty()
+                && !model.contains(',')
+                && provider == provider.trim()
+                && model == model.trim()
+                && providers.iter().any(|candidate| candidate.name == provider
+                    && candidate
+                        .models
+                        .iter()
+                        .any(|configured| configured == model)),
+            "Router.modelAliases target '{target}' must name a configured provider,model route"
+        );
+    }
+    Ok(())
+}
+
 /// Named routing preset with optional parameter overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PresetConfig {
@@ -51,6 +206,14 @@ pub struct PresetConfig {
     #[serde(default)]
     pub temperature: Option<f32>,
 }
+
+/// Default maximum accepted request body size (64 MiB), applied to wire
+/// bytes and to decoded content. Agent sessions with long histories exceed
+/// the previous 10 MiB cap.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Hard ceiling for a configured `MAX_REQUEST_BODY_BYTES` (1 GiB).
+pub const HARD_MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Parsed JSON configuration (deserializable).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +277,14 @@ pub struct ConfigFile {
     #[serde(default)]
     #[serde(rename = "BROKER_SOCKET")]
     pub broker_socket: Option<String>,
+
+    /// Maximum accepted request body size in bytes, enforced on the wire and
+    /// after content decoding across all API endpoints. Large agent sessions
+    /// routinely exceed tens of MiB. Zero falls back to the default and
+    /// values above `HARD_MAX_REQUEST_BODY_BYTES` are clamped.
+    #[serde(default = "default_max_request_body_bytes")]
+    #[serde(rename = "MAX_REQUEST_BODY_BYTES")]
+    pub max_request_body_bytes: usize,
 }
 
 /// Runtime configuration shared across all handlers via Axum state.
@@ -128,6 +299,9 @@ pub struct Config {
 struct ConfigInner {
     file: ConfigFile,
     http_client: reqwest::Client,
+    /// Effective request-body limit, computed (and warned about) once at
+    /// load so the accessor stays side-effect free per request.
+    effective_max_request_body_bytes: usize,
 }
 
 impl Config {
@@ -168,6 +342,13 @@ impl Config {
         &self.inner.file.debug_capture
     }
 
+    /// Effective maximum request body size in bytes after defaulting and
+    /// clamping. Computed once at load time; see
+    /// `compute_max_request_body_bytes`.
+    pub fn max_request_body_bytes(&self) -> usize {
+        self.inner.effective_max_request_body_bytes
+    }
+
     /// Resolve the broker socket path.
     ///
     /// Priority: config file `BROKER_SOCKET` field > `CCR_BROKER_SOCKET` env var.
@@ -189,16 +370,34 @@ impl Config {
     pub fn from_file(path: &str) -> Result<Self> {
         let raw_content =
             fs::read_to_string(path).context(format!("Failed to read config file: {}", path))?;
-        // Expand ${VAR} env var references in config values (e.g., api_key: "${ZAI_API_KEY}")
-        let content = shellexpand::env(&raw_content)
-            .map(|s| s.into_owned())
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to expand env vars in config, using raw: {e}");
-                raw_content.clone()
-            });
+        // Parse the JSON first, then expand ${VAR} references per string value.
+        // Expanding into the raw text before parsing breaks the document
+        // whenever a substituted value contains JSON-hostile characters such
+        // as a double quote (observed with a real MiniMax API key), which
+        // surfaces as a misleading "expected `,` or `}`" parse error.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&raw_content).context("Failed to parse config JSON")?;
+        let mut expansion_failures: Vec<(String, String)> = Vec::new();
+        expand_env_references(&mut value, &mut expansion_failures, "");
+        if !expansion_failures.is_empty() {
+            tracing::warn!(
+                "Failed to expand env vars in config, using raw: {}",
+                expansion_failures
+                    .iter()
+                    .map(|(pointer, error)| format!("{pointer}: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+        // The credential gate keys off real expansion failures, never off
+        // substring scans of the resulting values: a key that legitimately
+        // expands to text containing `$word` must not block startup.
+        let allow_unexpanded_credentials = allow_unexpanded_credentials_override();
+        validate_provider_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
         let file: ConfigFile =
-            serde_json::from_str(&content).context("Failed to parse config JSON")?;
+            serde_json::from_value(value).context("Failed to parse config JSON")?;
         validate_provider_contracts(&file.providers)?;
+        validate_model_aliases(&file.router, &file.providers)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
         let mut client_builder = reqwest::Client::builder()
@@ -214,9 +413,16 @@ impl Config {
 
         let http_client = client_builder.build()?;
         let presets = file.presets.clone();
+        let effective_max_request_body_bytes = compute_max_request_body_bytes(
+            file.max_request_body_bytes,
+        );
 
         Ok(Config {
-            inner: Arc::new(ConfigInner { file, http_client }),
+            inner: Arc::new(ConfigInner {
+                file,
+                http_client,
+                effective_max_request_body_bytes,
+            }),
             presets,
         })
     }
@@ -323,9 +529,86 @@ fn default_sse_buffer_size() -> usize {
     32
 }
 
+fn default_max_request_body_bytes() -> usize {
+    DEFAULT_MAX_REQUEST_BODY_BYTES
+}
+
+/// Resolve the configured `MAX_REQUEST_BODY_BYTES` into the effective limit,
+/// warning once at load time when the configured value is missing or beyond
+/// the hard cap so operators see fat-fingered values immediately.
+fn compute_max_request_body_bytes(requested: usize) -> usize {
+    if requested == 0 {
+        tracing::warn!(
+            requested,
+            default = DEFAULT_MAX_REQUEST_BODY_BYTES,
+            "MAX_REQUEST_BODY_BYTES is zero; using the default"
+        );
+        DEFAULT_MAX_REQUEST_BODY_BYTES
+    } else if requested > HARD_MAX_REQUEST_BODY_BYTES {
+        tracing::warn!(
+            requested,
+            maximum = HARD_MAX_REQUEST_BODY_BYTES,
+            "MAX_REQUEST_BODY_BYTES exceeds the hard limit; clamping"
+        );
+        HARD_MAX_REQUEST_BODY_BYTES
+    } else {
+        requested
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_request_body_bytes_defaults_zero_and_clamps() {
+        let dir = std::env::temp_dir().join(format!("ccr-cfg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let base = r#"{"Providers": [], "Router": {"default": "unused"}}"#;
+
+        std::fs::write(&path, base).unwrap();
+        let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            config.max_request_body_bytes(),
+            DEFAULT_MAX_REQUEST_BODY_BYTES
+        );
+
+        std::fs::write(
+            &path,
+            r#"{"Providers": [], "Router": {"default": "unused"}, "MAX_REQUEST_BODY_BYTES": 1048576}"#,
+        )
+        .unwrap();
+        let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(config.max_request_body_bytes(), 1048576);
+
+        std::fs::write(
+            &path,
+            r#"{"Providers": [], "Router": {"default": "unused"}, "MAX_REQUEST_BODY_BYTES": 0}"#,
+        )
+        .unwrap();
+        let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            config.max_request_body_bytes(),
+            DEFAULT_MAX_REQUEST_BODY_BYTES
+        );
+
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"Providers": [], "Router": {{"default": "unused"}}, "MAX_REQUEST_BODY_BYTES": {}}}"#,
+                HARD_MAX_REQUEST_BODY_BYTES * 4
+            ),
+        )
+        .unwrap();
+        let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            config.max_request_body_bytes(),
+            HARD_MAX_REQUEST_BODY_BYTES
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
 
     /// Helper: parse a `ProviderTransformer` from a JSON string.
     fn parse_transformer(json: &str) -> ProviderTransformer {
@@ -784,5 +1067,123 @@ mod tests {
             Some("redis://127.0.0.1:6379/0")
         );
         assert_eq!(config.persistence.redis_prefix, "ccr:test");
+    }
+}
+
+#[cfg(test)]
+mod credential_guard_tests {
+    use super::*;
+
+    fn config_value_with_api_key(api_key: &str) -> serde_json::Value {
+        serde_json::from_str(&format!(
+            r#"{{"Providers": [{{"name": "p1", "api_base_url": "http://x", "api_key": "{api_key}", "models": ["m"]}}], "Router": {{"default": "p1,m"}}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn expand_and_validate(
+        config: serde_json::Value,
+        allow_unexpanded: bool,
+    ) -> Result<()> {
+        let mut value = config;
+        let mut failures = Vec::new();
+        expand_env_references(&mut value, &mut failures, "");
+        validate_provider_credentials(&value, &failures, allow_unexpanded)
+    }
+
+    #[test]
+    fn unexpanded_api_key_is_rejected() {
+        let error = expand_and_validate(
+            config_value_with_api_key("${CCR_DEFINITELY_MISSING_KEY}"),
+            false,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("provider 'p1' api_key"), "{message}");
+        assert!(message.contains("CCR_ALLOW_UNEXPANDED_CREDENTIALS"), "{message}");
+    }
+
+    #[test]
+    fn unexpanded_extra_header_is_rejected() {
+        let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"api-key": "${CCR_AZURE_API_KEY}"}}], "Router": {"default": "p1,m"}}"#;
+        let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
+        assert!(error.to_string().contains("header 'api-key'"));
+    }
+
+    #[test]
+    fn override_allows_unexpanded_keys() {
+        expand_and_validate(
+            config_value_with_api_key("${CCR_DEFINITELY_MISSING_KEY}"),
+            true,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn expanded_and_inline_keys_pass() {
+        expand_and_validate(config_value_with_api_key("real-key"), false).unwrap();
+        expand_and_validate(config_value_with_api_key(""), false).unwrap();
+    }
+
+    #[test]
+    fn braceless_env_references_are_detected() {
+        assert!(contains_env_placeholder("$CCR_MISSING_KEY"));
+        assert!(contains_env_placeholder("prefix-${CCR_MISSING_KEY}"));
+        assert!(!contains_env_placeholder("sk-real-key-123"));
+        assert!(!contains_env_placeholder("cost $5 and $$ only"));
+        assert!(!contains_env_placeholder(""));
+
+        let error = expand_and_validate(config_value_with_api_key("$CCR_MISSING_KEY"), false)
+            .unwrap_err();
+        assert!(error.to_string().contains("provider 'p1' api_key"));
+    }
+
+    /// Regression (CodeRabbit round 2): a credential whose *expanded* value
+    /// contains dollar-prefixed text must not be rejected; only real
+    /// expansion failures block startup.
+    #[test]
+    fn expanded_value_containing_dollar_text_is_accepted() {
+        let dir = std::env::temp_dir().join(format!("ccr-cfg-dollar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "${CCR_TEST_DOLLAR_KEY_9272}", "models": ["m"]}], "Router": {"default": "p1,m"}}"#,
+        )
+        .unwrap();
+        std::env::set_var("CCR_TEST_DOLLAR_KEY_9272", "pa$ssword");
+        let result = Config::from_file(path.to_str().unwrap());
+        std::env::remove_var("CCR_TEST_DOLLAR_KEY_9272");
+        let config = result.expect("expanded $-containing value must pass the gate");
+        assert_eq!(config.providers()[0].api_key, "pa$ssword");
+        std::fs::remove_file(&path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod env_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn quoted_env_value_expands_into_config_safely() {
+        let dir = std::env::temp_dir().join(format!("ccr-cfg-quoted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "${CCR_TEST_QUOTED_KEY_9271}", "models": ["m"]}], "Router": {"default": "p1,m"}}"#,
+        )
+        .unwrap();
+        // A value with JSON-hostile characters; textual pre-parse expansion
+        // used to corrupt the document. Unique name; removed before asserts.
+        std::env::set_var("CCR_TEST_QUOTED_KEY_9271", "sk-with\"quote-and\\backslash");
+        let result = Config::from_file(path.to_str().unwrap());
+        std::env::remove_var("CCR_TEST_QUOTED_KEY_9271");
+        let config = result.expect("config with quoted env value must parse");
+        assert_eq!(
+            config.providers()[0].api_key,
+            "sk-with\"quote-and\\backslash"
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 }

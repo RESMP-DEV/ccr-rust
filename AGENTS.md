@@ -8,6 +8,35 @@ CCR-Rust is a multi-protocol LLM router for Claude Code, Codex, OpenAI-compatibl
 
 ## Environment and Setup
 
+Before operating clients or credentials, read [Local operation](docs/local-operation.md)
+and [Authentication suites](docs/auth-suites.md). Keep CCR an **opt-in launch
+option**; do not replace normal Claude/Codex provider settings with global
+localhost overrides.
+
+For switching Kimi, Z.AI GLM, or another coding plan, follow
+[Switching plans](docs/switching-plans.md) and its tested example config.
+Use explicit `provider,model` routes; update Claude's background/subagent
+defaults as well as its main model. Kimi's Anthropic endpoint requires an
+output limit: keep the documented `maxtoken` transformer for Codex requests
+that omit one. Check actual client tool round trips after changing a plan.
+
+On the configured workstation, check `command -v ccr-local claude-ccr codex-ccr`
+before using these local helpers. They are not installed by Cargo. Use
+`claude-ccr` or `codex-ccr` for routed sessions. Other machines should follow
+the client setup guides linked from the documentation index.
+
+For personal/corporate API plans, use disjoint router configs, credentials,
+ports, logs, and persistence namespaces. A `provider,model` pin can still
+fall back to another tier; it does not isolate accounts. For native subscription
+logins, use separate client homes and verify account/workspace selection.
+CCR does not import or refresh those subscription credentials. Never print
+keys or copy existing auth/history stores to initialize a new suite.
+
+Before claiming a setup works, verify the actual Git checkout, installed
+binary, listener, client version, and route used. Distinguish mocked tests,
+synthetic credential-selection probes, and live client tool round trips.
+Coordinate service restarts or binary installation with other active worktrees.
+
 Use the Rust-native workflow.
 
 - `cargo check`

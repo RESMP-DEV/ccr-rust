@@ -1,5 +1,9 @@
 # CCR-Rust Configuration
 
+For opt-in client launches and service operation, see [Local operation](local-operation.md).
+For separate personal/corporate credentials, see [Authentication suites](auth-suites.md);
+multiple provider entries in a shared fallback list do not isolate accounts.
+
 ## Config File Location
 
 CCR-Rust reads its configuration from a JSON file. The location is determined by:
@@ -42,6 +46,13 @@ ccr-rust start
 
 If you prefer keeping keys in a `.env` file, load it into the shell first
 (e.g. `set -a; . ~/.claude-code-router/.env; set +a`) before starting CCR-Rust.
+
+Check every required variable for a nonempty value before startup, without
+printing it (for example, `: "${GEMINI_API_KEY:?Missing GEMINI_API_KEY}"`).
+If expansion fails, the current loader warns and retains the raw config;
+`validate` alone therefore does not prove credentials were loaded or accepted
+by a provider. A sourced `.env` is executable shell code: use only a trusted,
+private file.
 
 ### Security Best Practice
 
@@ -126,6 +137,43 @@ Each provider entry configures an upstream API endpoint.
 `force_reasoning_effort` is valid only for the default `openai` provider
 protocol. Configuration validation rejects unsupported values and other
 protocols before the router starts.
+
+### Reasoning controls across protocols
+
+For Anthropic-compatible upstreams, CCR preserves the native `thinking` and
+`output_config` objects, including numeric thinking budgets. OpenAI Chat
+`reasoning_effort` and Responses `reasoning.effort` map to
+`output_config.effort`; for example, `"max"` reaches the upstream as `"max"`.
+A non-null `output_config.effort` takes precedence, and other members of
+`output_config` remain intact. A null effort allows an explicit OpenAI effort
+to fill it. Malformed native controls remain intact for Anthropic provider
+validation. Requests without these controls do not acquire a reasoning setting,
+including during tool-result normalization for DeepSeek-named models.
+
+This mapping does not invent thinking budgets or infer a thinking mode from
+an effort label. The destination provider decides which effort strings and
+thinking modes its model accepts. CCR passes effort strings through without
+silently lowering them; unsupported values can therefore produce an upstream
+validation error. The native-effort precedence above applies when translating
+to Anthropic. Native OpenAI/Responses passthrough retains its original request
+controls, including any mixed-protocol fields; it does not reconcile a supplied
+Anthropic `output_config` with OpenAI reasoning controls. Use the destination
+protocol's native controls on passthrough requests.
+
+When translating native Messages to OpenAI, an explicit
+string `output_config.effort` maps back to `reasoning_effort` and overrides
+model-name heuristics. A non-null, non-string effort suppresses the heuristic
+and is omitted because the translated OpenAI field accepts strings only;
+missing or null effort retains the existing model defaults. A Responses
+`reasoning` object without `effort` leaves effort unset.
+
+Messages-to-OpenAI translation maps only `output_config.effort`. Other members,
+including `output_config.format`, are omitted; CCR does not convert the
+Anthropic schema format to OpenAI `response_format`. Structured-output
+constraints therefore do not survive this translation, including failover to
+an OpenAI-protocol provider. For requests that require schema enforcement, keep
+Messages requests on compatible Anthropic providers, or send native OpenAI
+Chat requests with `response_format` through an OpenAI passthrough route.
 
 ### Provider and Model Pricing
 
@@ -222,7 +270,20 @@ The `Router` section configures how incoming requests are routed to providers.
 | `tierRetries` | object | No | - | Per-tier retry configuration. |
 | `forceNonStreaming` | boolean | No | false | Disable streaming for agent workloads. |
 | `ignoreDirect` | boolean | No | false | Ignore client model targeting, enforce tier order. |
+| `modelAliases` | object | No | `{}` | Map exact bare client model IDs to configured `provider,model` routes. Ignored for routing when `ignoreDirect` is true. |
 | `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
+
+For example, `"modelAliases": {"gpt-6-astra": "azure,gpt-6-astra"}`
+preserves an existing client's Astra selection while `default` and `tiers`
+select `zai,glm-5.3` for other unqualified requests. Aliases are exact and do
+not chain. Targets must name a configured provider and model. Comma-qualified
+requests are never remapped. The resolved route follows normal direct-routing
+and fallback rules; this is not an account-isolation mechanism.
+
+Aliases select routes, not display metadata. CCR preserves upstream-reported
+response model IDs, but clients can still display their requested model or
+local catalog name. Verify the response model and `x-ccr-tier`, and configure
+client model catalogs separately when accurate labels and limits are needed.
 
 ### Cost-Aware GP Routing
 
