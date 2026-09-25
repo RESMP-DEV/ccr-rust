@@ -118,6 +118,8 @@ Examples:
     /// Validate config file syntax and providers
     #[command(after_help = "Example:\n  ccr-rust --config examples/config.minimal.json validate")]
     Validate,
+    /// Inspect saved worker runs without loading full transcripts
+    Workers(ccr_rust::workers::WorkerArgs),
     #[cfg(feature = "dashboard")]
     /// Launch interactive TUI dashboard
     #[command(after_help = "\
@@ -614,6 +616,7 @@ async fn main() -> Result<()> {
         Some(Commands::Validate) => {
             validate_config(&config_path)?;
         }
+        Some(Commands::Workers(args)) => ccr_rust::workers::run(args)?,
         #[cfg(feature = "dashboard")]
         Some(Commands::Dashboard { host, port }) => {
             dashboard::run_dashboard(host, port)?;
