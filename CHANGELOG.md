@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Consolidated Codex streaming integration helpers into a shared test-support
+  module while retaining protocol-specific upstream fixtures and all existing
+  test coverage.
 - Fixed reasoning controls being silently dropped on Anthropic-compatible
   upstreams. Native Messages requests retain `thinking` and `output_config`;
   translated Responses/Chat requests map explicit reasoning effort to

@@ -2,9 +2,9 @@
 //! Integration tests for Codex streaming conversion from Anthropic SSE to OpenAI SSE.
 
 use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::Router;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -12,105 +12,11 @@ use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::time::{timeout, Duration};
 use tokio_stream::wrappers::ReceiverStream;
-use tower::ServiceExt;
 
-/// Skip integration tests that require opening localhost sockets when the
-/// execution environment forbids binding ports.
-fn skip_if_localhost_bind_unavailable() -> bool {
-    if std::net::TcpListener::bind("127.0.0.1:0").is_ok() {
-        return false;
-    }
-
-    eprintln!("Skipping test: cannot bind localhost sockets in this environment");
-    true
-}
-
-fn make_anthropic_test_config(base_url: &str) -> String {
-    let config = json!({
-        "Providers": [
-            {
-                "name": "mock",
-                "api_base_url": base_url,
-                "api_key": "test-key",
-                "models": ["test-model"],
-                "protocol": "anthropic"
-            }
-        ],
-        "Router": {
-            "default": "mock,test-model"
-        },
-        "API_TIMEOUT_MS": 5000
-    });
-
-    serde_json::to_string_pretty(&config).unwrap()
-}
-
-fn build_app(config: ccr_rust::config::Config) -> Router {
-    let ewma_tracker = std::sync::Arc::new(ccr_rust::routing::EwmaTracker::new());
-    let transformer_registry =
-        std::sync::Arc::new(ccr_rust::transformer::TransformerRegistry::new());
-    let active_streams = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let ratelimit_tracker = std::sync::Arc::new(ccr_rust::ratelimit::RateLimitTracker::new());
-    let state = ccr_rust::router::AppState {
-        config,
-        ewma_tracker,
-        gp_router: None,
-        transformer_registry,
-        active_streams,
-        max_streams: 0,
-        ratelimit_tracker,
-        shutdown_timeout: 30,
-        debug_capture: None,
-    };
-
-    Router::new()
-        .route("/v1/messages", post(ccr_rust::router::handle_messages))
-        .route(
-            "/v1/chat/completions",
-            post(ccr_rust::router::handle_chat_completions),
-        )
-        .route("/v1/models", get(ccr_rust::router::list_models))
-        .with_state(state)
-}
-
-fn codex_stream_request_body() -> Value {
-    json!({
-        "model": "mock,test-model",
-        "messages": [
-            {"role": "user", "content": "Stream please"}
-        ],
-        "max_tokens": 100,
-        "stream": true
-    })
-}
+mod support;
 
 fn sse_event(event_type: &str, payload: Value) -> String {
     format!("event: {event_type}\ndata: {payload}\n\n")
-}
-
-fn parse_sse_data_frames(payload: &str) -> Vec<String> {
-    let normalized = payload.replace("\r\n", "\n");
-    normalized
-        .split("\n\n")
-        .filter_map(|frame| {
-            if frame.trim().is_empty() {
-                return None;
-            }
-
-            let mut data_lines = Vec::new();
-            for line in frame.lines() {
-                if let Some(rest) = line.strip_prefix("data:") {
-                    data_lines.push(rest.trim_start().to_string());
-                }
-            }
-
-            if data_lines.is_empty() {
-                None
-            } else {
-                Some(data_lines.join("\n"))
-            }
-        })
-        .collect()
 }
 
 async fn start_anthropic_stream_server(chunks: Vec<(Bytes, u64)>) -> String {
@@ -167,27 +73,10 @@ async fn start_anthropic_stream_server_with_gate(
     format!("http://{}", addr)
 }
 
-async fn make_codex_stream_request(app: &Router) -> Response {
-    app.clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .header("user-agent", "codex-cli/1.0.0")
-                .body(Body::from(
-                    serde_json::to_vec(&codex_stream_request_body()).unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-}
-
 #[tokio::test]
 async fn test_anthropic_stream_chunk_boundary_inside_frame_is_parsed() {
     // Skip if we cannot bind localhost sockets in this environment
-    if skip_if_localhost_bind_unavailable() {
+    if support::skip_if_localhost_bind_unavailable() {
         return;
     }
     let message_start = sse_event(
@@ -243,15 +132,15 @@ async fn test_anthropic_stream_chunk_boundary_inside_frame_is_parsed() {
     ];
 
     let upstream_url = start_anthropic_stream_server(stream_chunks).await;
-    let config_json = make_anthropic_test_config(&upstream_url);
+    let config_json = support::make_test_config("anthropic", &upstream_url);
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
     std::fs::write(&config_path, &config_json).unwrap();
 
     let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
-    let app = build_app(config);
+    let app = support::build_app(config);
 
-    let resp = make_codex_stream_request(&app).await;
+    let resp = support::make_codex_stream_request(&app).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         resp.headers()
@@ -264,7 +153,7 @@ async fn test_anthropic_stream_chunk_boundary_inside_frame_is_parsed() {
 
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body_text = String::from_utf8(body.to_vec()).unwrap();
-    let data_frames = parse_sse_data_frames(&body_text);
+    let data_frames = support::parse_sse_data_frames(&body_text);
     let json_events: Vec<Value> = data_frames
         .iter()
         .filter(|frame| frame.as_str() != "[DONE]")
@@ -282,7 +171,7 @@ async fn test_anthropic_stream_chunk_boundary_inside_frame_is_parsed() {
 #[tokio::test]
 async fn test_anthropic_stream_emits_first_assistant_delta_before_completion() {
     // Skip if we cannot bind localhost sockets in this environment
-    if skip_if_localhost_bind_unavailable() {
+    if support::skip_if_localhost_bind_unavailable() {
         return;
     }
     let stream_chunks = vec![
@@ -322,17 +211,20 @@ async fn test_anthropic_stream_emits_first_assistant_delta_before_completion() {
     let release_tail = std::sync::Arc::new(tokio::sync::Notify::new());
     let upstream_url =
         start_anthropic_stream_server_with_gate(stream_chunks, Some(release_tail.clone())).await;
-    let config_json = make_anthropic_test_config(&upstream_url);
+    let config_json = support::make_test_config("anthropic", &upstream_url);
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
     std::fs::write(&config_path, &config_json).unwrap();
 
     let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
-    let app = build_app(config);
+    let app = support::build_app(config);
 
-    let resp = timeout(Duration::from_secs(5), make_codex_stream_request(&app))
-        .await
-        .expect("response should start before upstream stream completes");
+    let resp = timeout(
+        Duration::from_secs(5),
+        support::make_codex_stream_request(&app),
+    )
+    .await
+    .expect("response should start before upstream stream completes");
     assert_eq!(resp.status(), StatusCode::OK);
 
     let mut stream = resp.into_body().into_data_stream();
@@ -371,7 +263,7 @@ async fn test_anthropic_stream_emits_first_assistant_delta_before_completion() {
 #[tokio::test]
 async fn test_anthropic_stream_tool_deltas_and_stop_events_are_well_formed() {
     // Skip if we cannot bind localhost sockets in this environment
-    if skip_if_localhost_bind_unavailable() {
+    if support::skip_if_localhost_bind_unavailable() {
         return;
     }
     let stream_chunks = vec![
@@ -438,20 +330,20 @@ async fn test_anthropic_stream_tool_deltas_and_stop_events_are_well_formed() {
     ];
 
     let upstream_url = start_anthropic_stream_server(stream_chunks).await;
-    let config_json = make_anthropic_test_config(&upstream_url);
+    let config_json = support::make_test_config("anthropic", &upstream_url);
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
     std::fs::write(&config_path, &config_json).unwrap();
 
     let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
-    let app = build_app(config);
+    let app = support::build_app(config);
 
-    let resp = make_codex_stream_request(&app).await;
+    let resp = support::make_codex_stream_request(&app).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body_text = String::from_utf8(body.to_vec()).unwrap();
-    let data_frames = parse_sse_data_frames(&body_text);
+    let data_frames = support::parse_sse_data_frames(&body_text);
     let json_events: Vec<Value> = data_frames
         .iter()
         .filter(|frame| frame.as_str() != "[DONE]")
@@ -494,7 +386,7 @@ async fn test_anthropic_stream_tool_deltas_and_stop_events_are_well_formed() {
 #[tokio::test]
 async fn test_anthropic_stream_emits_exactly_one_done_marker_at_end() {
     // Skip if we cannot bind localhost sockets in this environment
-    if skip_if_localhost_bind_unavailable() {
+    if support::skip_if_localhost_bind_unavailable() {
         return;
     }
     let stream_chunks = vec![
@@ -533,20 +425,20 @@ async fn test_anthropic_stream_emits_exactly_one_done_marker_at_end() {
     ];
 
     let upstream_url = start_anthropic_stream_server(stream_chunks).await;
-    let config_json = make_anthropic_test_config(&upstream_url);
+    let config_json = support::make_test_config("anthropic", &upstream_url);
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
     std::fs::write(&config_path, &config_json).unwrap();
 
     let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
-    let app = build_app(config);
+    let app = support::build_app(config);
 
-    let resp = make_codex_stream_request(&app).await;
+    let resp = support::make_codex_stream_request(&app).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body_text = String::from_utf8(body.to_vec()).unwrap();
-    let data_frames = parse_sse_data_frames(&body_text);
+    let data_frames = support::parse_sse_data_frames(&body_text);
     let done_count = data_frames
         .iter()
         .filter(|frame| frame.as_str() == "[DONE]")
@@ -559,7 +451,7 @@ async fn test_anthropic_stream_emits_exactly_one_done_marker_at_end() {
 #[tokio::test]
 async fn test_anthropic_stream_utf8_split_across_chunks() {
     // Skip if we cannot bind localhost sockets in this environment
-    if skip_if_localhost_bind_unavailable() {
+    if support::skip_if_localhost_bind_unavailable() {
         return;
     }
     // "hello" in Japanese is "こんにちは" (Kon'nichiwa)
@@ -601,20 +493,20 @@ async fn test_anthropic_stream_utf8_split_across_chunks() {
     ];
 
     let upstream_url = start_anthropic_stream_server(stream_chunks).await;
-    let config_json = make_anthropic_test_config(&upstream_url);
+    let config_json = support::make_test_config("anthropic", &upstream_url);
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
     std::fs::write(&config_path, &config_json).unwrap();
 
     let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
-    let app = build_app(config);
+    let app = support::build_app(config);
 
-    let resp = make_codex_stream_request(&app).await;
+    let resp = support::make_codex_stream_request(&app).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body_text = String::from_utf8(body.to_vec()).unwrap();
-    let data_frames = parse_sse_data_frames(&body_text);
+    let data_frames = support::parse_sse_data_frames(&body_text);
     let json_events: Vec<Value> = data_frames
         .iter()
         .filter(|frame| frame.as_str() != "[DONE]")
@@ -632,7 +524,7 @@ async fn test_anthropic_stream_utf8_split_across_chunks() {
 #[tokio::test]
 async fn test_anthropic_stream_abrupt_closure_emits_done_marker() {
     // Skip if we cannot bind localhost sockets in this environment
-    if skip_if_localhost_bind_unavailable() {
+    if support::skip_if_localhost_bind_unavailable() {
         return;
     }
     let stream_chunks = vec![
@@ -667,20 +559,20 @@ async fn test_anthropic_stream_abrupt_closure_emits_done_marker() {
     ];
 
     let upstream_url = start_anthropic_stream_server(stream_chunks).await;
-    let config_json = make_anthropic_test_config(&upstream_url);
+    let config_json = support::make_test_config("anthropic", &upstream_url);
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
     std::fs::write(&config_path, &config_json).unwrap();
 
     let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
-    let app = build_app(config);
+    let app = support::build_app(config);
 
-    let resp = make_codex_stream_request(&app).await;
+    let resp = support::make_codex_stream_request(&app).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body_text = String::from_utf8(body.to_vec()).unwrap();
-    let data_frames = parse_sse_data_frames(&body_text);
+    let data_frames = support::parse_sse_data_frames(&body_text);
 
     assert!(data_frames.iter().any(|frame| frame.contains("abrupt")));
     assert_eq!(data_frames.last().map(String::as_str), Some("[DONE]"));
