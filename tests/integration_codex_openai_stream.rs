@@ -56,6 +56,17 @@ async fn start_openai_stream_server(chunks: Vec<(Bytes, u64)>) -> String {
 
 #[tokio::test]
 async fn test_codex_stream_reassembles_fragmented_openai_sse_frames() {
+    for (payload, expected) in [
+        ("data: one\n\n", "one"),
+        ("data:  two\n\n", " two"),
+        ("data:\tthree\n\n", "\tthree"),
+        ("data:four\n\n", "four"),
+        ("data: first\r\ndata:  second\r\n\r\n", "first\n second"),
+        ("data:\n\n", ""),
+    ] {
+        assert_eq!(support::parse_sse_data_frames(payload), vec![expected]);
+    }
+
     // Skip if we cannot bind localhost sockets in this environment
     if support::skip_if_localhost_bind_unavailable() {
         return;

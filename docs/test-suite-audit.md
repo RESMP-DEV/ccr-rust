@@ -24,6 +24,12 @@ targets does not multiply execution. Routing precedence, 429/tier cascade,
 reasoning controls, tool conversion, cancellation, and protocol-specific
 streaming controls remain separate regression cases.
 
+Review also exposed an existing whitespace bug in the copied SSE fixture
+parser. The shared parser now strips only the one optional space after `data:`,
+preserving additional spaces and tabs. Table-driven checks inside the existing
+OpenAI stream test cover those boundaries, empty fields, and multiline CRLF
+frames without adding a new test target or duplicating test execution.
+
 ## Validation workflow
 
 Use focused tests while editing:

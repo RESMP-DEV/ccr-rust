@@ -86,7 +86,7 @@ pub(crate) fn parse_sse_data_frames(payload: &str) -> Vec<String> {
             let mut data_lines = Vec::new();
             for line in frame.lines() {
                 if let Some(rest) = line.strip_prefix("data:") {
-                    data_lines.push(rest.trim_start().to_string());
+                    data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
                 }
             }
 
