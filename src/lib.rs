@@ -17,3 +17,4 @@ pub mod sse;
 pub mod transform;
 pub mod transformer;
 pub mod turn_capture;
+pub mod workers;
