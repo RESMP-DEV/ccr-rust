@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added optional request tracing to a loopback OpenTelemetry Collector through
+  the `telemetry` build feature and `CCR_OTEL_ENDPOINT`. Redirects and proxy
+  discovery are disabled. Exported spans contain route templates, bounded methods,
+  response status and stream completion, with a bounded queue and timeout.
+  Request bodies, headers and raw URLs are excluded. Existing Prometheus
+  metrics remain independent of telemetry export.
+- Fixed telemetry provider task failures to emit a configuration-safe diagnostic.
+- Bounded telemetry shutdown now runs after successful and failed command
+  dispatch, including status-check errors. Provider wiring is passed explicitly
+  to the server instead of using a process-global enabled latch.
+- Documented the intentional reqwest version boundary and exact telemetry test
+  gates. Redirect-path and timing coverage was strengthened without enabling
+  telemetry CI.
 - Corrected the shared test SSE parser to preserve payload indentation and
   tabs; delimiter-space regressions run within the existing stream test.
 

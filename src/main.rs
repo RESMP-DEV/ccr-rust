@@ -5,7 +5,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
+#[cfg(feature = "telemetry")]
+use ccr_rust::telemetry;
 use clap::{Parser, Subcommand};
+#[cfg(feature = "telemetry")]
+use opentelemetry::trace::TracerProvider;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -13,7 +17,7 @@ use tokio::signal::ctrl_c;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 mod config {
     pub use ccr_rust::config::*;
@@ -402,6 +406,7 @@ async fn run_server(
     port: u16,
     max_streams: usize,
     shutdown_timeout: u64,
+    telemetry_enabled: bool,
 ) -> anyhow::Result<()> {
     let config = Config::from_file(config_path)?;
     ensure_gp_build_support(&config)?;
@@ -484,6 +489,10 @@ async fn run_server(
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .with_state(state);
+    #[cfg(feature = "telemetry")]
+    let app = telemetry::instrument(app, telemetry_enabled);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = telemetry_enabled;
 
     let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
     tracing::info!("CCR-Rust listening on {}", addr);
@@ -572,110 +581,158 @@ async fn check_status(host: &str, port: u16) -> anyhow::Result<()> {
         }
         Ok(resp) => {
             eprintln!("✗ Server returned: {}", resp.status());
-            std::process::exit(1);
+            anyhow::bail!("server returned {}", resp.status());
         }
         Err(e) => {
             eprintln!("✗ Not running: {}", e);
-            std::process::exit(1);
+            Err(anyhow!("not running: {e}"))
         }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::registry()
-        .with(
+    let cli = Cli::parse();
+    #[cfg(feature = "telemetry")]
+    let telemetry_provider = if matches!(&cli.command, None | Some(Commands::Start { .. })) {
+        telemetry::initialize_provider(telemetry::provider_from_env).await
+    } else {
+        None
+    };
+    #[cfg(feature = "telemetry")]
+    let telemetry_layer = telemetry_provider.as_ref().map(|provider| {
+        tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("ccr-rust"))
+            .with_location(false)
+            .with_threads(false)
+            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.target() == "ccr_telemetry"
+            }))
+    });
+    #[cfg(feature = "telemetry")]
+    let telemetry_enabled = telemetry_provider.is_some();
+    #[cfg(not(feature = "telemetry"))]
+    let telemetry_enabled = false;
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer().with_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "ccr_rust=info,tower_http=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    let cli = Cli::parse();
+        ),
+    );
+    #[cfg(feature = "telemetry")]
+    let subscriber = subscriber.with(telemetry_layer);
+    subscriber.init();
     let config_path = cli
         .config
         .map(|p| shellexpand::tilde(&p).to_string())
         .unwrap_or_else(|| shellexpand::tilde("~/.claude-code-router/config.json").to_string());
 
-    match cli.command {
-        Some(Commands::Start {
-            host,
-            port,
-            max_streams,
-            shutdown_timeout,
-        }) => {
-            run_server(&config_path, host, port, max_streams, shutdown_timeout).await?;
-        }
-        None => {
-            // Default: start server with defaults
-            run_server(&config_path, "127.0.0.1".into(), 3456, 512, 30).await?;
-        }
-        Some(Commands::Status { host, port }) => {
-            check_status(&host, port).await?;
-        }
-        Some(Commands::Validate) => {
-            validate_config(&config_path)?;
-        }
-        Some(Commands::Workers(args)) => ccr_rust::workers::run(args)?,
-        #[cfg(feature = "dashboard")]
-        Some(Commands::Dashboard { host, port }) => {
-            dashboard::run_dashboard(host, port)?;
-        }
-        Some(Commands::Version) => {
-            show_version();
-        }
-        Some(Commands::ClearStats {
-            redis_url,
-            redis_prefix,
-        }) => {
-            clear_stats(&config_path, redis_url, redis_prefix)?;
-        }
-        Some(Commands::Mcp {
-            level,
-            backends,
-            include,
-            exclude,
-        }) => {
-            ccr_rust::mcp::server::run(ccr_rust::mcp::server::McpArgs {
+    let dispatch_result: Result<()> = async {
+        match cli.command {
+            Some(Commands::Start {
+                host,
+                port,
+                max_streams,
+                shutdown_timeout,
+            }) => {
+                run_server(
+                    &config_path,
+                    host,
+                    port,
+                    max_streams,
+                    shutdown_timeout,
+                    telemetry_enabled,
+                )
+                .await?;
+            }
+            None => {
+                run_server(
+                    &config_path,
+                    "127.0.0.1".into(),
+                    3456,
+                    512,
+                    30,
+                    telemetry_enabled,
+                )
+                .await?;
+            }
+            Some(Commands::Status { host, port }) => {
+                check_status(&host, port).await?;
+            }
+            Some(Commands::Validate) => {
+                validate_config(&config_path)?;
+            }
+            Some(Commands::Workers(args)) => ccr_rust::workers::run(args)?,
+            #[cfg(feature = "dashboard")]
+            Some(Commands::Dashboard { host, port }) => {
+                dashboard::run_dashboard(host, port)?;
+            }
+            Some(Commands::Version) => {
+                show_version();
+            }
+            Some(Commands::ClearStats {
+                redis_url,
+                redis_prefix,
+            }) => {
+                clear_stats(&config_path, redis_url, redis_prefix)?;
+            }
+            Some(Commands::Mcp {
                 level,
                 backends,
                 include,
                 exclude,
-            })
-            .await?;
-        }
-        Some(Commands::McpDaemon {
-            port,
-            host,
-            auth_token,
-            memory_dir,
-            pyright_root,
-            pyright_workspace_dir,
-        }) => {
-            ccr_rust::mcp::daemon::run(ccr_rust::mcp::daemon::DaemonArgs {
+            }) => {
+                ccr_rust::mcp::server::run(ccr_rust::mcp::server::McpArgs {
+                    level,
+                    backends,
+                    include,
+                    exclude,
+                })
+                .await?;
+            }
+            Some(Commands::McpDaemon {
                 port,
                 host,
                 auth_token,
-                memory_dir: memory_dir.map(std::path::PathBuf::from),
-                pyright_root: pyright_root.map(std::path::PathBuf::from),
-                pyright_workspace_dir: pyright_workspace_dir.map(std::path::PathBuf::from),
-                jina_api_key: None,
-                jina_search_base: None,
-                jina_reader_base: None,
-            })
-            .await?;
+                memory_dir,
+                pyright_root,
+                pyright_workspace_dir,
+            }) => {
+                ccr_rust::mcp::daemon::run(ccr_rust::mcp::daemon::DaemonArgs {
+                    port,
+                    host,
+                    auth_token,
+                    memory_dir: memory_dir.map(std::path::PathBuf::from),
+                    pyright_root: pyright_root.map(std::path::PathBuf::from),
+                    pyright_workspace_dir: pyright_workspace_dir.map(std::path::PathBuf::from),
+                    jina_api_key: None,
+                    jina_search_base: None,
+                    jina_reader_base: None,
+                })
+                .await?;
+            }
+            Some(Commands::Captures {
+                provider,
+                limit,
+                stats,
+                output_dir,
+                full,
+            }) => {
+                list_captures(&config_path, provider, limit, stats, output_dir, full)?;
+            }
         }
-        Some(Commands::Captures {
-            provider,
-            limit,
-            stats,
-            output_dir,
-            full,
-        }) => {
-            list_captures(&config_path, provider, limit, stats, output_dir, full)?;
-        }
+        Ok(())
     }
-    Ok(())
+    .await;
+
+    #[cfg(feature = "telemetry")]
+    {
+        telemetry::finish_command(telemetry_provider, dispatch_result).await
+    }
+    #[cfg(not(feature = "telemetry"))]
+    {
+        dispatch_result
+    }
 }
 
 async fn shutdown_signal(timeout: u64) {
