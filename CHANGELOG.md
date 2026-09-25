@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Corrected the shared test SSE parser to preserve payload indentation and
+  tabs; delimiter-space regressions run within the existing stream test.
+
+- Consolidated Codex streaming integration helpers into a shared test-support
+  module while retaining protocol-specific upstream fixtures and all existing
+  test coverage.
 - Added offline `workers list/show/events/detail` CLI commands for inspecting
   `codex-ccr-worker` artifacts without loading full transcripts. Bounded text
   and JSON summaries expose reported usage, failures, activity, receipt state,
