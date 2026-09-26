@@ -3,7 +3,7 @@
 //! protocol providers.
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header::CONTENT_TYPE, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
@@ -19,7 +19,12 @@ fn make_anthropic_config(mock_url: &str) -> String {
                 "name": "mock",
                 "api_base_url": mock_url,
                 "api_key": "test-key",
-                "models": ["deepseek-chat", "test-reasoner-model", "test-model"],
+                "models": [
+                    "MiniMax-M3",
+                    "deepseek-chat",
+                    "test-reasoner-model",
+                    "test-model"
+                ],
                 "protocol": "anthropic",
                 "anthropic_version": "2023-06-01"
             }
@@ -155,6 +160,15 @@ async fn successful_json_response(response: Response) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+fn assert_native_json_success(response: Response) -> Response {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).expect("content type"),
+        "application/json"
+    );
+    response
+}
+
 async fn captured_upstream_json(mock_server: &MockServer) -> Value {
     let requests = mock_server.received_requests().await.unwrap();
     assert_eq!(
@@ -267,7 +281,7 @@ async fn chat_reasoning_effort_maps_to_anthropic_output_config_nonstreaming() {
             "model": "mock,test-model",
             "messages": [{"role": "user", "content": "hello"}],
             "max_tokens": 128_000,
-            "reasoning_effort": "high",
+            "reasoning_effort": "max",
             "stream": false
         }),
     )
@@ -278,7 +292,7 @@ async fn chat_reasoning_effort_maps_to_anthropic_output_config_nonstreaming() {
     let upstream = captured_upstream_json(&mock_server).await;
     assert_eq!(upstream["model"], "test-model");
     assert_eq!(upstream["max_tokens"], 128_000);
-    assert_eq!(upstream["output_config"], json!({"effort": "high"}));
+    assert_eq!(upstream["output_config"], json!({"effort": "max"}));
     assert_no_openai_or_internal_control_keys(&upstream);
 }
 
@@ -329,6 +343,165 @@ async fn native_messages_thinking_modes_and_output_config_are_passed_through() {
         assert_eq!(upstream["max_tokens"], 128_000, "{case_name}");
         assert_no_openai_or_internal_control_keys(&upstream);
     }
+}
+
+#[tokio::test]
+async fn native_messages_round_trip_preserves_signed_thinking_and_tool_result() {
+    let mock_server = MockServer::start().await;
+    let thinking = json!({
+        "type": "thinking",
+        "thinking": "Synthetic reasoning for the tool call.",
+        "signature": "signed-block-0"
+    });
+    let tool_use = json!({
+        "type": "tool_use",
+        "id": "toolu_signed_01",
+        "name": "get_time",
+        "input": {"timezone": "UTC"}
+    });
+    let upstream_response = json!({
+        "id": "msg_signed_tool",
+        "type": "message",
+        "role": "assistant",
+        "model": "MiniMax-M3",
+        "content": [thinking, tool_use],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 7, "output_tokens": 4}
+    });
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(upstream_response.clone()))
+        .expect(2)
+        .mount(&mock_server)
+        .await;
+    let app = app_for_mock(&mock_server);
+    let request = json!({
+        "model": "mock,MiniMax-M3",
+        "messages": [{"role": "user", "content": "What time is it in UTC?"}],
+        "max_tokens": 128_000,
+        "thinking": {"type": "adaptive"},
+        "tools": [{
+            "name": "get_time",
+            "description": "Get the current time",
+            "input_schema": {
+                "type": "object",
+                "properties": {"timezone": {"type": "string"}}
+            }
+        }],
+        "stream": false
+    });
+
+    let first_response = send_json(app.clone(), "/v1/messages", request).await;
+    let first_response = assert_native_json_success(first_response);
+    let first = successful_json_response(first_response).await;
+    assert_eq!(first["content"], json!([thinking, tool_use]));
+
+    let continuation = json!({
+        "model": "mock,MiniMax-M3",
+        "messages": [
+            {"role": "user", "content": "What time is it in UTC?"},
+            {"role": "assistant", "content": [thinking, tool_use]},
+            {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_signed_01",
+                    "content": "12:34"
+                }]
+            }
+        ],
+        "max_tokens": 128_000,
+        "thinking": {"type": "adaptive"},
+        "tools": [{
+            "name": "get_time",
+            "description": "Get the current time",
+            "input_schema": {
+                "type": "object",
+                "properties": {"timezone": {"type": "string"}}
+            }
+        }],
+        "stream": false
+    });
+    let second_response = send_json(app, "/v1/messages", continuation).await;
+    let second_response = assert_native_json_success(second_response);
+    let second = successful_json_response(second_response).await;
+    assert_eq!(second["content"], json!([thinking, tool_use]));
+
+    let requests = mock_server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let second_upstream: Value =
+        serde_json::from_slice(&requests[1].body).expect("second request is JSON");
+    assert_eq!(second_upstream["model"], "MiniMax-M3");
+    assert_eq!(second_upstream["thinking"], json!({"type": "adaptive"}));
+    assert_eq!(second_upstream["max_tokens"], 128_000);
+    assert_eq!(
+        second_upstream["messages"][1]["content"],
+        json!([thinking, tool_use])
+    );
+    assert_eq!(
+        second_upstream["messages"][2]["content"][0],
+        json!({
+            "type": "tool_result",
+            "tool_use_id": "toolu_signed_01",
+            "content": "12:34"
+        })
+    );
+}
+
+#[tokio::test]
+async fn native_messages_json_fallback_is_labeled_json_but_malformed_bytes_are_not() {
+    let json_fallback = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"provider_shape": "not AnthropicResponse"})),
+        )
+        .expect(1)
+        .mount(&json_fallback)
+        .await;
+    let response = send_json(
+        app_for_mock(&json_fallback),
+        "/v1/messages",
+        json!({
+            "model": "mock,test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 128_000,
+            "stream": false
+        }),
+    )
+    .await;
+    let response = assert_native_json_success(response);
+    let body = successful_json_response(response).await;
+    assert_eq!(body["provider_shape"], "not AnthropicResponse");
+
+    let malformed = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(CONTENT_TYPE, "application/octet-stream")
+                .set_body_string("<not-json>"),
+        )
+        .expect(1)
+        .mount(&malformed)
+        .await;
+    let response = send_json(
+        app_for_mock(&malformed),
+        "/v1/messages",
+        json!({
+            "model": "mock,test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 128_000,
+            "stream": false
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).expect("content type"),
+        "application/octet-stream"
+    );
 }
 
 #[tokio::test]
