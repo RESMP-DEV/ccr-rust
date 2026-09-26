@@ -160,6 +160,21 @@ controls, including any mixed-protocol fields; it does not reconcile a supplied
 Anthropic `output_config` with OpenAI reasoning controls. Use the destination
 protocol's native controls on passthrough requests.
 
+Provider-specific reasoning controls are not interchangeable. MiniMax-M3 uses
+`{"thinking":{"type":"adaptive"}}`: CCR does not convert a numeric depth or
+effort setting into that mode, and its signed thinking blocks must be replayed
+unchanged on the next native Messages request. Native Anthropic clients
+preserve MiniMax's signed thinking during tool continuations. GLM 5.3 supports
+the `max` effort label; a Chat `reasoning_effort` or Responses
+`reasoning.effort` value of `max` maps to `output_config.effort: "max"`, while
+a native Messages client supplies that same `output_config` directly.
+
+Non-streaming native Messages responses that contain JSON, including a raw
+JSON fallback with a non-Anthropic schema, use `application/json`. Responses
+translated from OpenAI upstreams also carry that JSON media type. Serialization
+errors remain in the router error path. Malformed upstream bytes are not
+relabeled as JSON.
+
 When translating native Messages to OpenAI, an explicit
 string `output_config.effort` maps back to `reasoning_effort` and overrides
 model-name heuristics. A non-null, non-string effort suppresses the heuristic

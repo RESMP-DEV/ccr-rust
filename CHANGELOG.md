@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed non-streaming Anthropic Messages responses, including responses
+  translated from OpenAI upstreams, being labeled `application/octet-stream`,
+  which native Anthropic SDKs reject. Serialization errors retain the router
+  error path. Parsed-JSON
+  fallbacks now carry `application/json`, while malformed upstream bytes retain
+  the byte-stream label. Added integration coverage for MiniMax adaptive
+  thinking with `max_tokens`, exact signed-thinking/tool-result replay, JSON
+  schema fallback, GLM `max` effort mapping, and malformed-byte handling.
+  Documented that MiniMax-M3 requires adaptive thinking and unchanged signed
+  blocks while GLM 5.3 accepts mapped `max` effort.
 - Added optional request tracing to a loopback OpenTelemetry Collector through
   the `telemetry` build feature and `CCR_OTEL_ENDPOINT`. Redirects and proxy
   discovery are disabled. Exported spans contain route templates, bounded methods,

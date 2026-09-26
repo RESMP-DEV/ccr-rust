@@ -672,17 +672,14 @@ fn provider_upstream_error(
 /// without its credential environment rather than the key being invalid.
 fn credential_placeholder_hint(provider: &crate::config::Provider) -> Option<&'static str> {
     let has_placeholder = crate::config::contains_env_placeholder(&provider.api_key)
-        || provider
-            .extra_headers
-            .as_ref()
-            .is_some_and(|headers| {
-                headers
-                    .values()
-                    .any(|value| crate::config::contains_env_placeholder(value))
-            });
-    has_placeholder.then(|| {
+        || provider.extra_headers.as_ref().is_some_and(|headers| {
+            headers
+                .values()
+                .any(|value| crate::config::contains_env_placeholder(value))
+        });
+    has_placeholder.then_some(
         " (the configured api_key or an extra header is an unexpanded env placeholder; restart via the credential launcher or export the variable)"
-    })
+    )
 }
 
 pub(super) async fn try_request_via_openai_protocol(
@@ -1053,7 +1050,12 @@ pub(super) async fn try_request_via_openai_protocol(
             let response_body =
                 serde_json::to_vec(&final_resp).map_err(|e| TryRequestError::Other(e.into()))?;
 
-            let mut response = (StatusCode::OK, response_body).into_response();
+            let mut response = (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                response_body,
+            )
+                .into_response();
             if let Some(trusted_response) = trusted_responses_response {
                 response
                     .extensions_mut()
@@ -1338,7 +1340,12 @@ pub(super) async fn try_request_via_anthropic_protocol(
             let anthropic_resp = match serde_json::from_value::<AnthropicResponse>(response_value) {
                 Ok(response) => response,
                 Err(_) => {
-                    let mut response = (status, body).into_response();
+                    let mut response = (
+                        status,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        body,
+                    )
+                        .into_response();
                     insert_ccr_tier_header(&mut response, tier_name);
                     return Ok(response);
                 }
@@ -1420,7 +1427,12 @@ pub(super) async fn try_request_via_anthropic_protocol(
 
             let response_body = serde_json::to_vec(&anthropic_resp)
                 .map_err(|e| TryRequestError::Other(e.into()))?;
-            let mut response = (StatusCode::OK, response_body).into_response();
+            let mut response = (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                response_body,
+            )
+                .into_response();
             insert_ccr_tier_header(&mut response, tier_name);
             return Ok(response);
         }
