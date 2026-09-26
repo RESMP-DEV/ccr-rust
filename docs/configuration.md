@@ -163,8 +163,8 @@ protocol's native controls on passthrough requests.
 Provider-specific reasoning controls are not interchangeable. MiniMax-M3 uses
 `{"thinking":{"type":"adaptive"}}`: CCR does not convert a numeric depth or
 effort setting into that mode, and its signed thinking blocks must be replayed
-unchanged on the next native Messages request. Native Anthropic clients are
-therefore the lossless path for MiniMax tool continuations. GLM 5.3 supports
+unchanged on the next native Messages request. Native Anthropic clients
+preserve MiniMax's signed thinking during tool continuations. GLM 5.3 supports
 the `max` effort label; a Chat `reasoning_effort` or Responses
 `reasoning.effort` value of `max` maps to `output_config.effort: "max"`, while
 a native Messages client supplies that same `output_config` directly.
