@@ -260,6 +260,12 @@ async fn test_claude_code_passthrough_basic_request() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap(),
+        "application/json"
+    );
 
     // Parse response to verify Anthropic format
     let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)

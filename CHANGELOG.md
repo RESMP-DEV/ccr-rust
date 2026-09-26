@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Fixed non-streaming native Anthropic Messages responses being labeled
-  `application/octet-stream`, which native Anthropic SDKs reject. Parsed-JSON
+- Fixed non-streaming Anthropic Messages responses, including responses
+  translated from OpenAI upstreams, being labeled `application/octet-stream`,
+  which native Anthropic SDKs reject. Serialization errors retain the router
+  error path. Parsed-JSON
   fallbacks now carry `application/json`, while malformed upstream bytes retain
   the byte-stream label. Added integration coverage for MiniMax adaptive
   thinking with `max_tokens`, exact signed-thinking/tool-result replay, JSON

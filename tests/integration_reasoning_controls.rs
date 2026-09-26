@@ -480,8 +480,7 @@ async fn native_messages_json_fallback_is_labeled_json_but_malformed_bytes_are_n
         .and(path("/messages"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header(CONTENT_TYPE, "application/octet-stream")
-                .set_body_string("<not-json>"),
+                .set_body_raw(b"<not-json>".to_vec(), "application/octet-stream"),
         )
         .expect(1)
         .mount(&malformed)
@@ -502,6 +501,10 @@ async fn native_messages_json_fallback_is_labeled_json_but_malformed_bytes_are_n
         response.headers().get(CONTENT_TYPE).expect("content type"),
         "application/octet-stream"
     );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"<not-json>");
 }
 
 #[tokio::test]

@@ -170,8 +170,10 @@ the `max` effort label; a Chat `reasoning_effort` or Responses
 a native Messages client supplies that same `output_config` directly.
 
 Non-streaming native Messages responses that contain JSON, including a raw
-JSON fallback with a non-Anthropic schema, use `application/json`. Malformed
-upstream bytes are not relabeled as JSON.
+JSON fallback with a non-Anthropic schema, use `application/json`. Responses
+translated from OpenAI upstreams also carry that JSON media type. Serialization
+errors remain in the router error path. Malformed upstream bytes are not
+relabeled as JSON.
 
 When translating native Messages to OpenAI, an explicit
 string `output_config.effort` maps back to `reasoning_effort` and overrides

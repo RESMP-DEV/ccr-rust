@@ -1050,7 +1050,12 @@ pub(super) async fn try_request_via_openai_protocol(
             let response_body =
                 serde_json::to_vec(&final_resp).map_err(|e| TryRequestError::Other(e.into()))?;
 
-            let mut response = (StatusCode::OK, response_body).into_response();
+            let mut response = (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                response_body,
+            )
+                .into_response();
             if let Some(trusted_response) = trusted_responses_response {
                 response
                     .extensions_mut()
@@ -1420,7 +1425,14 @@ pub(super) async fn try_request_via_anthropic_protocol(
                 record_cost(tier_name, cost);
             }
 
-            let mut response = (StatusCode::OK, axum::Json(anthropic_resp)).into_response();
+            let response_body = serde_json::to_vec(&anthropic_resp)
+                .map_err(|e| TryRequestError::Other(e.into()))?;
+            let mut response = (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                response_body,
+            )
+                .into_response();
             insert_ccr_tier_header(&mut response, tier_name);
             return Ok(response);
         }
