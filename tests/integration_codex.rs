@@ -1321,3 +1321,91 @@ async fn test_codex_empty_messages() {
 
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_models_endpoint_lists_aliases_with_display_metadata() {
+    if skip_if_localhost_bind_unavailable() {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    let config_json = json!({
+        "Providers": [{
+            "name": "mock",
+            "api_base_url": mock_server.uri(),
+            "api_key": "test-key",
+            "models": ["test-model"]
+        }],
+        "Router": {
+            "default": "mock,test-model",
+            "modelAliases": {
+                "test-model": "mock,test-model",
+                "claude-test-model": {
+                    "route": "mock,test-model",
+                    "display_name": "Test Model (via CCR)",
+                    "description": "Alias surfaced to gateway model discovery"
+                }
+            }
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&config_json).unwrap(),
+    )
+    .unwrap();
+
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    assert_eq!(response_json["object"], "list");
+    assert!(
+        response_json["models"].is_array(),
+        "Codex expects a models field"
+    );
+
+    let data = response_json["data"].as_array().unwrap();
+    let entry_for = |id: &str| {
+        data.iter()
+            .find(|entry| entry["id"] == id)
+            .unwrap_or_else(|| panic!("expected model id {id} in data: {data:?}"))
+    };
+
+    // Provider routes listed as both explicit and bare ids
+    assert_eq!(entry_for("mock,test-model")["owned_by"], "mock");
+    assert_eq!(entry_for("test-model")["owned_by"], "mock");
+
+    // Detailed alias entry carries metadata for gateway model discovery
+    let detailed = entry_for("claude-test-model");
+    assert_eq!(detailed["owned_by"], "mock");
+    assert_eq!(detailed["display_name"], "Test Model (via CCR)");
+    assert_eq!(
+        detailed["description"],
+        "Alias surfaced to gateway model discovery"
+    );
+
+    // Every id appears exactly once
+    let mut ids: Vec<&str> = data.iter().map(|e| e["id"].as_str().unwrap()).collect();
+    ids.sort_unstable();
+    let count_before = ids.len();
+    ids.dedup();
+    assert_eq!(ids.len(), count_before, "duplicate ids in /v1/models data");
+}

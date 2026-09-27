@@ -33,3 +33,5 @@ reports/
 
 .mypy_cache/
 .sindexer/
+.rust-indexer/
+.worktrees/

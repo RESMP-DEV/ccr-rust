@@ -166,13 +166,14 @@ fn validate_model_aliases(router: &RouterConfig, providers: &[Provider]) -> Resu
             !alias.trim().is_empty() && alias == alias.trim() && !alias.contains(','),
             "Router.modelAliases alias '{alias}' must be a nonblank bare model name without surrounding whitespace"
         );
+        let route = target.route();
         anyhow::ensure!(
-            target == target.trim(),
-            "Router.modelAliases target '{target}' has surrounding whitespace"
+            route == route.trim(),
+            "Router.modelAliases target '{route}' has surrounding whitespace"
         );
-        let Some((provider, model)) = target.split_once(',') else {
+        let Some((provider, model)) = route.split_once(',') else {
             anyhow::bail!(
-                "Router.modelAliases target '{target}' must be an explicit provider,model route"
+                "Router.modelAliases target '{route}' must be an explicit provider,model route"
             );
         };
         anyhow::ensure!(
@@ -186,8 +187,23 @@ fn validate_model_aliases(router: &RouterConfig, providers: &[Provider]) -> Resu
                         .models
                         .iter()
                         .any(|configured| configured == model)),
-            "Router.modelAliases target '{target}' must name a configured provider,model route"
+            "Router.modelAliases target '{route}' must name a configured provider,model route"
         );
+        if let ModelAliasTarget::Detailed {
+            display_name,
+            description,
+            ..
+        } = target
+        {
+            for (field, value) in [("display_name", display_name), ("description", description)] {
+                if let Some(text) = value {
+                    anyhow::ensure!(
+                        !text.trim().is_empty() && text == text.trim(),
+                        "Router.modelAliases alias '{alias}' {field} must be nonblank without surrounding whitespace"
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -413,9 +429,8 @@ impl Config {
 
         let http_client = client_builder.build()?;
         let presets = file.presets.clone();
-        let effective_max_request_body_bytes = compute_max_request_body_bytes(
-            file.max_request_body_bytes,
-        );
+        let effective_max_request_body_bytes =
+            compute_max_request_body_bytes(file.max_request_body_bytes);
 
         Ok(Config {
             inner: Arc::new(ConfigInner {
@@ -602,10 +617,7 @@ mod tests {
         )
         .unwrap();
         let config = Config::from_file(path.to_str().unwrap()).unwrap();
-        assert_eq!(
-            config.max_request_body_bytes(),
-            HARD_MAX_REQUEST_BODY_BYTES
-        );
+        assert_eq!(config.max_request_body_bytes(), HARD_MAX_REQUEST_BODY_BYTES);
 
         std::fs::remove_file(&path).unwrap();
     }
@@ -1081,10 +1093,7 @@ mod credential_guard_tests {
         .unwrap()
     }
 
-    fn expand_and_validate(
-        config: serde_json::Value,
-        allow_unexpanded: bool,
-    ) -> Result<()> {
+    fn expand_and_validate(config: serde_json::Value, allow_unexpanded: bool) -> Result<()> {
         let mut value = config;
         let mut failures = Vec::new();
         expand_env_references(&mut value, &mut failures, "");
@@ -1100,7 +1109,10 @@ mod credential_guard_tests {
         .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("provider 'p1' api_key"), "{message}");
-        assert!(message.contains("CCR_ALLOW_UNEXPANDED_CREDENTIALS"), "{message}");
+        assert!(
+            message.contains("CCR_ALLOW_UNEXPANDED_CREDENTIALS"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -1133,8 +1145,8 @@ mod credential_guard_tests {
         assert!(!contains_env_placeholder("cost $5 and $$ only"));
         assert!(!contains_env_placeholder(""));
 
-        let error = expand_and_validate(config_value_with_api_key("$CCR_MISSING_KEY"), false)
-            .unwrap_err();
+        let error =
+            expand_and_validate(config_value_with_api_key("$CCR_MISSING_KEY"), false).unwrap_err();
         assert!(error.to_string().contains("provider 'p1' api_key"));
     }
 

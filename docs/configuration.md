@@ -285,8 +285,7 @@ The `Router` section configures how incoming requests are routed to providers.
 | `tierRetries` | object | No | - | Per-tier retry configuration. |
 | `forceNonStreaming` | boolean | No | false | Disable streaming for agent workloads. |
 | `ignoreDirect` | boolean | No | false | Ignore client model targeting, enforce tier order. |
-| `modelAliases` | object | No | `{}` | Map exact bare client model IDs to configured `provider,model` routes. Ignored for routing when `ignoreDirect` is true. |
-| `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
+| `modelAliases` | object | No | `{}` | Map exact bare client model IDs to configured `provider,model` routes. Ignored for routing when `ignoreDirect` is true. || `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
 
 For example, `"modelAliases": {"gpt-6-astra": "azure,gpt-6-astra"}`
 preserves an existing client's Astra selection while `default` and `tiers`
@@ -294,6 +293,29 @@ select `zai,glm-5.3` for other unqualified requests. Aliases are exact and do
 not chain. Targets must name a configured provider and model. Comma-qualified
 requests are never remapped. The resolved route follows normal direct-routing
 and fallback rules; this is not an account-isolation mechanism.
+
+An alias value may instead be an object with a `route` plus optional
+`display_name` and `description` metadata:
+
+```json
+"modelAliases": {
+  "gpt-6-astra": "azure,gpt-6-astra",
+  "claude-glm-5.3": {
+    "route": "zai,glm-5.3",
+    "display_name": "GLM 5.3 (Z.ai via CCR)",
+    "description": "Z.ai GLM 5.3 routed through CCR"
+  }
+}
+```
+
+Every alias key is also listed by `GET /v1/models`, carrying the alias's
+`display_name` and `description` when configured. Clients with gateway model
+discovery (such as Claude Code, which keeps only `/v1/models` ids matching
+`claude` or `anthropic`) can therefore discover and select aliased routes with
+truthful labels; alias ids without such a prefix are skipped by that client's
+filter but remain listed for other clients. Metadata on an alias whose id
+collides with a listed provider model id enriches that existing entry instead
+of creating a duplicate.
 
 Aliases select routes, not display metadata. CCR preserves upstream-reported
 response model IDs, but clients can still display their requested model or
