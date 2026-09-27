@@ -285,7 +285,8 @@ The `Router` section configures how incoming requests are routed to providers.
 | `tierRetries` | object | No | - | Per-tier retry configuration. |
 | `forceNonStreaming` | boolean | No | false | Disable streaming for agent workloads. |
 | `ignoreDirect` | boolean | No | false | Ignore client model targeting, enforce tier order. |
-| `modelAliases` | object | No | `{}` | Map exact bare client model IDs to configured `provider,model` routes. Ignored for routing when `ignoreDirect` is true. || `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
+| `modelAliases` | object | No | `{}` | Map exact bare client model IDs to configured `provider,model` routes. Ignored for routing when `ignoreDirect` is true. |
+| `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
 
 For example, `"modelAliases": {"gpt-6-astra": "azure,gpt-6-astra"}`
 preserves an existing client's Astra selection while `default` and `tiers`

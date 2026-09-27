@@ -1409,3 +1409,75 @@ async fn test_models_endpoint_lists_aliases_with_display_metadata() {
     ids.dedup();
     assert_eq!(ids.len(), count_before, "duplicate ids in /v1/models data");
 }
+
+#[tokio::test]
+async fn test_models_endpoint_credits_alias_target_provider_for_shadowed_ids() {
+    if skip_if_localhost_bind_unavailable() {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    // Provider "mock" lists bare model "test-model", but the alias of the same
+    // id routes to provider "other": the listing must credit "other".
+    let config_json = json!({
+        "Providers": [
+            {
+                "name": "mock",
+                "api_base_url": mock_server.uri(),
+                "api_key": "test-key",
+                "models": ["test-model"]
+            },
+            {
+                "name": "other",
+                "api_base_url": mock_server.uri(),
+                "api_key": "test-key",
+                "models": ["other-model"]
+            }
+        ],
+        "Router": {
+            "default": "mock,test-model",
+            "modelAliases": {"test-model": "other,other-model"}
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&config_json).unwrap(),
+    )
+    .unwrap();
+
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    let data = response_json["data"].as_array().unwrap();
+    let entry_for = |id: &str| {
+        data.iter()
+            .find(|entry| entry["id"] == id)
+            .unwrap_or_else(|| panic!("expected model id {id} in data: {data:?}"))
+    };
+
+    // The alias-shaded bare id credits the alias target's provider.
+    assert_eq!(entry_for("test-model")["owned_by"], "other");
+    // Comma-qualified route ids never collide with alias keys.
+    assert_eq!(entry_for("mock,test-model")["owned_by"], "mock");
+    assert_eq!(entry_for("other,other-model")["owned_by"], "other");
+    assert_eq!(entry_for("other-model")["owned_by"], "other");
+}

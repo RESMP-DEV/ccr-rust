@@ -508,6 +508,24 @@ pub async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         })
         .collect();
 
+    // Alias ownership keyed by alias id: when an alias shadows a bare provider
+    // model id, the listing must credit the provider the alias routes to, not
+    // whichever provider happens to list the colliding model.
+    let alias_owner: std::collections::BTreeMap<&str, &str> = state
+        .config
+        .router()
+        .model_aliases
+        .iter()
+        .map(|(alias, target)| {
+            let route = target.route();
+            let owner = route
+                .split_once(',')
+                .map(|(provider, _)| provider)
+                .unwrap_or(route);
+            (alias.as_str(), owner)
+        })
+        .collect();
+
     let push_entry = |data: &mut Vec<serde_json::Value>,
                       id: &str,
                       owned_by: &str,
@@ -536,25 +554,25 @@ pub async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
                 if !seen.insert(id.clone()) {
                     continue;
                 }
+                let owned_by = alias_owner
+                    .get(id.as_str())
+                    .copied()
+                    .unwrap_or(provider.name.as_str());
                 push_entry(
                     &mut data,
                     &id,
-                    &provider.name,
+                    owned_by,
                     alias_meta.get(id.as_str()).copied(),
                 );
             }
         }
     }
 
-    for (alias, target) in &state.config.router().model_aliases {
+    for alias in state.config.router().model_aliases.keys() {
         if !seen.insert(alias.clone()) {
             continue;
         }
-        let owned_by = target
-            .route()
-            .split_once(',')
-            .map(|(provider, _)| provider)
-            .unwrap_or_else(|| target.route());
+        let owned_by = alias_owner.get(alias.as_str()).copied().unwrap_or(alias);
         push_entry(
             &mut data,
             alias,
