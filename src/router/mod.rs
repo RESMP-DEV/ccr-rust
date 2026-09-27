@@ -43,6 +43,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use tracing::{error, info, warn};
 
+use crate::config::ModelAliasTarget;
 use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::{
     increment_active_requests, record_failure, record_pre_request_tokens,
@@ -152,7 +153,7 @@ pub async fn handle_messages(
             .router()
             .model_aliases
             .get(client_model.as_str())
-            .cloned()
+            .map(|target| target.route().to_string())
             .unwrap_or(client_model)
     };
     if !config.router().ignore_direct && requested_model.contains(',') {
@@ -474,9 +475,13 @@ pub async fn list_presets(State(state): State<AppState>) -> impl IntoResponse {
 
 /// List available models in OpenAI-compatible format.
 ///
-/// Includes both explicit route IDs (`provider,model`) and raw model IDs.
-/// This is required by Codex/OpenAI clients that call `GET /v1/models`
-/// before first request dispatch.
+/// Includes both explicit route IDs (`provider,model`) and raw model IDs,
+/// plus every `Router.modelAliases` key so gateway clients (e.g. Claude
+/// Code's model discovery, which keeps only ids matching `/claude|anthropic/i`)
+/// can see and select aliased routes. Alias entries carry the alias's
+/// `display_name`/`description` metadata when configured. This is required by
+/// Codex/OpenAI clients that call `GET /v1/models` before first request
+/// dispatch.
 pub async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -486,6 +491,62 @@ pub async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
     let mut seen = BTreeSet::new();
     let mut data = Vec::new();
 
+    // Alias metadata keyed by alias id; also enriches provider entries whose
+    // id collides with an alias.
+    let alias_meta: std::collections::BTreeMap<&str, (&Option<String>, &Option<String>)> = state
+        .config
+        .router()
+        .model_aliases
+        .iter()
+        .filter_map(|(alias, target)| match target {
+            ModelAliasTarget::Detailed {
+                display_name,
+                description,
+                ..
+            } => Some((alias.as_str(), (display_name, description))),
+            ModelAliasTarget::Route(_) => None,
+        })
+        .collect();
+
+    // Alias ownership keyed by alias id: when an alias shadows a bare provider
+    // model id, the listing must credit the provider the alias routes to, not
+    // whichever provider happens to list the colliding model.
+    let alias_owner: std::collections::BTreeMap<&str, &str> = state
+        .config
+        .router()
+        .model_aliases
+        .iter()
+        .map(|(alias, target)| {
+            let route = target.route();
+            let owner = route
+                .split_once(',')
+                .map(|(provider, _)| provider)
+                .unwrap_or(route);
+            (alias.as_str(), owner)
+        })
+        .collect();
+
+    let push_entry = |data: &mut Vec<serde_json::Value>,
+                      id: &str,
+                      owned_by: &str,
+                      meta: Option<(&Option<String>, &Option<String>)>| {
+        let mut entry = serde_json::json!({
+            "id": id,
+            "object": "model",
+            "created": created,
+            "owned_by": owned_by,
+        });
+        if let Some((display_name, description)) = meta {
+            if let Some(name) = display_name {
+                entry["display_name"] = serde_json::json!(name);
+            }
+            if let Some(text) = description {
+                entry["description"] = serde_json::json!(text);
+            }
+        }
+        data.push(entry);
+    };
+
     for provider in state.config.providers() {
         for model in &provider.models {
             let ids = [format!("{},{}", provider.name, model), model.to_string()];
@@ -493,14 +554,31 @@ pub async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
                 if !seen.insert(id.clone()) {
                     continue;
                 }
-                data.push(serde_json::json!({
-                    "id": id,
-                    "object": "model",
-                    "created": created,
-                    "owned_by": provider.name,
-                }));
+                let owned_by = alias_owner
+                    .get(id.as_str())
+                    .copied()
+                    .unwrap_or(provider.name.as_str());
+                push_entry(
+                    &mut data,
+                    &id,
+                    owned_by,
+                    alias_meta.get(id.as_str()).copied(),
+                );
             }
         }
+    }
+
+    for alias in state.config.router().model_aliases.keys() {
+        if !seen.insert(alias.clone()) {
+            continue;
+        }
+        let owned_by = alias_owner.get(alias.as_str()).copied().unwrap_or(alias);
+        push_entry(
+            &mut data,
+            alias,
+            owned_by,
+            alias_meta.get(alias.as_str()).copied(),
+        );
     }
 
     Json(serde_json::json!({
@@ -1174,53 +1252,55 @@ mod image_transport_tests {
 
     #[test]
     fn responses_image_requests_deliver_anthropic_image_blocks() {
+        let responses_body = serde_json::json!({
+            "model": "glm-5.3",
+            "stream": false,
+            "input": [
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "what is in this image?"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+                ]}
+            ]
+        });
 
-    let responses_body = serde_json::json!({
-        "model": "glm-5.3",
-        "stream": false,
-        "input": [
-            {"type": "message", "role": "user", "content": [
-                {"type": "input_text", "text": "what is in this image?"},
-                {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
-            ]}
-        ]
-    });
+        // Full /v1/responses pipeline: Responses -> chat -> frontend -> anthropic.
+        let chat = responses_request_to_openai_chat_request(&responses_body)
+            .expect("responses conversion");
+        let internal = CodexFrontend::new()
+            .parse_request(chat)
+            .expect("frontend parse");
+        let anthropic = internal_request_to_anthropic_request(internal);
+        let content = &anthropic.messages[0].content;
+        let blocks = content.as_array().expect("array content");
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(
+            blocks[1]["type"], "image",
+            "first-turn image must be Anthropic-shaped, got: {content}"
+        );
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "AAAA");
 
-    // Full /v1/responses pipeline: Responses -> chat -> frontend -> anthropic.
-    let chat =
-        responses_request_to_openai_chat_request(&responses_body).expect("responses conversion");
-    let internal = CodexFrontend::new().parse_request(chat).expect("frontend parse");
-    let anthropic = internal_request_to_anthropic_request(internal);
-    let content = &anthropic.messages[0].content;
-    let blocks = content.as_array().expect("array content");
-    assert_eq!(blocks[0]["type"], "text");
-    assert_eq!(
-        blocks[1]["type"], "image",
-        "first-turn image must be Anthropic-shaped, got: {content}"
-    );
-    assert_eq!(blocks[1]["source"]["type"], "base64");
-    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
-    assert_eq!(blocks[1]["source"]["data"], "AAAA");
-
-    // Tool-loop normalization round-trip (the needs_normalization path).
-    let roundtrip_openai =
-        translate_request_anthropic_to_openai(&anthropic, "glm-5.3");
-    let roundtrip_value = serde_json::to_value(&roundtrip_openai).unwrap();
-    let transformed = OpenAiToAnthropicTransformer
-        .transform_request(roundtrip_value)
-        .expect("transform");
-    let message = &transformed["messages"][0];
-    let roundtrip_blocks = message["content"].as_array().expect("round-trip array content");
-    let image_blocks: Vec<_> = roundtrip_blocks
-        .iter()
-        .filter(|b| b["type"] == "image")
-        .collect();
-    assert_eq!(
-        image_blocks.len(),
-        1,
-        "image must survive the tool round-trip, got: {message}"
-    );
-    assert_eq!(image_blocks[0]["source"]["media_type"], "image/png");
-    assert_eq!(image_blocks[0]["source"]["data"], "AAAA");
-}
+        // Tool-loop normalization round-trip (the needs_normalization path).
+        let roundtrip_openai = translate_request_anthropic_to_openai(&anthropic, "glm-5.3");
+        let roundtrip_value = serde_json::to_value(&roundtrip_openai).unwrap();
+        let transformed = OpenAiToAnthropicTransformer
+            .transform_request(roundtrip_value)
+            .expect("transform");
+        let message = &transformed["messages"][0];
+        let roundtrip_blocks = message["content"]
+            .as_array()
+            .expect("round-trip array content");
+        let image_blocks: Vec<_> = roundtrip_blocks
+            .iter()
+            .filter(|b| b["type"] == "image")
+            .collect();
+        assert_eq!(
+            image_blocks.len(),
+            1,
+            "image must survive the tool round-trip, got: {message}"
+        );
+        assert_eq!(image_blocks[0]["source"]["media_type"], "image/png");
+        assert_eq!(image_blocks[0]["source"]["data"], "AAAA");
+    }
 }

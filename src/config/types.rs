@@ -524,6 +524,31 @@ impl Default for PersistenceConfig {
     }
 }
 
+/// Target for a bare-model alias: an explicit `provider,model` route with
+/// optional client-facing metadata that `/v1/models` surfaces alongside the
+/// alias id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ModelAliasTarget {
+    Route(String),
+    Detailed {
+        route: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+}
+
+impl ModelAliasTarget {
+    pub fn route(&self) -> &str {
+        match self {
+            Self::Route(route) => route,
+            Self::Detailed { route, .. } => route,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub default: String,
@@ -535,10 +560,12 @@ pub struct RouterConfig {
     pub think: Option<String>,
 
     /// Exact bare-model aliases for requests that do not use provider,model syntax.
-    /// Values must explicitly name a configured provider and model.
+    /// Values name a configured provider and model, either as a bare
+    /// `"provider,model"` string or as an object with `route` plus optional
+    /// `display_name`/`description` metadata for `/v1/models`.
     #[serde(default)]
     #[serde(rename = "modelAliases")]
-    pub model_aliases: HashMap<String, String>,
+    pub model_aliases: HashMap<String, ModelAliasTarget>,
 
     /// Force all requests to use non-streaming mode.
     /// Useful for agent workloads where SSE frame limits cause parsing errors.

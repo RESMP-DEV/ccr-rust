@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added client-facing metadata to `Router.modelAliases` and `GET /v1/models`.
+  Alias values now accept an object form (`route` plus optional `display_name`
+  and `description`) alongside the existing bare `"provider,model"` string,
+  and `/v1/models` lists every alias key with that metadata so gateway model
+  discovery (Claude Code keeps only ids matching `claude`/`anthropic`) can
+  present truthful, selectable model entries instead of silently finding zero
+  usable models. Alias ids colliding with listed provider model ids enrich
+  the existing entry rather than duplicating it; routing behavior and the
+  Codex `models` field are unchanged.
 - Fixed non-streaming Anthropic Messages responses, including responses
   translated from OpenAI upstreams, being labeled `application/octet-stream`,
   which native Anthropic SDKs reject. Serialization errors retain the router

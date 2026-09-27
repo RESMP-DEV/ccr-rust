@@ -318,9 +318,131 @@ fn model_aliases_default_to_empty_and_parse_exact_entries() {
         serde_json::from_value(json!({"default": "zai,glm-5.3"})).unwrap();
     assert!(without_aliases.model_aliases.is_empty());
     assert_eq!(
-        config.router.model_aliases.get("gpt-6-astra").unwrap(),
+        config
+            .router
+            .model_aliases
+            .get("gpt-6-astra")
+            .unwrap()
+            .route(),
         "azure,gpt-6-astra"
     );
+}
+
+#[test]
+fn model_alias_detailed_form_parses_route_and_metadata() {
+    let json = json!({
+        "Providers": [{
+            "name": "azure",
+            "api_base_url": "http://127.0.0.1:1234/v1",
+            "api_key": "test-key",
+            "models": ["gpt-6-astra"]
+        }],
+        "Router": {
+            "default": "azure,gpt-6-astra",
+            "modelAliases": {
+                "gpt-6-astra": "azure,gpt-6-astra",
+                "claude-gpt-6-astra": {
+                    "route": "azure,gpt-6-astra",
+                    "display_name": "GPT-6 Astra (Azure via CCR)",
+                    "description": "Azure Responses route surfaced to gateway model discovery"
+                }
+            }
+        }
+    });
+
+    let config: ccr_rust::config::ConfigFile = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        config.router.model_aliases.get("gpt-6-astra").unwrap(),
+        &ccr_rust::config::ModelAliasTarget::Route("azure,gpt-6-astra".to_string())
+    );
+    let detailed = config
+        .router
+        .model_aliases
+        .get("claude-gpt-6-astra")
+        .unwrap();
+    assert_eq!(detailed.route(), "azure,gpt-6-astra");
+    match detailed {
+        ccr_rust::config::ModelAliasTarget::Detailed {
+            route,
+            display_name,
+            description,
+        } => {
+            assert_eq!(route, "azure,gpt-6-astra");
+            assert_eq!(display_name.as_deref(), Some("GPT-6 Astra (Azure via CCR)"));
+            assert_eq!(
+                description.as_deref(),
+                Some("Azure Responses route surfaced to gateway model discovery")
+            );
+        }
+        other => panic!("expected detailed alias target, got {other:?}"),
+    }
+}
+
+#[test]
+fn model_alias_detailed_form_validates_route_and_metadata() {
+    let invalid_metadatas = [
+        Some(" "),        // whitespace only
+        Some(" padded "), // surrounding whitespace
+        Some(""),         // blank
+    ];
+    let invalid_routes = ["azure", "unknown,gpt-6-astra"];
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.json");
+
+    for display_name in invalid_metadatas {
+        let config_json = json!({
+            "Providers": [{
+                "name": "azure",
+                "api_base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "test-key",
+                "models": ["gpt-6-astra"]
+            }],
+            "Router": {
+                "default": "azure,gpt-6-astra",
+                "modelAliases": {
+                    "claude-gpt-6-astra": {
+                        "route": "azure,gpt-6-astra",
+                        "display_name": display_name
+                    }
+                }
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&config_json).unwrap()).unwrap();
+        let error = ccr_rust::config::Config::from_file(path.to_str().unwrap())
+            .expect_err("detailed alias with invalid display_name should be rejected");
+        assert!(
+            error.to_string().contains("display_name"),
+            "unexpected error for {display_name:?}: {error:#}"
+        );
+    }
+
+    for route in invalid_routes {
+        let config_json = json!({
+            "Providers": [{
+                "name": "azure",
+                "api_base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "test-key",
+                "models": ["gpt-6-astra"]
+            }],
+            "Router": {
+                "default": "azure,gpt-6-astra",
+                "modelAliases": {
+                    "claude-gpt-6-astra": {
+                        "route": route,
+                        "display_name": "GPT-6 Astra"
+                    }
+                }
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&config_json).unwrap()).unwrap();
+        let error = ccr_rust::config::Config::from_file(path.to_str().unwrap())
+            .expect_err("detailed alias with unconfigured route should be rejected");
+        assert!(
+            error.to_string().contains("Router.modelAliases"),
+            "unexpected error for route {route:?}: {error:#}"
+        );
+    }
 }
 
 #[test]
