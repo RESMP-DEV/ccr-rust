@@ -47,8 +47,7 @@ use crate::config::ModelAliasTarget;
 use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::{
     increment_active_requests, record_failure, record_pre_request_tokens,
-    record_rate_limit_backoff, record_rate_limit_hit, record_request_duration_with_frontend,
-    record_request_with_frontend, sync_ewma_gauge,
+    record_request_duration_with_frontend, record_request_with_frontend, sync_ewma_gauge,
 };
 use crate::routing::AttemptTimer;
 
@@ -242,7 +241,9 @@ pub async fn handle_messages(
             .unwrap_or(true);
         if state
             .ratelimit_tracker
-            .should_skip_tier(tier_name, honor_remaining)
+            // Keyed by the full `provider,model` route so backoff incurred by
+            // one model never skips a sibling model on the same provider.
+            .should_skip_tier(tier.as_str(), honor_remaining)
         {
             saw_rate_limit = true;
             last_rate_limited_tier = Some(tier_name.clone());
@@ -359,8 +360,9 @@ pub async fn handle_messages(
                     return response;
                 }
                 Err(TryRequestError::RateLimited(retry_after)) => {
-                    // Note: With 429 pass-through in dispatch, this arm fires
-                    // only for edge cases where dispatch still returns RateLimited.
+                    // Dispatch records the 429 (tracker, hit and backoff
+                    // metrics) before returning this error; only the EWMA
+                    // bookkeeping and tier transition happen here.
                     timer.finish_failure();
                     #[cfg(feature = "gp")]
                     if let (Some(gp_router), Some(plan)) =
@@ -383,10 +385,28 @@ pub async fn handle_messages(
                         retry_after
                     );
                     record_failure(tier_name, "rate_limited");
-                    record_rate_limit_hit(tier_name);
-                    state.ratelimit_tracker.record_429(tier_name, retry_after);
-                    record_rate_limit_backoff(tier_name);
                     // Skip remaining retries for this tier - move to next
+                    break;
+                }
+                Err(TryRequestError::Rejected(code, e)) => {
+                    timer.finish_failure();
+                    #[cfg(feature = "gp")]
+                    if let (Some(gp_router), Some(plan)) =
+                        (state.gp_router.as_ref(), gp_plan.as_ref())
+                    {
+                        gp_router.record_attempt(plan, tier, attempt, None, config);
+                    }
+                    saw_non_rate_limit_failure = true;
+                    sync_ewma_gauge(&state.ewma_tracker);
+                    warn!("Failed {} attempt {}: {}", tier_name, attempt + 1, e);
+                    record_failure(tier_name, "provider_rejected");
+                    info!(
+                        tier = tier_name,
+                        code, "deterministic upstream rejection; not retrying this tier"
+                    );
+                    // Retrying cannot change a 401/402/403/404 outcome, and
+                    // the retry load can trip provider-wide rate limits that
+                    // block sibling models. Fail this tier immediately.
                     break;
                 }
                 Err(TryRequestError::Other(e)) => {

@@ -385,6 +385,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     transformed_request,
                     model_name,
                     tier_name,
+                    ratelimit_key: tier,
                     local_estimate,
                     stream_first_event_timeout,
                     stream_idle_timeout,
@@ -405,6 +406,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     transformed_request,
                     model_name,
                     tier_name,
+                    ratelimit_key: tier,
                     local_estimate,
                     stream_first_event_timeout,
                     stream_idle_timeout,
@@ -424,6 +426,11 @@ pub(super) struct TryRequestProtocolArgs<'a> {
     pub(super) transformed_request: serde_json::Value,
     pub(super) model_name: &'a str,
     pub(super) tier_name: &'a str,
+    /// Rate-limit state key for this attempt. This is the full
+    /// `provider,model` route rather than the provider name, so backoff
+    /// incurred by one model never blocks a sibling model on the same
+    /// provider account.
+    pub(super) ratelimit_key: &'a str,
     pub(super) local_estimate: u64,
     pub(super) stream_first_event_timeout: Duration,
     pub(super) stream_idle_timeout: Duration,
@@ -658,13 +665,19 @@ fn provider_upstream_error(
     } else {
         ""
     };
-    TryRequestError::Other(anyhow::anyhow!(
+    let error = anyhow::anyhow!(
         "Provider returned {} from {}: {}{}",
         status,
         url,
         body,
         credential_hint
-    ))
+    );
+    // Auth, billing, permission, and unknown-model failures are properties of
+    // the request itself; retrying them cannot change the outcome.
+    match status.as_u16() {
+        401..=404 => TryRequestError::Rejected(status.as_u16(), error),
+        _ => TryRequestError::Other(error),
+    }
 }
 
 /// A 401 from a provider whose configured credentials still contain an
@@ -691,6 +704,7 @@ pub(super) async fn try_request_via_openai_protocol(
         transformed_request,
         model_name,
         tier_name,
+        ratelimit_key,
         local_estimate,
         stream_first_event_timeout,
         stream_idle_timeout,
@@ -842,7 +856,7 @@ pub(super) async fn try_request_via_openai_protocol(
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             record_rate_limit_hit(tier_name);
-            ratelimit_tracker.record_429(tier_name, retry_after);
+            ratelimit_tracker.record_429(ratelimit_key, retry_after);
             record_rate_limit_backoff(tier_name);
 
             return Err(TryRequestError::RateLimited(retry_after));
@@ -886,6 +900,7 @@ pub(super) async fn try_request_via_openai_protocol(
 
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
+            ratelimit_key: ratelimit_key.to_string(),
             local_estimate,
             ratelimit_tracker: Some(ratelimit_tracker.clone()),
             rate_limit_info: Some(rate_limit_info),
@@ -986,7 +1001,7 @@ pub(super) async fn try_request_via_openai_protocol(
             }
         }
 
-        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+        ratelimit_tracker.record_success(ratelimit_key, rate_limit_info.0, rate_limit_info.1);
 
         // Try to parse as OpenAI response and translate.
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
@@ -1081,6 +1096,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
         transformed_request,
         model_name,
         tier_name,
+        ratelimit_key,
         local_estimate,
         stream_first_event_timeout,
         stream_idle_timeout,
@@ -1225,7 +1241,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
         // For 429 rate limit, pass through to let coordinator/client handle routing
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             record_rate_limit_hit(tier_name);
-            ratelimit_tracker.record_429(tier_name, retry_after);
+            ratelimit_tracker.record_429(ratelimit_key, retry_after);
             record_rate_limit_backoff(tier_name);
 
             return Err(TryRequestError::RateLimited(retry_after));
@@ -1268,6 +1284,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
 
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
+            ratelimit_key: ratelimit_key.to_string(),
             local_estimate,
             ratelimit_tracker: Some(ratelimit_tracker.clone()),
             rate_limit_info: Some(rate_limit_info),
@@ -1314,7 +1331,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
             return Err(error);
         }
 
-        ratelimit_tracker.record_success(tier_name, rate_limit_info.0, rate_limit_info.1);
+        ratelimit_tracker.record_success(ratelimit_key, rate_limit_info.0, rate_limit_info.1);
 
         let body_str = String::from_utf8_lossy(&body);
 

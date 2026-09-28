@@ -20,6 +20,10 @@ use crate::transformer::TransformerRegistry;
 pub enum TryRequestError {
     /// 429 Too Many Requests - includes optional Retry-After header value
     RateLimited(Option<std::time::Duration>),
+    /// Deterministic upstream rejection (401/402/403/404). Retrying the same
+    /// request cannot succeed, and the retry load can trip rate limits that
+    /// providers enforce across every model on the same account.
+    Rejected(u16, anyhow::Error),
     /// Other errors
     Other(anyhow::Error),
 }
@@ -34,6 +38,7 @@ impl std::fmt::Display for TryRequestError {
                 }
                 Ok(())
             }
+            TryRequestError::Rejected(_, e) => write!(f, "{}", e),
             TryRequestError::Other(e) => write!(f, "{}", e),
         }
     }

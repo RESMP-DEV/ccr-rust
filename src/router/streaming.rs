@@ -352,9 +352,9 @@ pub async fn stream_response_translated(
             // Clear rate limit backoff and update rate limit state on successful stream completion
             if let Some(ref tracker) = ctx.ratelimit_tracker {
                 if let Some((remaining, reset_at)) = &ctx.rate_limit_info {
-                    tracker.record_success(&ctx.tier_name, *remaining, *reset_at);
+                    tracker.record_success(&ctx.ratelimit_key, *remaining, *reset_at);
                 } else {
-                    tracker.record_success(&ctx.tier_name, None, None);
+                    tracker.record_success(&ctx.ratelimit_key, None, None);
                 }
             }
         }
@@ -619,9 +619,9 @@ pub async fn stream_anthropic_response_with_tracking(
         // Update rate limit state
         if let Some(ref tracker) = verify_ctx.ratelimit_tracker {
             if let Some((remaining, reset_at)) = &verify_ctx.rate_limit_info {
-                tracker.record_success(&tier_name, *remaining, *reset_at);
+                tracker.record_success(&verify_ctx.ratelimit_key, *remaining, *reset_at);
             } else {
-                tracker.record_success(&tier_name, None, None);
+                tracker.record_success(&verify_ctx.ratelimit_key, None, None);
             }
         }
 

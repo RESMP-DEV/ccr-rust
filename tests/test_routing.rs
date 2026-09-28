@@ -1547,3 +1547,124 @@ async fn adaptive_backoff_fallback_to_default_when_unconfigured() {
         elapsed,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-model isolation and deterministic-rejection fail-fast
+// ---------------------------------------------------------------------------
+
+fn two_model_provider_config(mock_url: &str) -> serde_json::Value {
+    json!({
+        "Providers": [
+            {
+                "name": "mock",
+                "api_base_url": mock_url,
+                "api_key": "test-key",
+                "models": ["model-a", "model-b"]
+            }
+        ],
+        "Router": {
+            "default": "mock,model-a"
+        },
+        "API_TIMEOUT_MS": 5000
+    })
+}
+
+async fn post_messages(app: &Router, model: &str) -> StatusCode {
+    let body = json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 100
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    resp.status()
+}
+
+fn app_from_config_value(config: serde_json::Value) -> Router {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    build_app(config)
+}
+
+/// A 403 from one model must consume exactly one upstream attempt (no
+/// sleep-retry loop) and must not be retried, because the outcome cannot
+/// change and the retry load can trip provider-wide rate limits.
+#[tokio::test]
+async fn deterministic_403_fails_fast_without_retries() {
+    use wiremock::matchers::body_partial_json;
+    if skip_if_localhost_bind_unavailable("deterministic_403_fails_fast_without_retries") {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({"model": "model-a"})))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error": {"message": "model-a is gated", "code": 403}
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let app = app_from_config_value(two_model_provider_config(&mock_server.uri()));
+
+    let status = post_messages(&app, "mock,model-a").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    mock_server.verify().await;
+}
+
+/// A 429 answered to one model must not skip a sibling model on the same
+/// provider: rate-limit backoff is keyed per `provider,model` route.
+#[tokio::test]
+async fn model_a_429_does_not_block_model_b_same_provider() {
+    use wiremock::matchers::body_partial_json;
+    if skip_if_localhost_bind_unavailable("model_a_429_does_not_block_model_b_same_provider") {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({"model": "model-a"})))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": {"message": "rate limited", "code": 429}
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({"model": "model-b"})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"choices": [{"message": {"content": "ok"}}]})),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let app = app_from_config_value(two_model_provider_config(&mock_server.uri()));
+
+    let status_a = post_messages(&app, "mock,model-a").await;
+    assert_eq!(status_a, StatusCode::TOO_MANY_REQUESTS);
+
+    // Sibling request issued immediately: must reach the upstream rather than
+    // being skipped by backoff recorded under model-a's route key.
+    let status_b = post_messages(&app, "mock,model-b").await;
+    assert_eq!(status_b, StatusCode::OK);
+    mock_server.verify().await;
+}

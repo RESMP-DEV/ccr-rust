@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 /// Context for token verification on streaming responses.
 pub struct StreamVerifyCtx {
     pub tier_name: String,
+    /// Rate-limit state key (`provider,model` route). Successes must reset
+    /// the exact key that 429s dirty, which is per model, not per provider.
+    pub ratelimit_key: String,
     pub local_estimate: u64,
     pub ratelimit_tracker: Option<Arc<RateLimitTracker>>,
     pub rate_limit_info: Option<(Option<u32>, Option<Instant>)>,
