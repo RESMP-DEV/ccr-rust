@@ -211,8 +211,8 @@ mod tests {
     #[test]
     fn zstd_request_decompression_is_bounded() {
         let limit = 4096_usize;
-        let encoded = zstd::stream::encode_all(std::io::Cursor::new(vec![0_u8; limit + 1]), 1)
-            .unwrap();
+        let encoded =
+            zstd::stream::encode_all(std::io::Cursor::new(vec![0_u8; limit + 1]), 1).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::CONTENT_ENCODING,
