@@ -855,9 +855,9 @@ pub(super) async fn try_request_via_openai_protocol(
         .await;
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            record_rate_limit_hit(tier_name);
+            record_rate_limit_hit(ratelimit_key);
             ratelimit_tracker.record_429(ratelimit_key, retry_after);
-            record_rate_limit_backoff(tier_name);
+            record_rate_limit_backoff(ratelimit_key);
 
             return Err(TryRequestError::RateLimited(retry_after));
         }
@@ -1240,9 +1240,9 @@ pub(super) async fn try_request_via_anthropic_protocol(
 
         // For 429 rate limit, pass through to let coordinator/client handle routing
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            record_rate_limit_hit(tier_name);
+            record_rate_limit_hit(ratelimit_key);
             ratelimit_tracker.record_429(ratelimit_key, retry_after);
-            record_rate_limit_backoff(tier_name);
+            record_rate_limit_backoff(ratelimit_key);
 
             return Err(TryRequestError::RateLimited(retry_after));
         }

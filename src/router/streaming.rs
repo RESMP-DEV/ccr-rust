@@ -87,6 +87,7 @@ pub async fn stream_response_translated(
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_token_time: Option<std::time::Instant> = None;
         let mut ended_with_timeout = false;
+        let mut upstream_completed_cleanly = true;
 
         loop {
             tokio::select! {
@@ -211,12 +212,14 @@ pub async fn stream_response_translated(
                             let _ = tx
                                 .send(Err(std::io::Error::other(e.to_string())))
                                 .await;
+                            upstream_completed_cleanly = false;
                             break;
                         }
                     }
                 }
                 _ = tx.closed() => {
                     tracing::debug!("Client disconnected, aborting upstream");
+                    upstream_completed_cleanly = false;
                     break;
                 }
             }
@@ -349,12 +352,15 @@ pub async fn stream_response_translated(
                 }
             }
 
-            // Clear rate limit backoff and update rate limit state on successful stream completion
-            if let Some(ref tracker) = ctx.ratelimit_tracker {
-                if let Some((remaining, reset_at)) = &ctx.rate_limit_info {
-                    tracker.record_success(&ctx.ratelimit_key, *remaining, *reset_at);
-                } else {
-                    tracker.record_success(&ctx.ratelimit_key, None, None);
+            // Clear rate limit backoff and update rate limit state on successful stream completion.
+            // A mid-stream upstream error or client disconnect is not a success signal for the route.
+            if upstream_completed_cleanly {
+                if let Some(ref tracker) = ctx.ratelimit_tracker {
+                    if let Some((remaining, reset_at)) = &ctx.rate_limit_info {
+                        tracker.record_success(&ctx.ratelimit_key, *remaining, *reset_at);
+                    } else {
+                        tracker.record_success(&ctx.ratelimit_key, None, None);
+                    }
                 }
             }
         }
@@ -405,6 +411,7 @@ pub async fn stream_anthropic_response_with_tracking(
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_token_time: Option<std::time::Instant> = None;
         let mut ended_with_timeout = false;
+        let mut upstream_completed_cleanly = true;
 
         loop {
             tokio::select! {
@@ -528,12 +535,14 @@ pub async fn stream_anthropic_response_with_tracking(
                         }
                         Err(e) => {
                             let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                            upstream_completed_cleanly = false;
                             break;
                         }
                     }
                 }
                 _ = tx.closed() => {
                     tracing::debug!("Client disconnected, aborting Anthropic upstream");
+                    upstream_completed_cleanly = false;
                     break;
                 }
             }
@@ -616,12 +625,15 @@ pub async fn stream_anthropic_response_with_tracking(
             }
         }
 
-        // Update rate limit state
-        if let Some(ref tracker) = verify_ctx.ratelimit_tracker {
-            if let Some((remaining, reset_at)) = &verify_ctx.rate_limit_info {
-                tracker.record_success(&verify_ctx.ratelimit_key, *remaining, *reset_at);
-            } else {
-                tracker.record_success(&verify_ctx.ratelimit_key, None, None);
+        // Update rate limit state; a mid-stream upstream error or client
+        // disconnect is not a success signal for the route.
+        if upstream_completed_cleanly {
+            if let Some(ref tracker) = verify_ctx.ratelimit_tracker {
+                if let Some((remaining, reset_at)) = &verify_ctx.rate_limit_info {
+                    tracker.record_success(&verify_ctx.ratelimit_key, *remaining, *reset_at);
+                } else {
+                    tracker.record_success(&verify_ctx.ratelimit_key, None, None);
+                }
             }
         }
 
