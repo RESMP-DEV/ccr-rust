@@ -157,6 +157,7 @@ pub async fn stream_response_translated(
                                             record_stream_backpressure();
                                         }
                                         if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                            upstream_completed_cleanly = false;
                                             break;
                                         }
                                         forwarded = true;
@@ -199,6 +200,7 @@ pub async fn stream_response_translated(
                                     // Pass through frames that don't parse as OpenAI chunks.
                                     let sse_data = frame.to_sse_string();
                                     if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                        upstream_completed_cleanly = false;
                                         break;
                                     }
                                     forwarded = true;
@@ -525,6 +527,7 @@ pub async fn stream_anthropic_response_with_tracking(
                                     record_stream_backpressure();
                                 }
                                 if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                    upstream_completed_cleanly = false;
                                     break;
                                 }
                                 forwarded = true;
