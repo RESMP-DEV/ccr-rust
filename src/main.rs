@@ -523,13 +523,8 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
         println!("  - {}", tier);
     }
 
-    let sweeps = config.router().retry_sweeps;
-    if sweeps.enabled && sweeps.sweep_cooldown_ms == 0 {
-        anyhow::bail!(
-            "Router.retrySweeps.sweepCooldownMs must be > 0 when retrySweeps is enabled \
-             (zero would re-cascade the tier list back-to-back in an unbounded hot loop)"
-        );
-    }
+    // retrySweeps invariants (sweepCooldownMs > 0 when enabled) are enforced
+    // in Config::from_file, shared by every entry point.
 
     println!("\n✓ Configuration valid");
     Ok(())

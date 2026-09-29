@@ -429,7 +429,7 @@ right trade for long-lived agent sessions.
 |-------|------|---------|-------------|
 | `enabled` | bool | false | Enable held-request re-cascading. |
 | `maxSweeps` | number | 0 | Additional full-cascade sweeps after the first before giving up. 0 = unlimited. |
-| `sweepCooldownMs` | number | 2000 | Minimum cooldown between sweeps; stretched to the strongest Retry-After hint, capped at 60s. |
+| `sweepCooldownMs` | number | 2000 | Minimum cooldown between sweeps; must be > 0 when enabled (rejected at config load). Stretched to the strongest of: the sweep's Retry-After hints, or the rate-limit tracker's live backoff window for tiers skipped while still cooling down from a 429 (both capped at 60s, the backoff ceiling). The same value becomes the `Retry-After` header on the synthesized 429 when sweeps give up while tiers are still rate-limited. |
 | `maxHoldMs` | number | 0 | Wall-clock cap on holding one request open. 0 = unlimited. Enforced at sweep boundaries; the inter-sweep sleep is clamped to the remaining budget. A sweep already in flight when the deadline passes still completes. |
 
 ```json

@@ -408,10 +408,12 @@ async fn rate_limited_tier_holds_then_synthesizes_429() {
 
 /// maxHoldMs caps the wall-clock hold even with unlimited sweeps. The cap
 /// is enforced at sweep boundaries and the inter-sweep sleep is clamped to
-/// the remaining budget, so a 300ms budget with a 30s cooldown must surface
-/// the failure after ~300ms, not after the full 30s cooldown plus another
+/// the remaining budget, so a 1s budget with a 30s cooldown must surface
+/// the failure after ~1s, not after the full 30s cooldown plus another
 /// sweep: without the clamp the sleep itself would overshoot the deadline
-/// by minutes.
+/// by minutes. Exactly one hit pins the no-second-sweep invariant: the
+/// loop-top check is gated on sweep > 0, so the first cascade always
+/// dispatches regardless of pre-loop latency.
 #[tokio::test]
 async fn max_hold_deadline_surfaces_failure() {
     if skip_if_localhost_bind_unavailable("max_hold_deadline_surfaces_failure") {
@@ -436,5 +438,39 @@ async fn max_hold_deadline_surfaces_failure() {
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "cooldown must clamp to the remaining hold budget; surfaced after {elapsed:?} with a 1s budget"
+    );
+}
+
+/// The sweepCooldownMs > 0 invariant is enforced at config load, so every
+/// entry point (start, validate, dashboard) rejects a config that would
+/// re-cascade back-to-back in an unbounded hot loop, not just the validate
+/// subcommand.
+#[test]
+fn zero_sweep_cooldown_rejected_at_config_load() {
+    let config = make_test_config(
+        "http://127.0.0.1:1",
+        json!({"enabled": true, "sweepCooldownMs": 0}),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, config).unwrap();
+
+    let err = ccr_rust::config::Config::from_file(config_path.to_str().unwrap())
+        .expect_err("enabled retrySweeps with sweepCooldownMs 0 must be rejected at load");
+    assert!(
+        err.to_string().contains("sweepCooldownMs"),
+        "error should name the offending field: {err}"
+    );
+
+    // Disabled sweeps tolerate a zero cooldown: the value is inert.
+    let config = make_test_config(
+        "http://127.0.0.1:1",
+        json!({"enabled": false, "sweepCooldownMs": 0}),
+    );
+    let config_path = dir.path().join("config-disabled.json");
+    std::fs::write(&config_path, config).unwrap();
+    assert!(
+        ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).is_ok(),
+        "disabled retrySweeps must not be rejected for a zero sweepCooldownMs"
     );
 }

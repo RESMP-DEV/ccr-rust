@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Hardened retry sweeps from review round 3: the inter-sweep cooldown is
+  floored at 1ms after clamping (defense in depth against a zero-cooldown
+  config re-cascading back-to-back), and `ccr_retry_sweeps_total` plus the
+  hold log now fire only after the cooldown completes with hold budget
+  remaining, so a sweep that would land on the maxHoldMs deadline is never
+  counted; `sweepCooldownMs: 0` with `retrySweeps.enabled` is now rejected
+  at config load in `Config::from_file`, so `start` and every other entry
+  point enforce it, not just the validate subcommand; the
+  `ccr_retry_sweeps_total` counter is persisted and restored like every
+  other counter.
 - Hardened retry sweeps from review round 2: deterministically rejected
   tiers (401/402/403/404) are now skipped in all later sweeps instead of
   being re-attempted once per sweep in mixed cascades; sweeps that consist
