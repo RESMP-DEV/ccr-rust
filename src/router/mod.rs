@@ -576,15 +576,16 @@ pub async fn handle_messages(
             }
             None => cooldown,
         };
-        if cooldown.is_zero() {
-            // The hold budget is already spent: the loop-top deadline check
-            // will surface the failure. Do not count or log a sweep that
-            // cannot run.
+        // Defense in depth: never re-cascade back-to-back, even for a config
+        // that slipped a zero sweepCooldownMs past load-time validation.
+        let cooldown = cooldown.max(std::time::Duration::from_millis(1));
+        tokio::time::sleep(cooldown).await;
+        if hold_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            // The clamped cooldown landed on the hold deadline: the loop-top
+            // check will surface the failure. Do not count or log a sweep
+            // that cannot run.
             continue;
         }
-        // Defense in depth against a zero cooldown reaching this point via
-        // configs that skipped validation: never re-cascade back-to-back.
-        let cooldown = cooldown.max(std::time::Duration::from_millis(1));
         record_retry_sweep();
         info!(
             sweep,
@@ -592,7 +593,6 @@ pub async fn handle_messages(
             held_secs = start.elapsed().as_secs(),
             "All tiers exhausted; holding request open and re-sweeping"
         );
-        tokio::time::sleep(cooldown).await;
     }
 
     if saw_rate_limit && !saw_non_rate_limit_failure {

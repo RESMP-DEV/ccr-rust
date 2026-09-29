@@ -222,6 +222,7 @@ const METRIC_PRE_REQUEST_TOKENS_TOTAL: &str = "ccr_pre_request_tokens_total";
 const METRIC_PRE_REQUEST_TOKENS: &str = "ccr_pre_request_tokens";
 const METRIC_RATE_LIMIT_HITS_TOTAL: &str = "ccr_rate_limit_hits_total";
 const METRIC_RATE_LIMIT_BACKOFFS_TOTAL: &str = "ccr_rate_limit_backoffs_total";
+const METRIC_RETRY_SWEEPS_TOTAL: &str = "ccr_retry_sweeps_total";
 const METRIC_TIER_EWMA_LATENCY_SECONDS: &str = "ccr_tier_ewma_latency_seconds";
 const METRIC_TOKEN_DRIFT_ABSOLUTE: &str = "ccr_token_drift_absolute";
 const METRIC_TOKEN_DRIFT_PCT: &str = "ccr_token_drift_pct";
@@ -383,6 +384,7 @@ pub fn record_failure(tier: &str, reason: &str) {
 /// request was held open under `retrySweeps` and is about to re-run.
 pub fn record_retry_sweep() {
     RETRY_SWEEPS_TOTAL.inc();
+    persist_counter_inc(METRIC_RETRY_SWEEPS_TOTAL, &[], 1.0);
 }
 
 pub fn increment_active_streams(delta: i64) {
