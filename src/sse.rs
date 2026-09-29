@@ -9,6 +9,10 @@ pub struct StreamVerifyCtx {
     /// Rate-limit state key (`provider,model` route). Successes must reset
     /// the exact key that 429s dirty, which is per model, not per provider.
     pub ratelimit_key: String,
+    /// 429 generation snapshotted when this stream's upstream request began.
+    /// A clean stream-end only clears route backoff when no newer 429 has
+    /// been recorded since (overlapping-request ordering).
+    pub ratelimit_generation: u64,
     pub local_estimate: u64,
     pub ratelimit_tracker: Option<Arc<RateLimitTracker>>,
     pub rate_limit_info: Option<(Option<u32>, Option<Instant>)>,

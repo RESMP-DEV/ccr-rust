@@ -233,7 +233,10 @@ pub async fn handle_messages(
         .collect();
     let tool_values: Option<Vec<serde_json::Value>> = request.tools.clone();
 
-    // Try each tier with retries
+    // Try each tier with retries. Count attempts actually dispatched so the
+    // terminal 503 reflects reality (a tier that fails fast on a deterministic
+    // rejection contributes one attempt, not max_retries + 1).
+    let mut dispatched_attempts: usize = 0;
     for (tier, tier_name) in ordered.iter() {
         let honor_remaining = config
             .resolve_provider(tier)
@@ -275,6 +278,7 @@ pub async fn handle_messages(
         let max_retries = retry_config.max_retries;
 
         for attempt in 0..=max_retries {
+            dispatched_attempts += 1;
             info!(
                 "Trying {} ({}), attempt {}/{}",
                 tier,
@@ -451,10 +455,7 @@ pub async fn handle_messages(
     }
 
     // All tiers exhausted due to non-rate-limit failures (5xx, timeouts, etc.).
-    let total_attempts: usize = ordered
-        .iter()
-        .map(|(_, tier_name)| config.get_tier_retry(tier_name).max_retries + 1)
-        .sum();
+    let total_attempts: usize = dispatched_attempts;
     error!("All tiers exhausted after {} tier(s)", ordered.len());
 
     let error_resp = serde_json::json!({

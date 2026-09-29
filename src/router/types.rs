@@ -38,7 +38,7 @@ impl std::fmt::Display for TryRequestError {
                 }
                 Ok(())
             }
-            TryRequestError::Rejected(_, e) => write!(f, "{}", e),
+            TryRequestError::Rejected(code, e) => write!(f, "HTTP {code}: {e}"),
             TryRequestError::Other(e) => write!(f, "{}", e),
         }
     }

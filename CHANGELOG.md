@@ -16,8 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed rate-limit backoff state to be keyed per `provider,model` route
   instead of per provider, so 429 backoff incurred by one model can no longer
   skip sibling models on the same provider account. Streaming successes reset
-  the same per-model key that 429s dirty. Prometheus hit/backoff metrics
-  remain provider-labeled.
+  the same per-model key that 429s dirty. Prometheus hit and backoff counters
+  record the same 429 events under the full `provider,model` route key (the
+  metric label is still named `tier`).
+- Successes no longer clear a route's rate-limit backoff when a newer 429 was
+  recorded after the successful request began: each attempt snapshots the
+  route's 429 generation, and only a success from the current generation
+  clears backoff. Overlapping requests can no longer erase each other's
+  backoff windows.
 - Added fail-fast handling for deterministic upstream rejections (401, 402,
   403, 404): the tier is failed after a single attempt instead of
   sleep-retrying, because the outcome cannot change and the retry load can
