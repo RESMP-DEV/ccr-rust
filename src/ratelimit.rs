@@ -112,7 +112,6 @@ impl RateLimitTracker {
             .map(|s| s.generation)
             .unwrap_or(0)
     }
-    }
 
     pub fn record_429(&self, tier: &str, retry_after: Option<Duration>) {
         let mut tiers = self.tiers.write();
