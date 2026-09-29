@@ -217,6 +217,85 @@ async fn sweeps_give_up_after_max_sweeps() {
     assert_eq!(hits.load(Ordering::SeqCst), 3);
 }
 
+/// A client that gives up and disconnects must not leave an immortal
+/// sweeping request behind: hyper/axum drops the handler future when the
+/// connection closes, which cancels the cooldown sleep and stops further
+/// upstream attempts. This pins that cancellation behavior — if a
+/// hyper/axum upgrade ever stops cancelling pending handlers, abandoned
+/// clients would become unbounded retry sources under unlimited sweeps.
+#[tokio::test]
+async fn client_disconnect_cancels_retry_sweeps() {
+    if skip_if_localhost_bind_unavailable("client_disconnect_cancels_retry_sweeps") {
+        return;
+    }
+    let (url, hits) = spawn_flaky_upstream(usize::MAX, 500).await;
+    let config = make_test_config(&url, json!({"enabled": true, "sweepCooldownMs": 100}));
+    let app = build_app(load_config(&config));
+
+    // Serve the app over a real socket so the client can actually drop the
+    // connection mid-hold (oneshot bypasses the transport entirely).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let body = serde_json::to_vec(&json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 32
+    }))
+    .unwrap();
+    use tokio::io::AsyncWriteExt;
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    stream.write_all(&body).await.unwrap();
+
+    // Wait for at least two sweeps to fire while connected (poll rather
+    // than sleep a fixed interval: under full-suite parallel load the first
+    // dispatch can start arbitrarily late).
+    let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while hits.load(Ordering::SeqCst) < 2 {
+        assert!(
+            std::time::Instant::now() < wait_deadline,
+            "upstream never received a sweep attempt while client was connected"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let hits_while_connected = hits.load(Ordering::SeqCst);
+    drop(stream);
+
+    // Wait until the hit count goes quiet (cancellation may take a moment
+    // under load), then confirm it never grows past the disconnect point.
+    let quiet_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let before = hits.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let after = hits.load(Ordering::SeqCst);
+        if before == after {
+            assert_eq!(
+                after, hits_while_connected,
+                "sweeps must stop after the client disconnects ({} hits before, {after} after)",
+                hits_while_connected
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < quiet_deadline,
+            "upstream hits kept growing after client disconnect: {hits_while_connected} -> {after}"
+        );
+    }
+}
+
 /// Deterministic rejections (401/402/403/404) must never be swept: no
 /// amount of retrying fixes a bad credential, so even unlimited sweeps
 /// surface the failure after a single cascade.
@@ -257,10 +336,12 @@ async fn rate_limited_tier_holds_then_synthesizes_429() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
-/// maxHoldMs caps the wall-clock hold even with unlimited sweeps. The
-/// first sweep takes at least one upstream round trip, so a 1ms budget is
-/// already expired by the first decision point; the tolerance below only
-/// allows for the (unlikely) sub-millisecond first sweep.
+/// maxHoldMs caps the wall-clock hold even with unlimited sweeps. The cap
+/// is enforced at sweep boundaries and the inter-sweep sleep is clamped to
+/// the remaining budget, so a 300ms budget with a 30s cooldown must surface
+/// the failure after ~300ms, not after the full 30s cooldown plus another
+/// sweep: without the clamp the sleep itself would overshoot the deadline
+/// by minutes.
 #[tokio::test]
 async fn max_hold_deadline_surfaces_failure() {
     if skip_if_localhost_bind_unavailable("max_hold_deadline_surfaces_failure") {
@@ -269,15 +350,21 @@ async fn max_hold_deadline_surfaces_failure() {
     let (url, hits) = spawn_flaky_upstream(usize::MAX, 500).await;
     let config = make_test_config(
         &url,
-        json!({"enabled": true, "maxHoldMs": 1, "sweepCooldownMs": 25}),
+        json!({"enabled": true, "maxHoldMs": 300, "sweepCooldownMs": 30000}),
     );
 
+    let started = std::time::Instant::now();
     let (status, _body) = send_message(build_app(load_config(&config))).await;
+    let elapsed = started.elapsed();
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    let hits = hits.load(Ordering::SeqCst);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "no second sweep may start once the hold budget is spent"
+    );
     assert!(
-        (1..=2).contains(&hits),
-        "expected at most 2 upstream hits under a 1ms hold budget, got {hits}"
+        elapsed < std::time::Duration::from_secs(5),
+        "cooldown must clamp to the remaining hold budget; surfaced after {elapsed:?}"
     );
 }

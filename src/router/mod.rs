@@ -221,15 +221,19 @@ pub async fn handle_messages(
         "Incoming request for model: {} (frontend: {:?})",
         request.model, frontend
     );
-    // Per-sweep cascade state; initialized at the top of each sweep loop
-    // iteration and consumed by the terminal synthesis after it exits.
-    let mut saw_rate_limit;
-    let mut saw_non_rate_limit_failure;
+    // Per-sweep cascade state; re-initialized at the top of each sweep loop
+    // iteration and consumed by the terminal synthesis after it exits. The
+    // four initialized bindings are read on the loop-top maxHoldMs break
+    // path, which can exit before the first sweep's reset block runs;
+    // `saw_retryable_failure` is only read past the reset, so it stays
+    // deferred-initialized.
+    let mut saw_rate_limit = false;
+    let mut saw_non_rate_limit_failure = false;
     // Transient failures (5xx, timeouts, connection errors) as opposed to
     // deterministic rejections; only these justify another retry sweep.
     let mut saw_retryable_failure;
-    let mut retry_after_hint: Option<std::time::Duration>;
-    let mut last_rate_limited_tier: Option<String>;
+    let mut retry_after_hint: Option<std::time::Duration> = None;
+    let mut last_rate_limited_tier: Option<String> = None;
 
     // Serialize messages to JSON values once for pre-request token audit
     let msg_values: Vec<serde_json::Value> = request
@@ -251,6 +255,19 @@ pub async fn handle_messages(
     let mut total_attempts: usize = 0;
 
     loop {
+        // Honor the wall-clock hold cap before spending another sweep, not
+        // only after one: without this check a sweep started just before the
+        // deadline would run its full attempt/backoff sequence past the cap.
+        // The cooldown below is clamped to the remaining budget for the same
+        // reason.
+        if hold_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            info!(
+                held_ms = start.elapsed().as_millis() as u64,
+                "retrySweeps maxHoldMs reached; surfacing failure"
+            );
+            break;
+        }
+
         // Reset per-sweep cascade state so the terminal response reflects
         // the last sweep rather than a stale mix across sweeps.
         saw_rate_limit = false;
@@ -511,23 +528,24 @@ pub async fn handle_messages(
             info!(sweep, "retrySweeps maxSweeps reached; surfacing failure");
             break;
         }
-        if hold_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-            info!(
-                held_ms = start.elapsed().as_millis() as u64,
-                "retrySweeps maxHoldMs reached; surfacing failure"
-            );
-            break;
-        }
         sweep += 1;
 
         // Cooldown floor; stretched to the strongest Retry-After hint when
         // rate limits dominate, capped at 60s to match the rate-limit
         // tracker's backoff ceiling so a hostile hint cannot stall the
-        // sweep indefinitely.
+        // sweep indefinitely. Clamped to the remaining hold budget so the
+        // sleep itself cannot overshoot maxHoldMs; the loop-top check then
+        // catches the expired deadline before another sweep starts.
         let cooldown = std::time::Duration::from_millis(sweeps.sweep_cooldown_ms);
         let cooldown = retry_after_hint
             .map(|hint| cooldown.max(hint.min(std::time::Duration::from_secs(60))))
             .unwrap_or(cooldown);
+        let cooldown = match hold_deadline {
+            Some(deadline) => {
+                cooldown.min(deadline.saturating_duration_since(std::time::Instant::now()))
+            }
+            None => cooldown,
+        };
         record_retry_sweep();
         info!(
             sweep,

@@ -430,7 +430,7 @@ right trade for long-lived agent sessions.
 | `enabled` | bool | false | Enable held-request re-cascading. |
 | `maxSweeps` | number | 0 | Additional full-cascade sweeps after the first before giving up. 0 = unlimited. |
 | `sweepCooldownMs` | number | 2000 | Minimum cooldown between sweeps; stretched to the strongest Retry-After hint, capped at 60s. |
-| `maxHoldMs` | number | 0 | Wall-clock cap on holding one request open. 0 = unlimited. |
+| `maxHoldMs` | number | 0 | Wall-clock cap on holding one request open. 0 = unlimited. Enforced at sweep boundaries; the inter-sweep sleep is clamped to the remaining budget. A sweep already in flight when the deadline passes still completes. |
 
 ```json
 {
@@ -459,8 +459,12 @@ Behavioral details:
 - Sweeps are counted in the `ccr_retry_sweeps_total` Prometheus metric, and
   each sweep logs `All tiers exhausted; holding request open and re-sweeping`
   with the sweep index and cooldown.
-- With unlimited sweeps and no hold cap, a request is retried until it
-  succeeds or the client disconnects. Make sure the client's own timeout
+- **A client disconnect cancels the held request.** Hyper drops the handler
+  future when the connection closes, which stops the sweep loop and its
+  cooldown sleep; abandoned requests do not keep retrying upstream (pinned
+  by `client_disconnect_cancels_retry_sweeps`).
+- With unlimited sweeps and no hold cap, a request whose client stays
+  connected is retried until it succeeds. Make sure the client's own timeout
   (Claude Code / Anthropic SDK default: 10 minutes) matches your tolerance.
 
 ## Server Configuration
