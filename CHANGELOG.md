@@ -13,6 +13,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Hardened retry sweeps from review round 3: the inter-sweep cooldown is
+  floored at 1ms after clamping (defense in depth against a zero-cooldown
+  config re-cascading back-to-back), and `ccr_retry_sweeps_total` plus the
+  hold log now fire only after the cooldown completes with hold budget
+  remaining, so a sweep that would land on the maxHoldMs deadline is never
+  counted; `sweepCooldownMs: 0` with `retrySweeps.enabled` is now rejected
+  at config load in `Config::from_file`, so `start` and every other entry
+  point enforce it, not just the validate subcommand; the
+  `ccr_retry_sweeps_total` counter is persisted and restored like every
+  other counter.
+- Hardened retry sweeps from review round 2: deterministically rejected
+  tiers (401/402/403/404) are now skipped in all later sweeps instead of
+  being re-attempted once per sweep in mixed cascades; sweeps that consist
+  entirely of backoff-skipped tiers carry the tracker's live backoff window
+  into the inter-sweep cooldown and the terminal 429's retry-after header;
+  the converted raw-429 path now records the rate-limit hit and backoff
+  metrics keyed identically to dispatch's classified-429 path; the maxHoldMs
+  check is gated so the first cascade always runs and a sweeps-disabled
+  config is unaffected, and a clamp-to-zero cooldown no longer counts or
+  logs a phantom sweep; `ccr-rust validate` rejects `retrySweeps.enabled`
+  with `sweepCooldownMs: 0` (unbounded hot re-cascade).
+- Added opt-in router-level retry sweeps (`Router.retrySweeps`): when every
+  tier in the cascade fails, the router holds the client request in flight
+  and re-cascades the full tier list after a cooldown instead of immediately
+  synthesizing a 429/503. Harness-level retry loops (Claude Code, Codex)
+  never observe the failure and so never hit their give-up limits; they only
+  see elevated latency. `maxSweeps` (0 = unlimited) bounds extra sweeps,
+  `maxHoldMs` (0 = unlimited) bounds the wall-clock hold, and the inter-sweep
+  cooldown stretches to the strongest Retry-After hint capped at the
+  rate-limit tracker's 60s ceiling. Deterministic rejections (401/402/403/
+  404) never sweep since retrying cannot change them, and raw upstream 429s
+  that would normally pass through to the client are instead tracked and
+  cascaded while sweeps are enabled. Sweeps are counted in the new
+  `ccr_retry_sweeps_total` metric, and the terminal 503 message now reports
+  actual attempt and sweep counts. Behavior is unchanged unless enabled.
 - Changed rate-limit backoff state to be keyed per `provider,model` route
   instead of per provider, so 429 backoff incurred by one model can no longer
   skip sibling models on the same provider account. Streaming successes reset

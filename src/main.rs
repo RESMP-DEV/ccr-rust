@@ -523,6 +523,9 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
         println!("  - {}", tier);
     }
 
+    // retrySweeps invariants (sweepCooldownMs > 0 when enabled) are enforced
+    // in Config::from_file, shared by every entry point.
+
     println!("\n✓ Configuration valid");
     Ok(())
 }

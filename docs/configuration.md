@@ -412,6 +412,62 @@ With defaults (100ms base, 2.0 multiplier, 10000ms max):
 - Attempt 3: 800ms
 - ...
 
+### Retry Sweeps (hold-the-request-open mode)
+
+By default, once every tier in the cascade has failed, the router immediately
+synthesizes a 429 (all rate-limited) or 503 (other failures). The client
+harness (Claude Code, Codex, ...) then runs its own retry loop, which
+eventually gives up and kills the session's message.
+
+With `retrySweeps` enabled, the router instead keeps the client's HTTP
+request in flight and re-cascades the entire tier list after a cooldown. The
+harness never observes the failure — it only sees elevated latency. This
+trades strict fail-fast semantics for maximum message survival, which is the
+right trade for long-lived agent sessions.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | false | Enable held-request re-cascading. |
+| `maxSweeps` | number | 0 | Additional full-cascade sweeps after the first before giving up. 0 = unlimited. |
+| `sweepCooldownMs` | number | 2000 | Minimum cooldown between sweeps; must be > 0 when enabled (rejected at config load). Stretched to the strongest of: the sweep's Retry-After hints, or the rate-limit tracker's live backoff window for tiers skipped while still cooling down from a 429 (both capped at 60s, the backoff ceiling). The same value becomes the `Retry-After` header on the synthesized 429 when sweeps give up while tiers are still rate-limited. |
+| `maxHoldMs` | number | 0 | Wall-clock cap on holding one request open. 0 = unlimited. Enforced at sweep boundaries; the inter-sweep sleep is clamped to the remaining budget. A sweep already in flight when the deadline passes still completes. |
+
+```json
+{
+  "Router": {
+    "retrySweeps": {
+      "enabled": true,
+      "maxSweeps": 0,
+      "sweepCooldownMs": 2000,
+      "maxHoldMs": 0
+    }
+  }
+}
+```
+
+Behavioral details:
+
+- **Tier order is fixed for the lifetime of a held request**; sweeps re-run
+  the same cascade rather than re-sorting by EWMA.
+- **Deterministic rejections are attempted once per request.** A tier that
+  fails with 401/402/403/404 is failed immediately and skipped in all later
+  sweeps, since retrying cannot change the outcome. If *every* tier failed
+  deterministically, the 503 is surfaced without sweeping at all.
+- **Raw upstream 429s are cascaded instead of passed through.** The normal
+  429 passthrough path returns the upstream response to the client directly;
+  with sweeps enabled it is tracked in the rate-limit backoff tracker and the
+  cascade continues.
+- Sweeps are counted in the `ccr_retry_sweeps_total` Prometheus metric, and
+  each sweep logs `All tiers exhausted; holding request open and re-sweeping`
+  with the sweep index and cooldown.
+- **A client disconnect cancels the held request.** Hyper drops the handler
+  future when the connection closes, which stops the sweep loop and its
+  cooldown sleep; abandoned requests do not keep retrying upstream (pinned
+  by `client_disconnect_cancels_retry_sweeps`).
+- With unlimited sweeps and no hold cap, a request whose client stays
+  connected is retried until it succeeds. Make sure the client's own timeout
+  (Claude Code / Anthropic SDK default: 10 minutes) matches your tolerance.
+
 ## Server Configuration
 
 | Field | Type | Default | Description |

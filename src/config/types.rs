@@ -596,6 +596,13 @@ pub struct RouterConfig {
     #[serde(rename = "tierRetries")]
     pub tier_retries: HashMap<String, TierRetryConfig>,
 
+    /// Router-level retry sweeps: hold an exhausted request open and re-cascade
+    /// the full tier list instead of surfacing a synthesized 429/503 to the
+    /// client. Disabled by default; see `RetrySweepConfig`.
+    #[serde(default)]
+    #[serde(rename = "retrySweeps")]
+    pub retry_sweeps: RetrySweepConfig,
+
     /// Named presets that override model parameters and routing.
     #[serde(default)]
     #[serde(rename = "presets")]
@@ -654,6 +661,61 @@ pub struct TierRetryConfig {
         alias = "streamIdleTimeoutMs"
     )]
     pub stream_idle_timeout_ms: u64,
+}
+
+/// Router-level retry sweep configuration ("hold the request open" mode).
+///
+/// By default, once every tier in the cascade has failed, the router
+/// immediately synthesizes a 429 (all rate-limited) or 503 (other failures)
+/// and the client harness runs its own retry loop, which eventually gives up
+/// and kills the session's message.
+///
+/// With sweeps enabled, the router instead keeps the client's HTTP request
+/// in flight and re-cascades the entire tier list after a cooldown. The
+/// harness never observes the failure; it only sees elevated latency. This
+/// trades strict fail-fast semantics for maximum message survival, which is
+/// the right trade for long-lived agent sessions.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RetrySweepConfig {
+    /// Enable held-request re-cascading. Default: false (legacy fail-fast).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Additional full-cascade sweeps after the first one before giving up.
+    /// 0 means unlimited (sweep until success, a deterministic rejection of
+    /// every tier, or `max_hold_ms`).
+    #[serde(default)]
+    #[serde(rename = "maxSweeps")]
+    pub max_sweeps: usize,
+
+    /// Minimum cooldown between sweeps, in milliseconds. When the last sweep
+    /// produced a Retry-After hint, the cooldown stretches to that hint
+    /// (capped at 60s to match the rate-limit tracker's backoff ceiling).
+    #[serde(default = "default_sweep_cooldown_ms")]
+    #[serde(rename = "sweepCooldownMs")]
+    pub sweep_cooldown_ms: u64,
+
+    /// Wall-clock cap on how long a single request may be held open, in
+    /// milliseconds. When exceeded, the next exhausted sweep synthesizes the
+    /// 429/503 as usual. 0 means unlimited.
+    #[serde(default)]
+    #[serde(rename = "maxHoldMs")]
+    pub max_hold_ms: u64,
+}
+
+impl Default for RetrySweepConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_sweeps: 0,
+            sweep_cooldown_ms: default_sweep_cooldown_ms(),
+            max_hold_ms: 0,
+        }
+    }
+}
+
+fn default_sweep_cooldown_ms() -> u64 {
+    2000
 }
 
 /// Request batching configuration.
@@ -835,6 +897,40 @@ mod backoff_tests {
 
     fn default_retry_config() -> TierRetryConfig {
         TierRetryConfig::default()
+    }
+
+    #[test]
+    fn retry_sweeps_absent_means_disabled() {
+        let router: RouterConfig = serde_json::from_str(r#"{"default": "p,m"}"#).unwrap();
+        assert!(!router.retry_sweeps.enabled);
+        assert_eq!(router.retry_sweeps.max_sweeps, 0);
+        assert_eq!(router.retry_sweeps.max_hold_ms, 0);
+        // Cooldown still parses to its default so enabling later needs no
+        // other fields.
+        assert_eq!(router.retry_sweeps.sweep_cooldown_ms, 2000);
+    }
+
+    #[test]
+    fn retry_sweeps_parses_camel_case_block() {
+        let router: RouterConfig = serde_json::from_str(
+            r#"{"default": "p,m", "retrySweeps": {"enabled": true, "maxSweeps": 5, "sweepCooldownMs": 500, "maxHoldMs": 600000}}"#,
+        )
+        .unwrap();
+        assert!(router.retry_sweeps.enabled);
+        assert_eq!(router.retry_sweeps.max_sweeps, 5);
+        assert_eq!(router.retry_sweeps.sweep_cooldown_ms, 500);
+        assert_eq!(router.retry_sweeps.max_hold_ms, 600000);
+    }
+
+    #[test]
+    fn retry_sweeps_enabled_alone_is_unlimited() {
+        let router: RouterConfig =
+            serde_json::from_str(r#"{"default": "p,m", "retrySweeps": {"enabled": true}}"#)
+                .unwrap();
+        assert!(router.retry_sweeps.enabled);
+        assert_eq!(router.retry_sweeps.max_sweeps, 0);
+        assert_eq!(router.retry_sweeps.max_hold_ms, 0);
+        assert_eq!(router.retry_sweeps.sweep_cooldown_ms, 2000);
     }
 
     #[test]

@@ -93,6 +93,16 @@ impl RateLimitTracker {
             .is_some_and(|until| Instant::now() < until)
     }
 
+    /// Remaining time in the tier's active 429 backoff window, if any.
+    pub fn backoff_remaining(&self, tier: &str) -> Option<Duration> {
+        let tiers = self.tiers.read();
+        tiers
+            .get(tier)
+            .and_then(|state| state.backoff_until)
+            .map(|until| until.saturating_duration_since(Instant::now()))
+            .filter(|remaining| !remaining.is_zero())
+    }
+
     /// Snapshot of the route's 429 generation, to be captured before an
     /// upstream attempt begins and passed back on success.
     pub fn generation(&self, tier: &str) -> u64 {

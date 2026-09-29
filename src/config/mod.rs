@@ -160,6 +160,20 @@ fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
     Ok(())
 }
 
+/// Enforced in `Config::from_file` so every entry point (start, validate,
+/// dashboard) rejects it, not just the validate subcommand: a zero
+/// sweepCooldownMs would re-cascade the tier list back-to-back in an
+/// unbounded hot loop whenever no Retry-After hint or hold cap applies.
+fn validate_retry_sweeps(router: &RouterConfig) -> Result<()> {
+    let sweeps = &router.retry_sweeps;
+    anyhow::ensure!(
+        !(sweeps.enabled && sweeps.sweep_cooldown_ms == 0),
+        "Router.retrySweeps.sweepCooldownMs must be > 0 when retrySweeps is enabled \
+         (zero would re-cascade the tier list back-to-back in an unbounded hot loop)"
+    );
+    Ok(())
+}
+
 fn validate_model_aliases(router: &RouterConfig, providers: &[Provider]) -> Result<()> {
     for (alias, target) in &router.model_aliases {
         anyhow::ensure!(
@@ -414,6 +428,7 @@ impl Config {
             serde_json::from_value(value).context("Failed to parse config JSON")?;
         validate_provider_contracts(&file.providers)?;
         validate_model_aliases(&file.router, &file.providers)?;
+        validate_retry_sweeps(&file.router)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
         let mut client_builder = reqwest::Client::builder()
