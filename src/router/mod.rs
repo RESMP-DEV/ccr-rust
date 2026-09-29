@@ -38,7 +38,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 #[cfg(feature = "gp")]
 use std::sync::atomic::Ordering;
 use tracing::{error, info, warn};
@@ -253,14 +253,21 @@ pub async fn handle_messages(
         .then(|| start + std::time::Duration::from_millis(sweeps.max_hold_ms));
     let mut sweep: usize = 0;
     let mut total_attempts: usize = 0;
+    // Tiers that returned a deterministic 4xx rejection in an earlier sweep.
+    // Retrying them cannot change the outcome, so later sweeps skip them
+    // entirely instead of re-attempting once per sweep while sibling tiers
+    // keep the request alive.
+    let mut rejected_tiers: HashSet<String> = HashSet::new();
 
     loop {
         // Honor the wall-clock hold cap before spending another sweep, not
         // only after one: without this check a sweep started just before the
         // deadline would run its full attempt/backoff sequence past the cap.
         // The cooldown below is clamped to the remaining budget for the same
-        // reason.
-        if hold_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        // reason. Gated on sweep > 0 so the very first cascade always runs
+        // (and so a sweeps-disabled config is unaffected).
+        if sweep > 0 && hold_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
             info!(
                 held_ms = start.elapsed().as_millis() as u64,
                 "retrySweeps maxHoldMs reached; surfacing failure"
@@ -278,6 +285,10 @@ pub async fn handle_messages(
 
         // Try each tier with retries
         for (tier, tier_name) in ordered.iter() {
+            if rejected_tiers.contains(tier) {
+                tracing::debug!(tier = %tier_name, "Skipping deterministically rejected tier");
+                continue;
+            }
             let honor_remaining = config
                 .resolve_provider(tier)
                 .map(|p| p.honor_ratelimit_headers)
@@ -290,6 +301,17 @@ pub async fn handle_messages(
             {
                 saw_rate_limit = true;
                 last_rate_limited_tier = Some(tier_name.clone());
+                // Carry the tracker's live backoff window into this sweep's
+                // Retry-After hint so an all-skipped sweep still cools down
+                // for the actual recovery time (and the terminal 429 keeps
+                // a meaningful retry-after header) instead of falling back
+                // to the bare sweepCooldownMs floor.
+                if let Some(remaining) = state.ratelimit_tracker.backoff_remaining(tier.as_str()) {
+                    retry_after_hint = match retry_after_hint {
+                        Some(current) => Some(current.max(remaining)),
+                        None => Some(remaining),
+                    };
+                }
                 tracing::debug!(tier = %tier_name, "Skipping rate-limited tier");
                 continue;
             }
@@ -382,6 +404,11 @@ pub async fn handle_messages(
                             state
                                 .ratelimit_tracker
                                 .record_429(tier.as_str(), retry_after);
+                            // Metric parity with dispatch's classified-429 path:
+                            // record the hit and the backoff, keyed by the same
+                            // full route string dispatch uses.
+                            crate::metrics::record_rate_limit_hit(tier.as_str());
+                            crate::metrics::record_rate_limit_backoff(tier.as_str());
                             saw_rate_limit = true;
                             last_rate_limited_tier = Some(tier_name.clone());
                             retry_after_hint = match (retry_after_hint, retry_after) {
@@ -479,7 +506,10 @@ pub async fn handle_messages(
                         );
                         // Retrying cannot change a 401/402/403/404 outcome, and
                         // the retry load can trip provider-wide rate limits that
-                        // block sibling models. Fail this tier immediately.
+                        // block sibling models. Fail this tier immediately, and
+                        // remember the rejection so later sweeps skip the tier
+                        // instead of re-attempting it once per sweep.
+                        rejected_tiers.insert(tier.clone());
                         break;
                     }
                     Err(TryRequestError::Other(e)) => {
@@ -546,6 +576,15 @@ pub async fn handle_messages(
             }
             None => cooldown,
         };
+        if cooldown.is_zero() {
+            // The hold budget is already spent: the loop-top deadline check
+            // will surface the failure. Do not count or log a sweep that
+            // cannot run.
+            continue;
+        }
+        // Defense in depth against a zero cooldown reaching this point via
+        // configs that skipped validation: never re-cascade back-to-back.
+        let cooldown = cooldown.max(std::time::Duration::from_millis(1));
         record_retry_sweep();
         info!(
             sweep,

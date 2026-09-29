@@ -275,15 +275,19 @@ async fn client_disconnect_cancels_retry_sweeps() {
     drop(stream);
 
     // Wait until the hit count goes quiet (cancellation may take a moment
-    // under load), then confirm it never grows past the disconnect point.
+    // under load), then confirm growth stops at the disconnect point. One
+    // in-flight upstream request may still complete after the drop —
+    // cancelling the handler future does not un-send bytes already on the
+    // wire — so the bound allows a single straggler, never continued
+    // sweeping.
     let quiet_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let before = hits.load(Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         let after = hits.load(Ordering::SeqCst);
         if before == after {
-            assert_eq!(
-                after, hits_while_connected,
+            assert!(
+                after <= hits_while_connected + 1,
                 "sweeps must stop after the client disconnects ({} hits before, {after} after)",
                 hits_while_connected
             );
@@ -294,6 +298,61 @@ async fn client_disconnect_cancels_retry_sweeps() {
             "upstream hits kept growing after client disconnect: {hits_while_connected} -> {after}"
         );
     }
+}
+
+/// In a mixed cascade (one tier always 401, one tier rate-limited), the
+/// deterministic tier is attempted exactly once for the whole request: the
+/// first sweep rejects it, and later sweeps skip it while the request stays
+/// held for the rate-limited tier's recovery.
+#[tokio::test]
+async fn deterministic_rejected_tier_skipped_in_later_sweeps() {
+    if skip_if_localhost_bind_unavailable("deterministic_rejected_tier_skipped_in_later_sweeps") {
+        return;
+    }
+    let (url_a, hits_a) = spawn_flaky_upstream(usize::MAX, 401).await;
+    let (url_b, hits_b) = spawn_flaky_upstream(usize::MAX, 429).await;
+    let config = json!({
+        "Providers": [
+            {
+                "name": "mocka",
+                "api_base_url": url_a,
+                "api_key": "test-key",
+                "models": ["test-model"]
+            },
+            {
+                "name": "mockb",
+                "api_base_url": url_b,
+                "api_key": "test-key",
+                "models": ["test-model"]
+            }
+        ],
+        "Router": {
+            "default": "mocka,test-model",
+            "tiers": ["mocka,test-model", "mockb,test-model"],
+            "tierRetries": {"mocka": {"max_retries": 0}, "mockb": {"max_retries": 0}},
+            "retrySweeps": {"enabled": true, "maxSweeps": 2, "sweepCooldownMs": 25}
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+
+    let config_json = serde_json::to_string_pretty(&config).unwrap();
+    let (status, body) = send_message(build_app(load_config(&config_json))).await;
+
+    // Terminal state reflects the last sweep: the rejected tier is skipped
+    // silently by then, so only rate-limit signals remain and the
+    // synthesized response is the rate-limit 429.
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+    assert_eq!(
+        hits_a.load(Ordering::SeqCst),
+        1,
+        "deterministically rejected tier must not be re-attempted in later sweeps"
+    );
+    let hits_b = hits_b.load(Ordering::SeqCst);
+    assert!(
+        (1..=2).contains(&hits_b),
+        "rate-limited tier dispatches at most once per recovery window, got {hits_b}"
+    );
 }
 
 /// Deterministic rejections (401/402/403/404) must never be swept: no
@@ -313,8 +372,11 @@ async fn deterministic_rejections_do_not_sweep() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
-/// Rate-limited tiers keep the request held (sweeps continue while the
-/// tracker's backoff window skips the tier) and the final response is the
+/// Rate-limited tiers keep the request held and the inter-sweep cooldown
+/// stretches to the tracker's actual backoff window (via the skip-path
+/// hint), so the tier is re-attempted only once its recovery time elapses
+/// rather than every bare sweepCooldownMs. Within two extra sweeps the
+/// upstream is dispatched at most twice, and the final response is the
 /// synthesized rate-limit 429, not a generic 5xx.
 #[tokio::test]
 async fn rate_limited_tier_holds_then_synthesizes_429() {
@@ -327,13 +389,21 @@ async fn rate_limited_tier_holds_then_synthesizes_429() {
         json!({"enabled": true, "maxSweeps": 2, "sweepCooldownMs": 25}),
     );
 
+    let started = std::time::Instant::now();
     let (status, body) = send_message(build_app(load_config(&config))).await;
+    let elapsed = started.elapsed();
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body["error"]["type"], "rate_limit_error");
-    // Only the first sweep dispatches; later sweeps skip the tier while the
-    // recorded 429 backoff window is open.
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let hits = hits.load(Ordering::SeqCst);
+    assert!(
+        (1..=2).contains(&hits),
+        "expected 1-2 upstream hits (one per recovery window), got {hits}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(1500),
+        "cooldown must stretch to the tracker's backoff window; surfaced after {elapsed:?}"
+    );
 }
 
 /// maxHoldMs caps the wall-clock hold even with unlimited sweeps. The cap
@@ -350,7 +420,7 @@ async fn max_hold_deadline_surfaces_failure() {
     let (url, hits) = spawn_flaky_upstream(usize::MAX, 500).await;
     let config = make_test_config(
         &url,
-        json!({"enabled": true, "maxHoldMs": 300, "sweepCooldownMs": 30000}),
+        json!({"enabled": true, "maxHoldMs": 1000, "sweepCooldownMs": 30000}),
     );
 
     let started = std::time::Instant::now();
@@ -365,6 +435,6 @@ async fn max_hold_deadline_surfaces_failure() {
     );
     assert!(
         elapsed < std::time::Duration::from_secs(5),
-        "cooldown must clamp to the remaining hold budget; surfaced after {elapsed:?}"
+        "cooldown must clamp to the remaining hold budget; surfaced after {elapsed:?} with a 1s budget"
     );
 }

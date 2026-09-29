@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Hardened retry sweeps from review round 2: deterministically rejected
+  tiers (401/402/403/404) are now skipped in all later sweeps instead of
+  being re-attempted once per sweep in mixed cascades; sweeps that consist
+  entirely of backoff-skipped tiers carry the tracker's live backoff window
+  into the inter-sweep cooldown and the terminal 429's retry-after header;
+  the converted raw-429 path now records the rate-limit hit and backoff
+  metrics keyed identically to dispatch's classified-429 path; the maxHoldMs
+  check is gated so the first cascade always runs and a sweeps-disabled
+  config is unaffected, and a clamp-to-zero cooldown no longer counts or
+  logs a phantom sweep; `ccr-rust validate` rejects `retrySweeps.enabled`
+  with `sweepCooldownMs: 0` (unbounded hot re-cascade).
 - Added opt-in router-level retry sweeps (`Router.retrySweeps`): when every
   tier in the cascade fails, the router holds the client request in flight
   and re-cascades the full tier list after a cooldown instead of immediately

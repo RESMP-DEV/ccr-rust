@@ -449,9 +449,10 @@ Behavioral details:
 
 - **Tier order is fixed for the lifetime of a held request**; sweeps re-run
   the same cascade rather than re-sorting by EWMA.
-- **Deterministic rejections never sweep.** If every tier failed with
-  401/402/403/404 (bad credentials, unknown model), retrying cannot change
-  the outcome and the 503 is surfaced immediately.
+- **Deterministic rejections are attempted once per request.** A tier that
+  fails with 401/402/403/404 is failed immediately and skipped in all later
+  sweeps, since retrying cannot change the outcome. If *every* tier failed
+  deterministically, the 503 is surfaced without sweeping at all.
 - **Raw upstream 429s are cascaded instead of passed through.** The normal
   429 passthrough path returns the upstream response to the client directly;
   with sweeps enabled it is tracked in the rate-limit backoff tracker and the

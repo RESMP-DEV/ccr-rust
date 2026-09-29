@@ -89,6 +89,16 @@ impl RateLimitTracker {
             .is_some_and(|until| Instant::now() < until)
     }
 
+    /// Remaining time in the tier's active 429 backoff window, if any.
+    pub fn backoff_remaining(&self, tier: &str) -> Option<Duration> {
+        let tiers = self.tiers.read();
+        tiers
+            .get(tier)
+            .and_then(|state| state.backoff_until)
+            .map(|until| until.saturating_duration_since(Instant::now()))
+            .filter(|remaining| !remaining.is_zero())
+    }
+
     pub fn record_429(&self, tier: &str, retry_after: Option<Duration>) {
         let mut tiers = self.tiers.write();
         let state = tiers.entry(tier.to_string()).or_default();
