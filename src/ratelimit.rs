@@ -20,6 +20,10 @@ pub struct TierRateLimitState {
     pub reset_at: Option<Instant>,
     pub backoff_until: Option<Instant>,
     pub consecutive_429s: u32,
+    /// Monotonic count of 429s recorded for this route. A success whose
+    /// snapshot of this counter predates the latest 429 must not clear the
+    /// newer backoff (overlapping-request ordering).
+    pub generation: u64,
 }
 
 #[derive(Default)]
@@ -99,10 +103,22 @@ impl RateLimitTracker {
             .filter(|remaining| !remaining.is_zero())
     }
 
+    /// Snapshot of the route's 429 generation, to be captured before an
+    /// upstream attempt begins and passed back on success.
+    pub fn generation(&self, tier: &str) -> u64 {
+        self.tiers
+            .read()
+            .get(tier)
+            .map(|s| s.generation)
+            .unwrap_or(0)
+    }
+    }
+
     pub fn record_429(&self, tier: &str, retry_after: Option<Duration>) {
         let mut tiers = self.tiers.write();
         let state = tiers.entry(tier.to_string()).or_default();
         state.consecutive_429s += 1;
+        state.generation += 1;
 
         // Exponential backoff: 1s, 2s, 4s, 8s... capped at 60s
         let base_backoff = retry_after.unwrap_or(Duration::from_secs(1));
@@ -123,6 +139,41 @@ impl RateLimitTracker {
 
         // Record to Prometheus metric
         RATE_LIMIT_BACKOFFS_TOTAL.with_label_values(&[tier]).inc();
+    }
+
+    /// Success recording with overlap protection: clears the route's backoff
+    /// only when no 429 was recorded after `seen_generation` was snapshotted
+    /// (i.e. this request was already in flight before the newest 429 and
+    /// therefore cannot speak to the route's current health). Header-derived
+    /// quota info is still updated either way. `record_success` remains for
+    /// callers and tests that unconditionally report route health.
+    pub fn record_success_if_current(
+        &self,
+        tier: &str,
+        seen_generation: u64,
+        remaining: Option<u32>,
+        reset_at: Option<Instant>,
+    ) {
+        let mut tiers = self.tiers.write();
+        let state = tiers.entry(tier.to_string()).or_default();
+
+        let backoff_cleared = state.generation == seen_generation;
+        if backoff_cleared {
+            state.consecutive_429s = 0;
+            state.backoff_until = None;
+        }
+
+        // Update rate limit info from response headers
+        state.remaining = remaining;
+        state.reset_at = reset_at;
+
+        tracing::debug!(
+            tier = %tier,
+            remaining = ?remaining,
+            backoff_cleared,
+            reset_at = ?reset_at.map(|t| format!("{:?}", t.saturating_duration_since(Instant::now()).as_secs())),
+            "Updated rate limit state"
+        );
     }
 
     pub fn record_success(&self, tier: &str, remaining: Option<u32>, reset_at: Option<Instant>) {

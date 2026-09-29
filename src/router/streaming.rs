@@ -359,9 +359,19 @@ pub async fn stream_response_translated(
             if upstream_completed_cleanly {
                 if let Some(ref tracker) = ctx.ratelimit_tracker {
                     if let Some((remaining, reset_at)) = &ctx.rate_limit_info {
-                        tracker.record_success(&ctx.ratelimit_key, *remaining, *reset_at);
+                        tracker.record_success_if_current(
+                            &ctx.ratelimit_key,
+                            ctx.ratelimit_generation,
+                            *remaining,
+                            *reset_at,
+                        );
                     } else {
-                        tracker.record_success(&ctx.ratelimit_key, None, None);
+                        tracker.record_success_if_current(
+                            &ctx.ratelimit_key,
+                            ctx.ratelimit_generation,
+                            None,
+                            None,
+                        );
                     }
                 }
             }
@@ -633,9 +643,19 @@ pub async fn stream_anthropic_response_with_tracking(
         if upstream_completed_cleanly {
             if let Some(ref tracker) = verify_ctx.ratelimit_tracker {
                 if let Some((remaining, reset_at)) = &verify_ctx.rate_limit_info {
-                    tracker.record_success(&verify_ctx.ratelimit_key, *remaining, *reset_at);
+                    tracker.record_success_if_current(
+                        &verify_ctx.ratelimit_key,
+                        verify_ctx.ratelimit_generation,
+                        *remaining,
+                        *reset_at,
+                    );
                 } else {
-                    tracker.record_success(&verify_ctx.ratelimit_key, None, None);
+                    tracker.record_success_if_current(
+                        &verify_ctx.ratelimit_key,
+                        verify_ctx.ratelimit_generation,
+                        None,
+                        None,
+                    );
                 }
             }
         }

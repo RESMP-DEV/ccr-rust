@@ -715,6 +715,10 @@ pub(super) async fn try_request_via_openai_protocol(
         render_refusal_as_anthropic_text,
     } = args;
 
+    // Snapshot the route's 429 generation before dispatch so a later success
+    // cannot clear a backoff recorded by an overlapping request's 429.
+    let ratelimit_generation = ratelimit_tracker.generation(ratelimit_key);
+
     let url = if provider.protocol == ProviderProtocol::Responses {
         provider_endpoint_url(provider, "responses")
     } else {
@@ -840,7 +844,15 @@ pub(super) async fn try_request_via_openai_protocol(
                     Some(error.to_string()),
                 )
                 .await;
-                return Err(TryRequestError::Other(error.into()));
+                // Classify by the saved status even when the error body is
+                // unreadable: a 401-404 with a failed body read is still a
+                // deterministic rejection, not a retryable transport error.
+                return Err(provider_upstream_error(
+                    status,
+                    &url,
+                    &format!("<error body unreadable: {error}>"),
+                    provider,
+                ));
             }
         };
         let provider_error = format!("Provider returned {status} from {url}");
@@ -901,6 +913,7 @@ pub(super) async fn try_request_via_openai_protocol(
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
             ratelimit_key: ratelimit_key.to_string(),
+            ratelimit_generation,
             local_estimate,
             ratelimit_tracker: Some(ratelimit_tracker.clone()),
             rate_limit_info: Some(rate_limit_info),
@@ -1001,7 +1014,12 @@ pub(super) async fn try_request_via_openai_protocol(
             }
         }
 
-        ratelimit_tracker.record_success(ratelimit_key, rate_limit_info.0, rate_limit_info.1);
+        ratelimit_tracker.record_success_if_current(
+            ratelimit_key,
+            ratelimit_generation,
+            rate_limit_info.0,
+            rate_limit_info.1,
+        );
 
         // Try to parse as OpenAI response and translate.
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
@@ -1106,6 +1124,10 @@ pub(super) async fn try_request_via_anthropic_protocol(
         openai_passthrough_body: _, // not used for Anthropic protocol
         render_refusal_as_anthropic_text: _,
     } = args;
+
+    // Snapshot the route's 429 generation before dispatch so a later success
+    // cannot clear a backoff recorded by an overlapping request's 429.
+    let ratelimit_generation = ratelimit_tracker.generation(ratelimit_key);
 
     let url = provider_anthropic_messages_url(provider);
     let headers = build_anthropic_headers(provider)?;
@@ -1224,7 +1246,15 @@ pub(super) async fn try_request_via_anthropic_protocol(
                     Some(error.to_string()),
                 )
                 .await;
-                return Err(TryRequestError::Other(error.into()));
+                // Classify by the saved status even when the error body is
+                // unreadable: a 401-404 with a failed body read is still a
+                // deterministic rejection, not a retryable transport error.
+                return Err(provider_upstream_error(
+                    status,
+                    &url,
+                    &format!("<error body unreadable: {error}>"),
+                    provider,
+                ));
             }
         };
         let provider_error = format!("Provider returned {status} from {url}");
@@ -1285,6 +1315,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
             ratelimit_key: ratelimit_key.to_string(),
+            ratelimit_generation,
             local_estimate,
             ratelimit_tracker: Some(ratelimit_tracker.clone()),
             rate_limit_info: Some(rate_limit_info),
@@ -1331,7 +1362,12 @@ pub(super) async fn try_request_via_anthropic_protocol(
             return Err(error);
         }
 
-        ratelimit_tracker.record_success(ratelimit_key, rate_limit_info.0, rate_limit_info.1);
+        ratelimit_tracker.record_success_if_current(
+            ratelimit_key,
+            ratelimit_generation,
+            rate_limit_info.0,
+            rate_limit_info.1,
+        );
 
         let body_str = String::from_utf8_lossy(&body);
 
