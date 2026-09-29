@@ -47,7 +47,8 @@ use crate::config::ModelAliasTarget;
 use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::{
     increment_active_requests, record_failure, record_pre_request_tokens,
-    record_request_duration_with_frontend, record_request_with_frontend, sync_ewma_gauge,
+    record_request_duration_with_frontend, record_request_with_frontend, record_retry_sweep,
+    sync_ewma_gauge,
 };
 use crate::routing::AttemptTimer;
 
@@ -220,10 +221,15 @@ pub async fn handle_messages(
         "Incoming request for model: {} (frontend: {:?})",
         request.model, frontend
     );
-    let mut saw_rate_limit = false;
-    let mut saw_non_rate_limit_failure = false;
-    let mut retry_after_hint: Option<std::time::Duration> = None;
-    let mut last_rate_limited_tier: Option<String> = None;
+    // Per-sweep cascade state; initialized at the top of each sweep loop
+    // iteration and consumed by the terminal synthesis after it exits.
+    let mut saw_rate_limit;
+    let mut saw_non_rate_limit_failure;
+    // Transient failures (5xx, timeouts, connection errors) as opposed to
+    // deterministic rejections; only these justify another retry sweep.
+    let mut saw_retryable_failure;
+    let mut retry_after_hint: Option<std::time::Duration>;
+    let mut last_rate_limited_tier: Option<String>;
 
     // Serialize messages to JSON values once for pre-request token audit
     let msg_values: Vec<serde_json::Value> = request
@@ -233,82 +239,186 @@ pub async fn handle_messages(
         .collect();
     let tool_values: Option<Vec<serde_json::Value>> = request.tools.clone();
 
-    // Try each tier with retries
-    for (tier, tier_name) in ordered.iter() {
-        let honor_remaining = config
-            .resolve_provider(tier)
-            .map(|p| p.honor_ratelimit_headers)
-            .unwrap_or(true);
-        if state
-            .ratelimit_tracker
-            // Keyed by the full `provider,model` route so backoff incurred by
-            // one model never skips a sibling model on the same provider.
-            .should_skip_tier(tier.as_str(), honor_remaining)
-        {
-            saw_rate_limit = true;
-            last_rate_limited_tier = Some(tier_name.clone());
-            tracing::debug!(tier = %tier_name, "Skipping rate-limited tier");
-            continue;
-        }
-        // Pre-request token audit: estimate input tokens before dispatching
-        let local_estimate = record_pre_request_tokens(
-            tier_name,
-            &msg_values,
-            request.system.as_ref(),
-            tool_values.as_deref(),
-        );
+    // One sweep = one full pass over the ordered tier list. With retrySweeps
+    // enabled, a sweep that exhausts without success sleeps for a cooldown
+    // and re-cascades instead of synthesizing a terminal 429/503, keeping
+    // the client's request in flight so harness-level retry limits (Claude
+    // Code, Codex, ...) are never reached.
+    let sweeps = config.router().retry_sweeps;
+    let hold_deadline = (sweeps.max_hold_ms > 0)
+        .then(|| start + std::time::Duration::from_millis(sweeps.max_hold_ms));
+    let mut sweep: usize = 0;
+    let mut total_attempts: usize = 0;
 
-        // Per-provider streaming decision: allow_streaming bypasses forceNonStreaming
-        let provider = config.resolve_provider(tier);
-        let provider_allows_streaming = provider.map(|p| p.allow_streaming).unwrap_or(false);
-        let provider_uses_responses =
-            provider.is_some_and(|p| p.protocol == crate::config::ProviderProtocol::Responses);
-        let forced_non_streaming = provider_uses_responses
-            || (config.router().force_non_streaming && !provider_allows_streaming);
-        if client_wants_stream && forced_non_streaming {
-            request.stream = Some(false);
-        } else {
-            request.stream = Some(client_wants_stream);
-        }
+    loop {
+        // Reset per-sweep cascade state so the terminal response reflects
+        // the last sweep rather than a stale mix across sweeps.
+        saw_rate_limit = false;
+        saw_non_rate_limit_failure = false;
+        saw_retryable_failure = false;
+        retry_after_hint = None;
+        last_rate_limited_tier = None;
 
-        let retry_config = config.get_tier_retry(tier_name);
-        let max_retries = retry_config.max_retries;
-
-        for attempt in 0..=max_retries {
-            info!(
-                "Trying {} ({}), attempt {}/{}",
-                tier,
+        // Try each tier with retries
+        for (tier, tier_name) in ordered.iter() {
+            let honor_remaining = config
+                .resolve_provider(tier)
+                .map(|p| p.honor_ratelimit_headers)
+                .unwrap_or(true);
+            if state
+                .ratelimit_tracker
+                // Keyed by the full `provider,model` route so backoff incurred by
+                // one model never skips a sibling model on the same provider.
+                .should_skip_tier(tier.as_str(), honor_remaining)
+            {
+                saw_rate_limit = true;
+                last_rate_limited_tier = Some(tier_name.clone());
+                tracing::debug!(tier = %tier_name, "Skipping rate-limited tier");
+                continue;
+            }
+            // Pre-request token audit: estimate input tokens before dispatching
+            let local_estimate = record_pre_request_tokens(
                 tier_name,
-                attempt + 1,
-                max_retries + 1
+                &msg_values,
+                request.system.as_ref(),
+                tool_values.as_deref(),
             );
 
-            // Override model with current tier
-            request.model = tier.clone();
+            // Per-provider streaming decision: allow_streaming bypasses forceNonStreaming
+            let provider = config.resolve_provider(tier);
+            let provider_allows_streaming = provider.map(|p| p.allow_streaming).unwrap_or(false);
+            let provider_uses_responses =
+                provider.is_some_and(|p| p.protocol == crate::config::ProviderProtocol::Responses);
+            let forced_non_streaming = provider_uses_responses
+                || (config.router().force_non_streaming && !provider_allows_streaming);
+            if client_wants_stream && forced_non_streaming {
+                request.stream = Some(false);
+            } else {
+                request.stream = Some(client_wants_stream);
+            }
 
-            // Start per-attempt latency timer for EWMA tracking
-            let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
+            let retry_config = config.get_tier_retry(tier_name);
+            let max_retries = retry_config.max_retries;
 
-            match try_request(TryRequestArgs {
-                config,
-                registry: &state.transformer_registry,
-                request: &request,
-                tier,
-                tier_name,
-                local_estimate,
-                stream_first_event_timeout: retry_config.stream_first_event_timeout(),
-                stream_idle_timeout: retry_config.stream_idle_timeout(),
-                ratelimit_tracker: state.ratelimit_tracker.clone(),
-                debug_capture: state.debug_capture.clone(),
-                openai_passthrough_body: request.openai_passthrough_body.as_ref(),
-                render_refusal_as_anthropic_text: frontend == FrontendType::ClaudeCode,
-            })
-            .await
-            {
-                Ok(response) => {
-                    if response.status() == StatusCode::TOO_MANY_REQUESTS {
-                        // 429 passthrough is an intentional non-cascading return path,
-                        // but it must be tracked as a failed attempt for EWMA scoring.
+            for attempt in 0..=max_retries {
+                total_attempts += 1;
+                info!(
+                    sweep,
+                    "Trying {} ({}), attempt {}/{}",
+                    tier,
+                    tier_name,
+                    attempt + 1,
+                    max_retries + 1
+                );
+
+                // Override model with current tier
+                request.model = tier.clone();
+
+                // Start per-attempt latency timer for EWMA tracking
+                let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
+
+                match try_request(TryRequestArgs {
+                    config,
+                    registry: &state.transformer_registry,
+                    request: &request,
+                    tier,
+                    tier_name,
+                    local_estimate,
+                    stream_first_event_timeout: retry_config.stream_first_event_timeout(),
+                    stream_idle_timeout: retry_config.stream_idle_timeout(),
+                    ratelimit_tracker: state.ratelimit_tracker.clone(),
+                    debug_capture: state.debug_capture.clone(),
+                    openai_passthrough_body: request.openai_passthrough_body.as_ref(),
+                    render_refusal_as_anthropic_text: frontend == FrontendType::ClaudeCode,
+                })
+                .await
+                {
+                    Ok(response) => {
+                        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                            // 429 passthrough is an intentional non-cascading return path,
+                            // but it must be tracked as a failed attempt for EWMA scoring.
+                            timer.finish_failure();
+                            #[cfg(feature = "gp")]
+                            if let (Some(gp_router), Some(plan)) =
+                                (state.gp_router.as_ref(), gp_plan.as_ref())
+                            {
+                                gp_router.record_attempt(plan, tier, attempt, None, config);
+                            }
+                            if !sweeps.enabled {
+                                let total_duration = start.elapsed().as_secs_f64();
+                                sync_ewma_gauge(&state.ewma_tracker);
+                                info!(
+                                    "Rate-limit passthrough on {} after {:.2}s",
+                                    tier_name, total_duration
+                                );
+                                return response;
+                            }
+                            // retrySweeps: returning this 429 hands the harness a
+                            // terminal failure. Track it like any other rate
+                            // limit and keep cascading instead.
+                            let retry_after = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .map(std::time::Duration::from_secs);
+                            state
+                                .ratelimit_tracker
+                                .record_429(tier.as_str(), retry_after);
+                            saw_rate_limit = true;
+                            last_rate_limited_tier = Some(tier_name.clone());
+                            retry_after_hint = match (retry_after_hint, retry_after) {
+                                (Some(current), Some(candidate)) => Some(current.max(candidate)),
+                                (None, some) => some,
+                                (some, None) => some,
+                            };
+                            sync_ewma_gauge(&state.ewma_tracker);
+                            record_failure(tier_name, "rate_limited");
+                            warn!(
+                                tier = tier_name,
+                                "Rate-limit passthrough converted to cascade (retrySweeps enabled)"
+                            );
+                            break;
+                        }
+
+                        let attempt_duration = timer.finish_success();
+                        #[cfg(feature = "gp")]
+                        if let (Some(gp_router), Some(plan)) =
+                            (state.gp_router.as_ref(), gp_plan.as_ref())
+                        {
+                            gp_router.record_attempt(
+                                plan,
+                                tier,
+                                attempt,
+                                Some(attempt_duration),
+                                config,
+                            );
+                        }
+                        let total_duration = start.elapsed().as_secs_f64();
+                        record_request_with_frontend(tier_name, frontend);
+                        record_request_duration_with_frontend(tier_name, total_duration, frontend);
+                        sync_ewma_gauge(&state.ewma_tracker);
+                        info!(
+                            "Success on {} after {:.2}s (attempt {:.3}s)",
+                            tier_name, total_duration, attempt_duration
+                        );
+
+                        // If client wanted streaming but we forced non-streaming for this provider,
+                        // wrap the JSON response as pseudo-SSE so Claude CLI can parse it.
+                        if client_wants_stream && forced_non_streaming {
+                            return streaming::wrap_json_response_as_sse(
+                                response,
+                                frontend == FrontendType::Codex,
+                            )
+                            .await;
+                        }
+
+                        return response;
+                    }
+                    Err(TryRequestError::RateLimited(retry_after)) => {
+                        // Dispatch records the 429 (tracker, hit and backoff
+                        // metrics) before returning this error; only the EWMA
+                        // bookkeeping and tier transition happen here.
                         timer.finish_failure();
                         #[cfg(feature = "gp")]
                         if let (Some(gp_router), Some(plan)) =
@@ -316,130 +426,116 @@ pub async fn handle_messages(
                         {
                             gp_router.record_attempt(plan, tier, attempt, None, config);
                         }
-                        let total_duration = start.elapsed().as_secs_f64();
+                        saw_rate_limit = true;
+                        last_rate_limited_tier = Some(tier_name.clone());
+                        retry_after_hint = match (retry_after_hint, retry_after) {
+                            (Some(current), Some(candidate)) => Some(current.max(candidate)),
+                            (None, some) => some,
+                            (some, None) => some,
+                        };
                         sync_ewma_gauge(&state.ewma_tracker);
-                        info!(
-                            "Rate-limit passthrough on {} after {:.2}s",
-                            tier_name, total_duration
+                        warn!(
+                            "Rate limited on {} attempt {} (retry-after: {:?})",
+                            tier_name,
+                            attempt + 1,
+                            retry_after
                         );
-                        return response;
+                        record_failure(tier_name, "rate_limited");
+                        // Skip remaining retries for this tier - move to next
+                        break;
                     }
-
-                    let attempt_duration = timer.finish_success();
-                    #[cfg(feature = "gp")]
-                    if let (Some(gp_router), Some(plan)) =
-                        (state.gp_router.as_ref(), gp_plan.as_ref())
-                    {
-                        gp_router.record_attempt(
-                            plan,
-                            tier,
-                            attempt,
-                            Some(attempt_duration),
-                            config,
-                        );
-                    }
-                    let total_duration = start.elapsed().as_secs_f64();
-                    record_request_with_frontend(tier_name, frontend);
-                    record_request_duration_with_frontend(tier_name, total_duration, frontend);
-                    sync_ewma_gauge(&state.ewma_tracker);
-                    info!(
-                        "Success on {} after {:.2}s (attempt {:.3}s)",
-                        tier_name, total_duration, attempt_duration
-                    );
-
-                    // If client wanted streaming but we forced non-streaming for this provider,
-                    // wrap the JSON response as pseudo-SSE so Claude CLI can parse it.
-                    if client_wants_stream && forced_non_streaming {
-                        return streaming::wrap_json_response_as_sse(
-                            response,
-                            frontend == FrontendType::Codex,
-                        )
-                        .await;
-                    }
-
-                    return response;
-                }
-                Err(TryRequestError::RateLimited(retry_after)) => {
-                    // Dispatch records the 429 (tracker, hit and backoff
-                    // metrics) before returning this error; only the EWMA
-                    // bookkeeping and tier transition happen here.
-                    timer.finish_failure();
-                    #[cfg(feature = "gp")]
-                    if let (Some(gp_router), Some(plan)) =
-                        (state.gp_router.as_ref(), gp_plan.as_ref())
-                    {
-                        gp_router.record_attempt(plan, tier, attempt, None, config);
-                    }
-                    saw_rate_limit = true;
-                    last_rate_limited_tier = Some(tier_name.clone());
-                    retry_after_hint = match (retry_after_hint, retry_after) {
-                        (Some(current), Some(candidate)) => Some(current.max(candidate)),
-                        (None, some) => some,
-                        (some, None) => some,
-                    };
-                    sync_ewma_gauge(&state.ewma_tracker);
-                    warn!(
-                        "Rate limited on {} attempt {} (retry-after: {:?})",
-                        tier_name,
-                        attempt + 1,
-                        retry_after
-                    );
-                    record_failure(tier_name, "rate_limited");
-                    // Skip remaining retries for this tier - move to next
-                    break;
-                }
-                Err(TryRequestError::Rejected(code, e)) => {
-                    timer.finish_failure();
-                    #[cfg(feature = "gp")]
-                    if let (Some(gp_router), Some(plan)) =
-                        (state.gp_router.as_ref(), gp_plan.as_ref())
-                    {
-                        gp_router.record_attempt(plan, tier, attempt, None, config);
-                    }
-                    saw_non_rate_limit_failure = true;
-                    sync_ewma_gauge(&state.ewma_tracker);
-                    warn!("Failed {} attempt {}: {}", tier_name, attempt + 1, e);
-                    record_failure(tier_name, "provider_rejected");
-                    info!(
-                        tier = tier_name,
-                        code, "deterministic upstream rejection; not retrying this tier"
-                    );
-                    // Retrying cannot change a 401/402/403/404 outcome, and
-                    // the retry load can trip provider-wide rate limits that
-                    // block sibling models. Fail this tier immediately.
-                    break;
-                }
-                Err(TryRequestError::Other(e)) => {
-                    timer.finish_failure();
-                    #[cfg(feature = "gp")]
-                    if let (Some(gp_router), Some(plan)) =
-                        (state.gp_router.as_ref(), gp_plan.as_ref())
-                    {
-                        gp_router.record_attempt(plan, tier, attempt, None, config);
-                    }
-                    saw_non_rate_limit_failure = true;
-                    sync_ewma_gauge(&state.ewma_tracker);
-                    warn!("Failed {} attempt {}: {}", tier_name, attempt + 1, e);
-                    record_failure(tier_name, "request_failed");
-
-                    if attempt < max_retries {
-                        // Get current EWMA for this tier for dynamic backoff scaling
-                        let ewma = state.ewma_tracker.get_latency(tier_name).map(|(e, _)| e);
-                        let backoff = retry_config.backoff_duration_with_ewma(attempt, ewma);
+                    Err(TryRequestError::Rejected(code, e)) => {
+                        timer.finish_failure();
+                        #[cfg(feature = "gp")]
+                        if let (Some(gp_router), Some(plan)) =
+                            (state.gp_router.as_ref(), gp_plan.as_ref())
+                        {
+                            gp_router.record_attempt(plan, tier, attempt, None, config);
+                        }
+                        saw_non_rate_limit_failure = true;
+                        sync_ewma_gauge(&state.ewma_tracker);
+                        warn!("Failed {} attempt {}: {}", tier_name, attempt + 1, e);
+                        record_failure(tier_name, "provider_rejected");
                         info!(
                             tier = tier_name,
-                            attempt = attempt + 1,
-                            backoff_ms = backoff.as_millis(),
-                            ewma = ewma
-                                .map(|e| format!("{:.3}s", e))
-                                .unwrap_or_else(|| "N/A".to_string()),
-                            "sleeping before retry"
+                            code, "deterministic upstream rejection; not retrying this tier"
                         );
-                        tokio::time::sleep(backoff).await;
+                        // Retrying cannot change a 401/402/403/404 outcome, and
+                        // the retry load can trip provider-wide rate limits that
+                        // block sibling models. Fail this tier immediately.
+                        break;
+                    }
+                    Err(TryRequestError::Other(e)) => {
+                        timer.finish_failure();
+                        #[cfg(feature = "gp")]
+                        if let (Some(gp_router), Some(plan)) =
+                            (state.gp_router.as_ref(), gp_plan.as_ref())
+                        {
+                            gp_router.record_attempt(plan, tier, attempt, None, config);
+                        }
+                        saw_non_rate_limit_failure = true;
+                        saw_retryable_failure = true;
+                        sync_ewma_gauge(&state.ewma_tracker);
+                        warn!("Failed {} attempt {}: {}", tier_name, attempt + 1, e);
+                        record_failure(tier_name, "request_failed");
+
+                        if attempt < max_retries {
+                            // Get current EWMA for this tier for dynamic backoff scaling
+                            let ewma = state.ewma_tracker.get_latency(tier_name).map(|(e, _)| e);
+                            let backoff = retry_config.backoff_duration_with_ewma(attempt, ewma);
+                            info!(
+                                tier = tier_name,
+                                attempt = attempt + 1,
+                                backoff_ms = backoff.as_millis(),
+                                ewma = ewma
+                                    .map(|e| format!("{:.3}s", e))
+                                    .unwrap_or_else(|| "N/A".to_string()),
+                                "sleeping before retry"
+                            );
+                            tokio::time::sleep(backoff).await;
+                        }
                     }
                 }
             }
+        } // end of per-sweep tier loop
+
+        // The sweep exhausted without a success return. Decide whether to
+        // hold the request open and cascade again (retrySweeps) or fall
+        // through to the synthesized terminal response below.
+        if !sweeps.enabled || !(saw_rate_limit || saw_retryable_failure) {
+            // Either disabled, or every tier failed deterministically
+            // (401/402/403/404): another sweep cannot change that outcome.
+            break;
         }
+        if sweeps.max_sweeps > 0 && sweep >= sweeps.max_sweeps {
+            info!(sweep, "retrySweeps maxSweeps reached; surfacing failure");
+            break;
+        }
+        if hold_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            info!(
+                held_ms = start.elapsed().as_millis() as u64,
+                "retrySweeps maxHoldMs reached; surfacing failure"
+            );
+            break;
+        }
+        sweep += 1;
+
+        // Cooldown floor; stretched to the strongest Retry-After hint when
+        // rate limits dominate, capped at 60s to match the rate-limit
+        // tracker's backoff ceiling so a hostile hint cannot stall the
+        // sweep indefinitely.
+        let cooldown = std::time::Duration::from_millis(sweeps.sweep_cooldown_ms);
+        let cooldown = retry_after_hint
+            .map(|hint| cooldown.max(hint.min(std::time::Duration::from_secs(60))))
+            .unwrap_or(cooldown);
+        record_retry_sweep();
+        info!(
+            sweep,
+            cooldown_ms = cooldown.as_millis() as u64,
+            held_secs = start.elapsed().as_secs(),
+            "All tiers exhausted; holding request open and re-sweeping"
+        );
+        tokio::time::sleep(cooldown).await;
     }
 
     if saw_rate_limit && !saw_non_rate_limit_failure {
@@ -451,19 +547,20 @@ pub async fn handle_messages(
     }
 
     // All tiers exhausted due to non-rate-limit failures (5xx, timeouts, etc.).
-    let total_attempts: usize = ordered
-        .iter()
-        .map(|(_, tier_name)| config.get_tier_retry(tier_name).max_retries + 1)
-        .sum();
-    error!("All tiers exhausted after {} tier(s)", ordered.len());
+    error!(
+        tiers = ordered.len(),
+        sweeps = sweep + 1,
+        "All tiers exhausted"
+    );
 
     let error_resp = serde_json::json!({
         "error": {
             "type": "server_error",
             "message": format!(
-                "All {} backend tier(s) failed after {} total attempt(s)",
+                "All {} backend tier(s) failed after {} attempt(s) across {} sweep(s)",
                 ordered.len(),
-                total_attempts
+                total_attempts,
+                sweep + 1
             ),
             "code": "service_unavailable"
         }

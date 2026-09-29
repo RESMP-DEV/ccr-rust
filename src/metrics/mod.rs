@@ -133,6 +133,12 @@ lazy_static! {
     )
     .unwrap();
 
+    static ref RETRY_SWEEPS_TOTAL: Counter = register_counter!(
+        "ccr_retry_sweeps_total",
+        "Number of retry sweeps performed while holding exhausted requests open (retrySweeps)"
+    )
+    .unwrap();
+
     // Pre-request token audit: estimated input tokens before sending to backend
     static ref PRE_REQUEST_TOKENS: CounterVec = register_counter_vec!(
         "ccr_pre_request_tokens_total",
@@ -371,6 +377,12 @@ pub fn record_failure(tier: &str, reason: &str) {
         &[("tier", tier), ("reason", reason)],
         1.0,
     );
+}
+
+/// Count one retry sweep: a full tier cascade that exhausted while the
+/// request was held open under `retrySweeps` and is about to re-run.
+pub fn record_retry_sweep() {
+    RETRY_SWEEPS_TOTAL.inc();
 }
 
 pub fn increment_active_streams(delta: i64) {

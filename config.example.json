@@ -77,7 +77,14 @@
             "deepseek,deepseek-reasoner",
             "minimax,MiniMax-M2.7",
             "openrouter,inclusionai/ling-2.6-flash:free"
-        ]
+        ],
+        "retrySweeps": {
+            "_comment": "Hold exhausted requests open and re-cascade the tier list instead of surfacing 429/503 to the harness. enabled=false preserves fail-fast behavior.",
+            "enabled": false,
+            "maxSweeps": 0,
+            "sweepCooldownMs": 2000,
+            "maxHoldMs": 0
+        }
     },
     "Presets": {
         "coding": {
