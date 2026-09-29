@@ -2037,7 +2037,11 @@ mod agent_message_tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1]["role"], "assistant");
         let blocks = messages[1]["content"].as_array().expect("array content");
-        assert_eq!(blocks.len(), 3, "must keep image, first text, and appended text");
+        assert_eq!(
+            blocks.len(),
+            3,
+            "must keep image, first text, and appended text"
+        );
         assert_eq!(blocks[0], image_block);
         assert_eq!(blocks[1]["text"], "screenshot");
         assert_eq!(blocks[2]["text"], "follow-up");

@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed rate-limit backoff state to be keyed per `provider,model` route
+  instead of per provider, so 429 backoff incurred by one model can no longer
+  skip sibling models on the same provider account. Streaming successes reset
+  the same per-model key that 429s dirty. Prometheus hit and backoff counters
+  record the same 429 events under the full `provider,model` route key (the
+  metric label is still named `tier`).
+- Successes no longer clear a route's rate-limit backoff when a newer 429 was
+  recorded after the successful request began: each attempt snapshots the
+  route's 429 generation, and only a success from the current generation
+  clears backoff. Overlapping requests can no longer erase each other's
+  backoff windows.
+- Added fail-fast handling for deterministic upstream rejections (401, 402,
+  403, 404): the tier is failed after a single attempt instead of
+  sleep-retrying, because the outcome cannot change and the retry load can
+  trip provider-wide rate limits that block unrelated models (observed with an
+  OpenRouter free model hard-gated to agentic harnesses starving two viable
+  sibling models). Added integration coverage for fail-fast and per-model
+  isolation.
+- Fixed 429 events being recorded twice per event (the router loop re-recorded
+  what dispatch had already recorded), which doubled the consecutive-429
+  counter and escalated backoff twice as fast as configured.
 - Added client-facing metadata to `Router.modelAliases` and `GET /v1/models`.
   Alias values now accept an object form (`route` plus optional `display_name`
   and `description`) alongside the existing bare `"provider,model"` string,

@@ -161,3 +161,74 @@ fn test_remaining_nonzero_does_not_block_when_honored() {
         "remaining=5 must not block even with honor_remaining=true"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Overlapping-request ordering: a success must not clear a newer 429 backoff
+// ---------------------------------------------------------------------------
+
+/// A request that snapshotted the generation before another request's 429
+/// must not clear that newer backoff when it finishes cleanly.
+#[test]
+fn test_stale_generation_success_preserves_newer_backoff() {
+    let tracker = RateLimitTracker::new();
+    let tier = "route";
+
+    // Request A begins: snapshot the (empty) generation.
+    let gen_a = tracker.generation(tier);
+
+    // Request B gets rate-limited while A is in flight.
+    tracker.record_429(tier, Some(Duration::from_secs(30)));
+    assert!(tracker.has_backoff(tier));
+
+    // Request A finishes cleanly afterwards.
+    tracker.record_success_if_current(tier, gen_a, Some(5), None);
+
+    assert!(
+        tracker.has_backoff(tier),
+        "success from before the 429 must not clear the newer backoff"
+    );
+    assert!(
+        tracker.should_skip_tier(tier, true),
+        "route must still be skipped for the remainder of B's backoff window"
+    );
+}
+
+/// A success from the current generation still clears backoff normally.
+#[test]
+fn test_current_generation_success_clears_backoff() {
+    let tracker = RateLimitTracker::new();
+    let tier = "route";
+
+    tracker.record_429(tier, Some(Duration::from_secs(1)));
+    assert!(tracker.has_backoff(tier));
+
+    let gen_b = tracker.generation(tier);
+    tracker.record_success_if_current(tier, gen_b, Some(5), None);
+
+    assert!(
+        !tracker.has_backoff(tier),
+        "success from the current generation must clear the backoff"
+    );
+    assert!(
+        !tracker.should_skip_tier(tier, true),
+        "route must be dispatchable again after a current-generation success"
+    );
+}
+
+/// Header-derived quota info updates even when the backoff is preserved.
+#[test]
+fn test_stale_generation_success_still_updates_quota_headers() {
+    let tracker = RateLimitTracker::new();
+    let tier = "route";
+
+    let gen_a = tracker.generation(tier);
+    tracker.record_429(tier, Some(Duration::from_secs(30)));
+
+    let reset_at = Some(Instant::now() + Duration::from_secs(60));
+    tracker.record_success_if_current(tier, gen_a, Some(7), reset_at);
+
+    assert!(tracker.has_backoff(tier));
+    // The skip that follows comes from the preserved backoff window, not
+    // from quota exhaustion: remaining=7 alone would never block.
+    assert!(tracker.should_skip_tier(tier, true));
+}

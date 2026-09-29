@@ -87,6 +87,7 @@ pub async fn stream_response_translated(
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_token_time: Option<std::time::Instant> = None;
         let mut ended_with_timeout = false;
+        let mut upstream_completed_cleanly = true;
 
         loop {
             tokio::select! {
@@ -156,6 +157,7 @@ pub async fn stream_response_translated(
                                             record_stream_backpressure();
                                         }
                                         if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                            upstream_completed_cleanly = false;
                                             break;
                                         }
                                         forwarded = true;
@@ -198,6 +200,7 @@ pub async fn stream_response_translated(
                                     // Pass through frames that don't parse as OpenAI chunks.
                                     let sse_data = frame.to_sse_string();
                                     if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                        upstream_completed_cleanly = false;
                                         break;
                                     }
                                     forwarded = true;
@@ -211,12 +214,14 @@ pub async fn stream_response_translated(
                             let _ = tx
                                 .send(Err(std::io::Error::other(e.to_string())))
                                 .await;
+                            upstream_completed_cleanly = false;
                             break;
                         }
                     }
                 }
                 _ = tx.closed() => {
                     tracing::debug!("Client disconnected, aborting upstream");
+                    upstream_completed_cleanly = false;
                     break;
                 }
             }
@@ -349,12 +354,25 @@ pub async fn stream_response_translated(
                 }
             }
 
-            // Clear rate limit backoff and update rate limit state on successful stream completion
-            if let Some(ref tracker) = ctx.ratelimit_tracker {
-                if let Some((remaining, reset_at)) = &ctx.rate_limit_info {
-                    tracker.record_success(&ctx.tier_name, *remaining, *reset_at);
-                } else {
-                    tracker.record_success(&ctx.tier_name, None, None);
+            // Clear rate limit backoff and update rate limit state on successful stream completion.
+            // A mid-stream upstream error or client disconnect is not a success signal for the route.
+            if upstream_completed_cleanly {
+                if let Some(ref tracker) = ctx.ratelimit_tracker {
+                    if let Some((remaining, reset_at)) = &ctx.rate_limit_info {
+                        tracker.record_success_if_current(
+                            &ctx.ratelimit_key,
+                            ctx.ratelimit_generation,
+                            *remaining,
+                            *reset_at,
+                        );
+                    } else {
+                        tracker.record_success_if_current(
+                            &ctx.ratelimit_key,
+                            ctx.ratelimit_generation,
+                            None,
+                            None,
+                        );
+                    }
                 }
             }
         }
@@ -405,6 +423,7 @@ pub async fn stream_anthropic_response_with_tracking(
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_token_time: Option<std::time::Instant> = None;
         let mut ended_with_timeout = false;
+        let mut upstream_completed_cleanly = true;
 
         loop {
             tokio::select! {
@@ -518,6 +537,7 @@ pub async fn stream_anthropic_response_with_tracking(
                                     record_stream_backpressure();
                                 }
                                 if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                                    upstream_completed_cleanly = false;
                                     break;
                                 }
                                 forwarded = true;
@@ -528,12 +548,14 @@ pub async fn stream_anthropic_response_with_tracking(
                         }
                         Err(e) => {
                             let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                            upstream_completed_cleanly = false;
                             break;
                         }
                     }
                 }
                 _ = tx.closed() => {
                     tracing::debug!("Client disconnected, aborting Anthropic upstream");
+                    upstream_completed_cleanly = false;
                     break;
                 }
             }
@@ -616,12 +638,25 @@ pub async fn stream_anthropic_response_with_tracking(
             }
         }
 
-        // Update rate limit state
-        if let Some(ref tracker) = verify_ctx.ratelimit_tracker {
-            if let Some((remaining, reset_at)) = &verify_ctx.rate_limit_info {
-                tracker.record_success(&tier_name, *remaining, *reset_at);
-            } else {
-                tracker.record_success(&tier_name, None, None);
+        // Update rate limit state; a mid-stream upstream error or client
+        // disconnect is not a success signal for the route.
+        if upstream_completed_cleanly {
+            if let Some(ref tracker) = verify_ctx.ratelimit_tracker {
+                if let Some((remaining, reset_at)) = &verify_ctx.rate_limit_info {
+                    tracker.record_success_if_current(
+                        &verify_ctx.ratelimit_key,
+                        verify_ctx.ratelimit_generation,
+                        *remaining,
+                        *reset_at,
+                    );
+                } else {
+                    tracker.record_success_if_current(
+                        &verify_ctx.ratelimit_key,
+                        verify_ctx.ratelimit_generation,
+                        None,
+                        None,
+                    );
+                }
             }
         }
 

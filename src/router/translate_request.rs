@@ -65,8 +65,7 @@ pub(super) fn normalize_message_content(content: &serde_json::Value) -> serde_js
                             .get("image_url")
                             .and_then(serde_json::Value::as_str)
                         {
-                            normalized["image_url"] =
-                                serde_json::json!({ "url": url });
+                            normalized["image_url"] = serde_json::json!({ "url": url });
                         }
                         openai_blocks.push(normalized);
                     }
@@ -150,11 +149,7 @@ pub(super) fn openai_image_block_to_anthropic(
                 // Anthropic accepts only bare image media types; strip data
                 // URL parameters (e.g. `image/png;charset=utf-8`) and
                 // normalize the common `image/jpg` alias.
-                let bare_media_type = raw_media_type
-                    .split(';')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
+                let bare_media_type = raw_media_type.split(';').next().unwrap_or("").trim();
                 let media_type = match bare_media_type {
                     "" => "image/jpeg",
                     "image/jpg" => "image/jpeg",
@@ -521,9 +516,6 @@ mod string_image_url_tests {
         let converted = normalize_message_content(&content);
         let blocks = converted.as_array().unwrap();
         assert_eq!(blocks[1]["type"], "image_url");
-        assert_eq!(
-            blocks[1]["image_url"]["url"],
-            "data:image/png;base64,AAAA"
-        );
+        assert_eq!(blocks[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 }
