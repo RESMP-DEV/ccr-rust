@@ -586,6 +586,15 @@ pub struct RouterConfig {
     #[serde(default)]
     pub tiers: Option<Vec<String>>,
 
+    /// Use the tier list as a strict preference chain: tiers are attempted in
+    /// configured order and a tier only serves when every earlier tier fails,
+    /// instead of EWMA latency-weighted reordering (which load-balances by
+    /// measured latency and shuffles equal or unmeasured tiers). Direct-route
+    /// requests still pin their tier to the front. Default: false.
+    #[serde(default)]
+    #[serde(rename = "strictTierOrder")]
+    pub strict_tier_order: bool,
+
     #[serde(default)]
     #[serde(rename = "webSearch")]
     pub web_search: WebSearchConfig,

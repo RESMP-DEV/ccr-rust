@@ -139,7 +139,20 @@ pub async fn handle_messages(
     // Remember original stream flag; per-provider override is applied inside the tier loop
     let client_wants_stream = request.stream.unwrap_or(false);
 
-    let mut ordered = state.ewma_tracker.sort_tiers_with_config(&tiers, config);
+    // strictTierOrder keeps the configured tier list as a strict preference
+    // chain (first tier serves unless it fails, then the next in order)
+    // instead of EWMA-weighted reordering, which redistributes traffic by
+    // measured latency and shuffles equal/unmeasured tiers — fine for
+    // load-balanced peers, wrong for a deliberate quality-ordered fallback
+    // chain where a faster cheap model must not preempt a preferred one.
+    let mut ordered = if config.router().strict_tier_order {
+        tiers
+            .iter()
+            .map(|t| (t.clone(), config.backend_abbreviation_with_config(t)))
+            .collect()
+    } else {
+        state.ewma_tracker.sort_tiers_with_config(&tiers, config)
+    };
     let mut pinned_prefix_len = 0_usize;
 
     // Check if the requested model explicitly targets a specific provider (e.g., "deepseek,deepseek-chat")

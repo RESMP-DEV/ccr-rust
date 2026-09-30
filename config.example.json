@@ -78,6 +78,8 @@
             "minimax,MiniMax-M2.7",
             "openrouter,inclusionai/ling-2.6-flash:free"
         ],
+        "_comment_strictTierOrder": "true = tiers are a strict preference chain: tier 0 serves unless it fails, then tier 1, and so on. false (default) = tiers are latency-load-balanced (EWMA-weighted, shuffled while unmeasured), which can send traffic to later tiers while earlier ones are healthy.",
+        "strictTierOrder": false,
         "retrySweeps": {
             "_comment": "Hold exhausted requests open and re-cascade the tier list instead of surfacing 429/503 to the harness. enabled=false preserves fail-fast behavior.",
             "enabled": false,

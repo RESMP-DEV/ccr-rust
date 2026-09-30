@@ -48,6 +48,8 @@
             "minimax,MiniMax-M3",
             "deepseek,deepseek-chat"
         ],
+        "_comment_strictTierOrder": "Strict preference chain: GLM 5.3 serves unless it fails, then MiniMax, then DeepSeek. Without this, tiers are latency-load-balanced.",
+        "strictTierOrder": true,
         "tierRetries": {
             "zai": {
                 "max_retries": 3,
