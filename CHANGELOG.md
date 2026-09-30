@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added an optional shared fallback-policy helper for multiple local listeners.
+  One policy derives registered configurations while retaining their primary
+  routes, protocol settings and retry hold limits. Service launchers and worker
+  validation can import the same loader; file synchronization requires an idle
+  listener restart before it is live. Local runtime checks cover successive
+  Responses-to-Anthropic fallback and all-tier rate-limit backoff.
 - Added `Router.strictTierOrder` (default `false`): when true, the tier list
   is a strict preference chain — tiers are attempted in configured order and
   a later tier only serves when every earlier tier fails — instead of the
