@@ -43,7 +43,6 @@
   ],
   "Router": {
     "default": "zai,glm-5.3",
-    "background": "nvidia,deepseek-ai/deepseek-v4.1-flash",
     "tiers": [
       "zai,glm-5.3",
       "minimax,MiniMax-M3",
