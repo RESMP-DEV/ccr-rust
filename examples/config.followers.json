@@ -7,8 +7,7 @@
     "  MINIMAX_API_KEY  - MiniMax Token Plan key (platform.minimax.io, overseas region)",
     "  NVIDIA_API_KEY   - build.nvidia.com free trial key (optional overflow tier; trial/eval ToS, 40 RPM)",
     "Sane defaults are preloaded: retry sweeps are ON with an 8-minute hold cap, kept below the 10-minute request timeout Claude Code and the Anthropic SDK use by default.",
-    "Set maxHoldMs to 0 (unlimited) only if your client timeout is larger than you",
-    "ever want to wait on a held request. Validate with: ccr-rust --config <this file> validate"
+    "Set maxHoldMs to 0 (unlimited) only if your client's own timeout is longer than the longest hold you are willing to accept; with no cap, sweeps continue until the client gives up. Validate with: ccr-rust --config <this file> validate"
   ],
   "HOST": "127.0.0.1",
   "PORT": 3456,
