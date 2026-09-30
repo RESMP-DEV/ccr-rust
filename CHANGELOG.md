@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Validation: a unit test now walks `examples/*.json`, sets placeholder
+  values for every `${VAR}` reference, and loads each file through the real
+  `Config::from_file` path (env expansion, credential gate, provider
+  contracts, model aliases, retry sweeps), so shipped example templates can
+  no longer rot silently after field renames or loader changes.
 - Added `examples/config.followers.json`: a follower-oriented multi-provider
   template (GLM coding plan primary tier, MiniMax Token Plan secondary,
   NVIDIA NIM free overflow tier, retry sweeps enabled with a bounded
