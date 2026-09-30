@@ -13,6 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added an optional shared fallback-policy helper for multiple local listeners.
+  One policy derives registered configurations while retaining their primary
+  routes, protocol settings and retry hold limits. Service launchers and worker
+  validation can import the same loader; file synchronization requires an idle
+  listener restart before it is live. Local runtime checks cover successive
+  Responses-to-Anthropic fallback and all-tier rate-limit backoff. Review fixes:
+  consumer JSON files keep their original file mode across syncs and first
+  writes use the umask default, symlinked consumers are written through rather
+  than detached, the rename is followed by a parent-directory fsync, stale
+  staging files from interrupted syncs are reported (scoped to registered
+  consumer prefixes) instead of deleted so `check` stays read-only, reserved
+  policy and credential filenames are rejected as consumer names, provider
+  `models` must be a list for route validation, reads and writes pin UTF-8,
+  `serve` resolves the binary via `CCR_TEST_BINARY`/`CARGO_HOME`/PATH, reads
+  the consumer file once, preflights the credentials file before rewriting
+  anything, and injects runtime credentials only for registered consumers, and
+  `restart_required` is documented as empty under `check` because no files were
+  rewritten.
 - Added `Router.strictTierOrder` (default `false`): when true, the tier list
   is a strict preference chain — tiers are attempted in configured order and
   a later tier only serves when every earlier tier fails — instead of the
