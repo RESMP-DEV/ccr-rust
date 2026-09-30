@@ -109,6 +109,7 @@ class PolicyTests(unittest.TestCase):
         policy.atomic_json(
             path, {"LAST_KEY": "private-example", "UNRELATED_SECRET": "unused"}
         )
+        path.chmod(0o600)
         config = policy.derive(self.config, self.policy, "worker.json")
         env = policy.credential_environment(config, path)
         self.assertEqual(env["LAST_KEY"], "private-example")
@@ -147,11 +148,47 @@ class PolicyTests(unittest.TestCase):
         policy.atomic_json(target, self.config)
         self.assertEqual(target.stat().st_mode & 0o777, 0o640)
 
-    def test_prepare_sweeps_stale_staging_files(self) -> None:
+    def test_atomic_json_first_write_mode_and_symlink_passthrough(self) -> None:
+        mask = os.umask(0)
+        os.umask(mask)
+        managed = self.root / "managed"
+        managed.mkdir()
+        target = managed / "linked.json"
+        link = self.root / "linked.json"
+        link.symlink_to(target)
+        policy.atomic_json(link, self.config)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.stat().st_mode & 0o777, 0o666 & ~mask)
+        self.assertEqual(policy.read_json(target)["PORT"], 1234)
+
+    def test_prepare_reports_stale_staging_without_deleting(self) -> None:
         stale = self.root / ".worker.json.orphaned"
         stale.write_text("{}", encoding="utf-8")
-        policy.prepare(self.root)
-        self.assertFalse(stale.exists())
+        unrelated = self.root / ".unrelated.json.bak"
+        unrelated.write_text("{}", encoding="utf-8")
+        _, _, reported = policy.prepare(self.root)
+        self.assertEqual(reported, [str(stale)])
+        self.assertTrue(stale.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertEqual(
+            policy.sync(self.root, check=True)["stale_staging"], [str(stale)]
+        )
+
+    def test_installed_binary_resolution(self) -> None:
+        fake = self.root / "tool"
+        fake.write_text("#!/bin/sh\n", encoding="utf-8")
+        fake.chmod(0o755)
+        with unittest.mock.patch.dict(os.environ, {"CCR_TEST_BINARY": str(fake)}):
+            self.assertEqual(policy.installed_binary(), fake)
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "CCR_TEST_BINARY": str(self.root / "missing"),
+                "CARGO_HOME": str(self.root / "empty-cargo"),
+                "PATH": "",
+            },
+        ):
+            self.assertIsNone(policy.installed_binary())
 
     def test_serve_preflight_and_credential_scoping(self) -> None:
         fake = self.root / "fake-ccr-rust"
@@ -177,12 +214,19 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(execve[1][2]["LAST_KEY"], "private-example")
             self.assertNotEqual((self.root / "worker.json").read_bytes(), before)
         with (
-            unittest.mock.patch.object(
-                policy, "installed_binary", lambda: self.root / "missing-binary"
-            ),
+            unittest.mock.patch.object(policy, "installed_binary", lambda: None),
             self.assertRaises(FileNotFoundError),
         ):
             policy.serve(self.root / "worker.json", ["start"], root=self.root)
+        credentials.unlink()
+        policy.atomic_json(self.root / "worker.json", self.config)
+        before = (self.root / "worker.json").read_bytes()
+        with (
+            unittest.mock.patch.object(policy, "installed_binary", lambda: fake),
+            self.assertRaises(FileNotFoundError),
+        ):
+            policy.serve(self.root / "worker.json", ["start"], root=self.root)
+        self.assertEqual((self.root / "worker.json").read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -111,40 +112,62 @@ def derive(
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
     """Replace one complete configuration; never leave a partially written file."""
+    # realpath keeps a dotfile-managed symlink a symlink: replacing the link
+    # itself would silently detach the operator's source of truth.
+    path = Path(os.path.realpath(path))
     # mkstemp stages at mode 0600 and os.replace keeps the staging mode, so
-    # restore the destination's own mode or every sync narrows 0640 to 0600.
-    mode = path.stat().st_mode & 0o777 if path.exists() else None
+    # restore the destination's own mode; a first write uses the umask default
+    # a plain file creation would get, because a fixed 0600 config is unreadable
+    # for the service user in deploy/ccr-rust.service.
+    mask = os.umask(0)
+    os.umask(mask)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o666 & ~mask
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        if mode is not None:
-            os.fchmod(fd, mode)
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             json.dump(value, output, indent=2)
             output.write("\n")
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
+        # The rename itself is not durable until the directory entry is synced.
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
 
 def prepare(
     root: Path = ROOT,
-) -> tuple[dict[str, Any], dict[str, tuple[dict[str, Any], dict[str, Any]]]]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, tuple[dict[str, Any], dict[str, Any]]],
+    list[str],
+]:
     policy = load_policy(root)
-    # A crash between fsync and replace strands a dot-prefixed staging file; the
-    # finally clause cannot run after SIGKILL, so reap leftovers before writing.
-    for stale in root.glob(".*.json.*"):
-        stale.unlink()
+    # A crash between fsync and replace strands a dot-prefixed staging file.
+    # A matching name proves nothing about ownership: an operator backup or a
+    # concurrent writer's in-flight staging file can match the same pattern, and
+    # check is documented read-only. So stale files are reported, never deleted.
+    stale = sorted(
+        str(candidate)
+        for name in policy["consumers"]
+        for candidate in root.glob(f".{name}.*")
+        if candidate.is_file()
+    )
     snapshots: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     for name in policy["consumers"]:
         on_disk = read_json(root / name)
         snapshots[name] = (on_disk, derive(on_disk, policy, name))
-    return policy, snapshots
+    return policy, snapshots, stale
 
 
 def sync(root: Path = ROOT, check: bool = False) -> dict[str, Any]:
-    policy, snapshots = prepare(root)
+    policy, snapshots, stale = prepare(root)
     changed = [
         name for name, (on_disk, derived) in snapshots.items() if on_disk != derived
     ]
@@ -162,6 +185,7 @@ def sync(root: Path = ROOT, check: bool = False) -> dict[str, Any]:
         # Only a run that actually rewrote files requires restarts; under check
         # the drift is reported in changed and nothing was applied.
         "restart_required": [] if check else changed,
+        "stale_staging": stale,
         "runtime_activation": "not_checked",
     }
 
@@ -179,30 +203,50 @@ def credential_environment(config: dict[str, Any], path: Path) -> dict[str, str]
     return env
 
 
-def installed_binary() -> Path:
-    return Path.home() / ".cargo/bin/ccr-rust"
+def installed_binary() -> Path | None:
+    """Resolve the binary from the runtime-test override, cargo, or PATH."""
+    candidates = [
+        Path(value) for value in (os.environ.get("CCR_TEST_BINARY"),) if value
+    ]
+    candidates.append(
+        Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo")
+        / "bin"
+        / "ccr-rust"
+    )
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    found = shutil.which("ccr-rust")
+    return Path(found) if found else None
 
 
 def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
-    # Preflight before any side effect: a missing binary must not leave the
-    # consumer config rewritten or credentials read for a failed launch.
+    # Preflight before any side effect: a missing binary or credential file must
+    # not leave the consumer config rewritten or credentials read for a failed
+    # launch.
     binary = installed_binary()
-    if not binary.is_file() or not os.access(binary, os.X_OK):
+    if binary is None:
         raise FileNotFoundError(
-            f"ccr-rust binary not found or not executable: {binary}"
+            "ccr-rust not found; set CCR_TEST_BINARY or CARGO_HOME, install with"
+            " cargo install --path . --force, or put ccr-rust on PATH"
         )
     policy = load_policy(root)
-    config = read_json(config_path)
+    on_disk = read_json(config_path)
     if (
         config_path.parent.resolve() == root.resolve()
         and config_path.name in policy["consumers"]
     ):
-        config = derive(config, policy, config_path.name)
-        if config != read_json(config_path):
+        credentials = root / "runtime-credentials.json"
+        if not credentials.is_file():
+            raise FileNotFoundError(f"Runtime credentials not found: {credentials}")
+        if credentials.stat().st_mode & 0o077:
+            raise ValueError("Runtime credentials must be private (mode 0600)")
+        config = derive(on_disk, policy, config_path.name)
+        if config != on_disk:
             atomic_json(config_path, config)
         # Credential injection stays scoped to registered consumers so an
         # arbitrary --config cannot pull runtime credentials into its environment.
-        env = credential_environment(config, root / "runtime-credentials.json")
+        env = credential_environment(config, credentials)
     else:
         env = os.environ.copy()
     os.execve(str(binary), [str(binary), "--config", str(config_path), *arguments], env)
@@ -229,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"{'Drifted' if args.command == 'check' else 'Updated'}: {len(result['changed'])}"
         )
+        for stale in result["stale_staging"]:
+            print(f"Stale staging file (delete manually): {stale}")
     return int(args.command == "check" and bool(result["changed"]))
 
 

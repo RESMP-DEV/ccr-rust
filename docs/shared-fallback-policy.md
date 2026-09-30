@@ -65,10 +65,14 @@ uv run --no-project python scripts/ccr_fallback_policy.py sync --json
 
 Use `--root /path/to/suite` for another configuration directory. `check` exits
 0 for matching files, 1 for drift and 2 for invalid policy or an I/O error.
-`sync` validates all registered consumers before writing and replaces each
-changed file atomically. Updates across multiple files are not a transaction;
-if an I/O failure interrupts a sync, run `check` and sync again before restart.
-The reported hash identifies the policy, not the state of a running listener.
+`check` never modifies anything. `sync` validates all registered consumers
+before writing and replaces each changed file atomically, preserving its file
+mode and writing through symlinked consumers. Updates across multiple files are
+not a transaction; if an I/O failure interrupts a sync, run `check` and sync
+again before restart. An interrupted run can strand a dot-prefixed staging file;
+both commands report leftover staging files beside registered consumers and
+never delete anything, so remove reported leftovers manually. The reported hash
+identifies the policy, not the state of a running listener.
 
 Back up existing configurations before the first sync. Keep credential values
 in private runtime storage, never in the policy. Shared providers require an
@@ -88,7 +92,10 @@ serve(ROOT / "glm-workers.json", ["start", "--host", "127.0.0.1", "--port", "345
 
 `serve` derives that registered consumer at startup, reads its referenced
 variables from `runtime-credentials.json` in the policy directory, then executes
-`~/.cargo/bin/ccr-rust`. The credential file must be private (mode 0600).
+the installed `ccr-rust`, resolved from `CCR_TEST_BINARY`, `CARGO_HOME` or
+`PATH`; the binary and the credentials file are both checked before the
+consumer configuration is rewritten. The credential file must be private
+(mode 0600).
 Explicit inherited environment variables can supply references absent from the
 file. Credentials are injected only for registered consumers; launching an
 arbitrary configuration outside the policy directory runs with the inherited
