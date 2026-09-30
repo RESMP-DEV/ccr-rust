@@ -26,12 +26,16 @@ ccr-rust start &
 ./examples/smoke-test.sh
 
 # 3. Or the recommended multi-provider setup: GLM plan + MiniMax + free NIM overflow,
-#    with retry sweeps holding exhausted requests instead of failing them
+#    with retry sweeps holding exhausted requests instead of failing them.
+#    Stop the step-1 router first — every example binds the same 127.0.0.1:3456:
+kill %1 2>/dev/null || pkill -f 'ccr-rust start' || true
 export ZAI_API_KEY="..." MINIMAX_API_KEY="..." NVIDIA_API_KEY="..."
 ccr-rust --config examples/config.followers.json validate
 ccr-rust --config examples/config.followers.json start
 
 # 4. Or run the multi-tier config without touching your default one
+#    (stop the followers router first — same shared port)
+kill %1 2>/dev/null || pkill -f 'ccr-rust start' || true
 export ZAI_API_KEY="..." MINIMAX_API_KEY="..." DEEPSEEK_API_KEY="..."
 ccr-rust --config examples/config.multitier.json validate
 ccr-rust --config examples/config.multitier.json start
