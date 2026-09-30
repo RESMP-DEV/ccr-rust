@@ -72,6 +72,13 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             policy.sync(self.root)
         self.assertEqual((self.root / "worker.json").read_bytes(), before)
+        for override in ({"sweepCooldownMs": 0}, {"maxHoldMs": -1}, {"enabled": "yes"}):
+            incompatible = copy.deepcopy(self.config)
+            incompatible["Router"]["retrySweeps"].update(override)
+            policy.atomic_json(self.root / "interactive.json", incompatible)
+            with self.assertRaises(ValueError):
+                policy.sync(self.root)
+            self.assertEqual((self.root / "worker.json").read_bytes(), before)
         policy.atomic_json(self.root / "interactive.json", self.config)
         self.policy["consumers"]["interactive.json"]["primary"] = "missing,model"
         self.write_policy()

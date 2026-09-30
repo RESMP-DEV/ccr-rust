@@ -97,8 +97,15 @@ def derive(
     router.update(
         default=primary, tiers=tiers, strictTierOrder=True, ignoreDirect=False
     )
-    if not router.get("retrySweeps", {}).get("enabled"):
+    sweeps = router.get("retrySweeps")
+    if not isinstance(sweeps, dict) or sweeps.get("enabled") is not True:
         raise ValueError(f"Consumer {consumer} must enable native retry sweeps")
+    for name in ("sweepCooldownMs", "maxSweeps", "maxHoldMs"):
+        if name in sweeps:
+            value = sweeps[name]
+            minimum = 1 if name == "sweepCooldownMs" else 0
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"Consumer {consumer} has invalid retrySweeps.{name}")
     return result
 
 
