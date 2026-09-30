@@ -90,7 +90,10 @@ serve(ROOT / "glm-workers.json", ["start", "--host", "127.0.0.1", "--port", "345
 variables from `runtime-credentials.json` in the policy directory, then executes
 `~/.cargo/bin/ccr-rust`. The credential file must be private (mode 0600).
 Explicit inherited environment variables can supply references absent from the
-file. Other client settings and filesystem/network permissions are unchanged.
+file. Credentials are injected only for registered consumers; launching an
+arbitrary configuration outside the policy directory runs with the inherited
+environment alone. Other client settings and filesystem/network permissions are
+unchanged.
 Worker launchers can use `load_policy` and `derive` to validate approved routes
 instead of maintaining their own allowed-model list. A requested model in a
 worker receipt is not proof of the upstream used; inspect actual router logs or
@@ -98,7 +101,9 @@ per-tier counters.
 
 Sync edits files only. CCR loads configuration at startup, so inspect
 `ccr_active_requests` and coordinate an idle restart for each affected listener.
-Do not interrupt active work to make an updated file appear live.
+Do not interrupt active work to make an updated file appear live. The result's
+`restart_required` lists consumers this run actually rewrote; it is empty under
+`check`, where the drift appears in `changed` and no file was touched.
 
 ## Verification
 

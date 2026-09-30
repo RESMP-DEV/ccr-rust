@@ -17,7 +17,7 @@ ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text())
+    value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise TypeError(f"Expected an object: {path.name}")
     return value
@@ -38,9 +38,12 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
     consumers = policy.get("consumers")
     if not isinstance(consumers, dict) or not consumers:
         raise ValueError("Policy requires registered consumers")
+    reserved = {"fallback-policy.json", "runtime-credentials.json"}
     for name, settings in consumers.items():
-        if Path(name).name != name or not name.endswith(".json"):
-            raise ValueError("Consumer names must be JSON basenames")
+        if Path(name).name != name or not name.endswith(".json") or name in reserved:
+            raise ValueError(
+                "Consumer names must be JSON basenames that do not collide with policy files"
+            )
         if not isinstance(settings, dict) or not isinstance(
             settings.get("primary"), str
         ):
@@ -82,11 +85,8 @@ def derive(
         providers[provider["name"]] = copy.deepcopy(provider)
     for route in tiers:
         parts = route.split(",", 1)
-        if (
-            len(parts) != 2
-            or parts[0] not in providers
-            or parts[1] not in providers[parts[0]].get("models", [])
-        ):
+        models = providers.get(parts[0], {}).get("models") if len(parts) == 2 else None
+        if len(parts) != 2 or not isinstance(models, list) or parts[1] not in models:
             raise ValueError(f"Consumer {consumer} has an unavailable route: {route}")
     result["Providers"] = list(providers.values())
     router = result["Router"]
@@ -111,9 +111,14 @@ def derive(
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
     """Replace one complete configuration; never leave a partially written file."""
+    # mkstemp stages at mode 0600 and os.replace keeps the staging mode, so
+    # restore the destination's own mode or every sync narrows 0640 to 0600.
+    mode = path.stat().st_mode & 0o777 if path.exists() else None
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        with os.fdopen(fd, "w") as output:
+        if mode is not None:
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
             json.dump(value, output, indent=2)
             output.write("\n")
             output.flush()
@@ -123,33 +128,40 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
-def prepare(root: Path = ROOT) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+def prepare(
+    root: Path = ROOT,
+) -> tuple[dict[str, Any], dict[str, tuple[dict[str, Any], dict[str, Any]]]]:
     policy = load_policy(root)
-    # Validate every consumer before writing any file.
-    configs = {
-        name: derive(read_json(root / name), policy, name)
-        for name in policy["consumers"]
-    }
-    return policy, configs
+    # A crash between fsync and replace strands a dot-prefixed staging file; the
+    # finally clause cannot run after SIGKILL, so reap leftovers before writing.
+    for stale in root.glob(".*.json.*"):
+        stale.unlink()
+    snapshots: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for name in policy["consumers"]:
+        on_disk = read_json(root / name)
+        snapshots[name] = (on_disk, derive(on_disk, policy, name))
+    return policy, snapshots
 
 
 def sync(root: Path = ROOT, check: bool = False) -> dict[str, Any]:
-    policy, configs = prepare(root)
+    policy, snapshots = prepare(root)
     changed = [
-        name for name, config in configs.items() if read_json(root / name) != config
+        name for name, (on_disk, derived) in snapshots.items() if on_disk != derived
     ]
     if not check:
         for name in changed:
-            atomic_json(root / name, configs[name])
+            atomic_json(root / name, snapshots[name][1])
     return {
         "policy_sha256": hashlib.sha256(
             json.dumps(policy, sort_keys=True).encode()
         ).hexdigest(),
         "changed": changed,
         "consumers": {
-            name: config["Router"]["tiers"] for name, config in configs.items()
+            name: derived["Router"]["tiers"] for name, (_, derived) in snapshots.items()
         },
-        "restart_required": changed if not check else [],
+        # Only a run that actually rewrote files requires restarts; under check
+        # the drift is reported in changed and nothing was applied.
+        "restart_required": [] if check else changed,
         "runtime_activation": "not_checked",
     }
 
@@ -167,7 +179,18 @@ def credential_environment(config: dict[str, Any], path: Path) -> dict[str, str]
     return env
 
 
+def installed_binary() -> Path:
+    return Path.home() / ".cargo/bin/ccr-rust"
+
+
 def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
+    # Preflight before any side effect: a missing binary must not leave the
+    # consumer config rewritten or credentials read for a failed launch.
+    binary = installed_binary()
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise FileNotFoundError(
+            f"ccr-rust binary not found or not executable: {binary}"
+        )
     policy = load_policy(root)
     config = read_json(config_path)
     if (
@@ -177,9 +200,12 @@ def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
         config = derive(config, policy, config_path.name)
         if config != read_json(config_path):
             atomic_json(config_path, config)
-    env = credential_environment(config, root / "runtime-credentials.json")
-    binary = str(Path.home() / ".cargo/bin/ccr-rust")
-    os.execve(binary, [binary, "--config", str(config_path), *arguments], env)
+        # Credential injection stays scoped to registered consumers so an
+        # arbitrary --config cannot pull runtime credentials into its environment.
+        env = credential_environment(config, root / "runtime-credentials.json")
+    else:
+        env = os.environ.copy()
+    os.execve(str(binary), [str(binary), "--config", str(config_path), *arguments], env)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -18,7 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routes, protocol settings and retry hold limits. Service launchers and worker
   validation can import the same loader; file synchronization requires an idle
   listener restart before it is live. Local runtime checks cover successive
-  Responses-to-Anthropic fallback and all-tier rate-limit backoff.
+  Responses-to-Anthropic fallback and all-tier rate-limit backoff. Review fixes:
+  consumer JSON files keep their original file mode across syncs, stale staging
+  files from interrupted syncs are swept on the next run, reserved policy and
+  credential filenames are rejected as consumer names, provider `models` must be
+  a list for route validation, reads and writes pin UTF-8, `serve` resolves the
+  binary before any side effect and injects runtime credentials only for
+  registered consumers, and `restart_required` is documented as empty under
+  `check` because no files were rewritten.
 - Added `Router.strictTierOrder` (default `false`): when true, the tier list
   is a strict preference chain — tiers are attempted in configured order and
   a later tier only serves when every earlier tier fails — instead of the

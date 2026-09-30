@@ -1,6 +1,8 @@
 import copy
+import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import Any
 
@@ -121,10 +123,66 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             policy.load_policy(self.root)
         self.policy["consumers"].pop("../escape.json")
+        for reserved in ("fallback-policy.json", "runtime-credentials.json"):
+            self.policy["consumers"][reserved] = {"primary": "fast,x"}
+            self.write_policy()
+            with self.assertRaises(ValueError):
+                policy.load_policy(self.root)
+            self.policy["consumers"].pop(reserved)
         self.policy["routes"].append("last,k")
         self.write_policy()
         with self.assertRaises(ValueError):
             policy.load_policy(self.root)
+
+    def test_non_list_provider_models_rejected(self) -> None:
+        for broken in ("x y", {"x": 1}):
+            config = copy.deepcopy(self.config)
+            config["Providers"][0]["models"] = broken
+            with self.assertRaises(ValueError):
+                policy.derive(config, self.policy, "worker.json")
+
+    def test_atomic_json_preserves_mode(self) -> None:
+        target = self.root / "worker.json"
+        target.chmod(0o640)
+        policy.atomic_json(target, self.config)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+
+    def test_prepare_sweeps_stale_staging_files(self) -> None:
+        stale = self.root / ".worker.json.orphaned"
+        stale.write_text("{}", encoding="utf-8")
+        policy.prepare(self.root)
+        self.assertFalse(stale.exists())
+
+    def test_serve_preflight_and_credential_scoping(self) -> None:
+        fake = self.root / "fake-ccr-rust"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        credentials = self.root / "runtime-credentials.json"
+        policy.atomic_json(credentials, {"LAST_KEY": "private-example"})
+        credentials.chmod(0o600)
+        other = self.root / "unregistered.json"
+        policy.atomic_json(other, self.config)
+        execve = []
+        with (
+            unittest.mock.patch.dict(os.environ, {"LAST_KEY": "inherited"}),
+            unittest.mock.patch.object(policy, "installed_binary", lambda: fake),
+            unittest.mock.patch(
+                "os.execve", side_effect=lambda *args: execve.append(args)
+            ),
+        ):
+            policy.serve(other, ["start"], root=self.root)
+            self.assertNotIn("private-example", execve[0][2].values())
+            before = (self.root / "worker.json").read_bytes()
+            policy.serve(self.root / "worker.json", ["start"], root=self.root)
+            self.assertEqual(execve[1][2]["LAST_KEY"], "private-example")
+            self.assertNotEqual((self.root / "worker.json").read_bytes(), before)
+        with (
+            unittest.mock.patch.object(
+                policy, "installed_binary", lambda: self.root / "missing-binary"
+            ),
+            self.assertRaises(FileNotFoundError),
+        ):
+            policy.serve(self.root / "worker.json", ["start"], root=self.root)
 
 
 if __name__ == "__main__":
