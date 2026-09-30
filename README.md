@@ -101,7 +101,8 @@ plan as the primary tier, MiniMax Token Plan as the second tier, the free NVIDIA
 NIM trial tier for overflow, and retry sweeps enabled with a bounded hold. See
 [Why route at all](#why-route-at-all) for the reasoning behind this shape.
 
-This gets a router running locally with one provider in about two minutes.
+The minimal single-provider config gets a router running locally in about two minutes;
+the follower template needs three API keys and a validate run covering all three tiers.
 
 ### 1. Install
 
