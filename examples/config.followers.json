@@ -5,7 +5,7 @@
     "All secrets are environment-variable placeholders; export them before starting the router.",
     "  ZAI_API_KEY      - Z.AI GLM Coding Plan key (console > API keys; plan-bound)",
     "  MINIMAX_API_KEY  - MiniMax Token Plan key (platform.minimax.io, overseas region)",
-    "  NVIDIA_API_KEY   - build.nvidia.com free trial key (no card; trial/eval ToS)",
+    "  NVIDIA_API_KEY   - build.nvidia.com free trial key (optional overflow tier; trial/eval ToS, 40 RPM)",
     "Sane defaults are preloaded: retry sweeps are ON with an 8-minute hold cap, kept below the 10-minute request timeout Claude Code and the Anthropic SDK use by default.",
     "Set maxHoldMs to 0 (unlimited) only if your client timeout is larger than you",
     "ever want to wait on a held request. Validate with: ccr-rust --config <this file> validate"
@@ -34,7 +34,7 @@
     },
     {
       "name": "nvidia",
-      "_doc": "NVIDIA NIM free trial tier: 40 RPM, no card, prototyping/evaluation ToS. Serves as the overflow tier so a quota storm degrades instead of stopping work.",
+      "_doc": "NVIDIA NIM free trial tier, opt-in overflow: 40 RPM, no card, and build.nvidia.com terms cover prototyping/evaluation, not production — remove this tier before routing real workloads if that matters to you. A single sub-agent burst can exhaust 40 RPM. Verification status: config-load validated only (loader, provider contract, and tier checks, 2026-09-30); no live probe of the endpoint, model id, or rate-limit headers is recorded — see docs/zai_minimax_setup.md for the repo's bar for calling a route tested.",
       "api_base_url": "https://integrate.api.nvidia.com/v1",
       "api_key": "${NVIDIA_API_KEY}",
       "protocol": "openai",
