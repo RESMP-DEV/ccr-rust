@@ -56,7 +56,7 @@
     }
   },
   "Presets": {
-    "flash": { "_doc": "Bulk/cheap labor route; during Z.AI free-Flash promotion windows GLM-5.3-Flash consumes zero credits via supported clients.", "route": "zai,glm-5.3-flash" },
+    "flash": { "_doc": "Direct pin to zai,glm-5.3-flash for bulk/cheap labor. A preset route selects this provider and model directly — it bypasses the tier cascade, so there is no failover; use it when cheap-and-direct beats resilient.", "route": "zai,glm-5.3-flash" },
     "m3": { "route": "minimax,MiniMax-M3" }
   },
   "Persistence": { "mode": "none" },
