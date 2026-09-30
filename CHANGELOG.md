@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `examples/config.followers.json`: a follower-oriented multi-provider
   template (GLM coding plan primary tier, MiniMax Token Plan secondary,
   NVIDIA NIM free overflow tier, retry sweeps enabled with a bounded
-  10-minute hold cap). The template validates as shipped and uses only
-  environment-variable credential placeholders.
+  hold: an 8-minute maxHoldMs kept below the 10-minute client timeout
+  Claude Code and the Anthropic SDK default to, a 3-minute per-attempt
+  API_TIMEOUT_MS, and maxSweeps bounded to 4). The template validates as
+  shipped and uses only environment-variable credential placeholders.
 - README: added a "Why route at all" section documenting the defense-in-depth
   rationale (provider-layer failure modes, held retries, client/provider
   decoupling, quota isolation, single credential path, per-tier measurement),

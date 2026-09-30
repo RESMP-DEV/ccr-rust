@@ -6,7 +6,7 @@
     "  ZAI_API_KEY      - Z.AI GLM Coding Plan key (console > API keys; plan-bound)",
     "  MINIMAX_API_KEY  - MiniMax Token Plan key (platform.minimax.io, overseas region)",
     "  NVIDIA_API_KEY   - build.nvidia.com free trial key (no card; trial/eval ToS)",
-    "Sane defaults are preloaded: retry sweeps are ON with a 10-minute hold cap.",
+    "Sane defaults are preloaded: retry sweeps are ON with an 8-minute hold cap, kept below the 10-minute request timeout Claude Code and the Anthropic SDK use by default.",
     "Set maxHoldMs to 0 (unlimited) only if your client timeout is larger than you",
     "ever want to wait on a held request. Validate with: ccr-rust --config <this file> validate"
   ],
@@ -50,11 +50,11 @@
       "nvidia,deepseek-ai/deepseek-v4.1-flash"
     ],
     "retrySweeps": {
-      "_doc": "When every tier is exhausted, hold the request open and re-cascade the tier list after a cooldown instead of surfacing a 429 to the agent. maxSweeps=0 means unlimited sweeps; maxHoldMs caps the total hold time.",
+      "_doc": "When every tier is exhausted, hold the request open and re-cascade the tier list after a cooldown instead of surfacing a 429 to the agent. maxSweeps bounds the re-cascades; unlimited sweeps during a sustained outage amplify load and spend, because one sweep issues up to (1 + tierRetries) upstream calls per tier and cooldown stretching only applies to tiers the rate-limit tracker is actively backing off. maxHoldMs caps the total hold time.",
       "enabled": true,
-      "maxSweeps": 0,
+      "maxSweeps": 4,
       "sweepCooldownMs": 2000,
-      "maxHoldMs": 600000
+      "maxHoldMs": 480000
     }
   },
   "Presets": {
