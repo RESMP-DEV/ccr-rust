@@ -186,7 +186,7 @@ Each tier makes **1 initial + N retries** attempts (default: 1+3=4). The `max_re
 
 ### Dynamic Tier Reordering
 
-Tiers are automatically reordered by observed latency (EWMA). If Tier 2 is consistently faster than Tier 1, it gets promoted.
+Tiers are automatically reordered by observed latency (EWMA). If Tier 2 is consistently faster than Tier 1, it gets promoted. With `Router.strictTierOrder: true`, tiers instead serve strictly in configured order and a later tier is only tried when every earlier tier fails.
 
 Tiers with fewer than 3 samples keep their configured priority—no premature reordering.
 
