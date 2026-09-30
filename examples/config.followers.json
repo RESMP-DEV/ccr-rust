@@ -1,0 +1,64 @@
+{
+  "_readme": [
+    "Follower template: the recommended multi-provider starting point.",
+    "Tier order: GLM coding plan (primary) -> MiniMax Token Plan (secondary) -> NVIDIA NIM free tier (overflow).",
+    "All secrets are environment-variable placeholders; export them before starting the router.",
+    "  ZAI_API_KEY      - Z.AI GLM Coding Plan key (console > API keys; plan-bound)",
+    "  MINIMAX_API_KEY  - MiniMax Token Plan key (platform.minimax.io, overseas region)",
+    "  NVIDIA_API_KEY   - build.nvidia.com free trial key (optional overflow tier; trial/eval ToS, 40 RPM)",
+    "Sane defaults are preloaded: retry sweeps are ON with an 8-minute hold cap, kept below the 10-minute request timeout Claude Code and the Anthropic SDK use by default.",
+    "Set maxHoldMs to 0 (unlimited) only if your client's own timeout is longer than the longest hold you are willing to accept; with no cap, sweeps continue until the client gives up. Validate with: ccr-rust --config <this file> validate"
+  ],
+  "HOST": "127.0.0.1",
+  "PORT": 3456,
+  "API_TIMEOUT_MS": 180000,
+  "Providers": [
+    {
+      "name": "zai",
+      "_doc": "Z.AI GLM Coding Plan via the Anthropic-compatible endpoint. honor_ratelimit_headers=false only affects header hints; real 429s are still tracked and the tier is skipped while limited.",
+      "api_base_url": "https://api.z.ai/api/anthropic/v1",
+      "api_key": "${ZAI_API_KEY}",
+      "protocol": "anthropic",
+      "auth_header": "authorization",
+      "models": ["glm-5.3", "glm-5.3-flash"],
+      "honor_ratelimit_headers": false
+    },
+    {
+      "name": "minimax",
+      "_doc": "MiniMax Token Plan (overseas platform.minimax.io) via its Anthropic-compatible endpoint. Keep the sk-cp-... coding-plan key separate from pay-as-you-go keys.",
+      "api_base_url": "https://api.minimax.io/anthropic/v1",
+      "api_key": "${MINIMAX_API_KEY}",
+      "protocol": "anthropic",
+      "models": ["MiniMax-M3"]
+    },
+    {
+      "name": "nvidia",
+      "_doc": "NVIDIA NIM free trial tier, opt-in overflow: 40 RPM, no card, and build.nvidia.com terms cover prototyping/evaluation, not production — remove this tier before routing real workloads if that matters to you. A single sub-agent burst can exhaust 40 RPM. Verification status: config-load validated only (loader, provider contract, and tier checks, 2026-09-30); no live probe of the endpoint, model id, or rate-limit headers is recorded — see docs/zai_minimax_setup.md for the repo's bar for calling a route tested.",
+      "api_base_url": "https://integrate.api.nvidia.com/v1",
+      "api_key": "${NVIDIA_API_KEY}",
+      "protocol": "openai",
+      "models": ["deepseek-ai/deepseek-v4.1-flash"]
+    }
+  ],
+  "Router": {
+    "default": "zai,glm-5.3",
+    "tiers": [
+      "zai,glm-5.3",
+      "minimax,MiniMax-M3",
+      "nvidia,deepseek-ai/deepseek-v4.1-flash"
+    ],
+    "retrySweeps": {
+      "_doc": "When every tier is exhausted, hold the request open and re-cascade the tier list after a cooldown instead of surfacing a 429 to the agent. maxSweeps bounds the re-cascades; unlimited sweeps during a sustained outage amplify load and spend, because one sweep issues up to (1 + tierRetries) upstream calls per tier and cooldown stretching only applies to tiers the rate-limit tracker is actively backing off. maxHoldMs caps the total hold time.",
+      "enabled": true,
+      "maxSweeps": 4,
+      "sweepCooldownMs": 2000,
+      "maxHoldMs": 480000
+    }
+  },
+  "Presets": {
+    "flash": { "_doc": "Direct pin to zai,glm-5.3-flash for bulk/cheap labor. A preset route selects this provider and model directly — it bypasses the tier cascade, so there is no failover; use it when cheap-and-direct beats resilient.", "route": "zai,glm-5.3-flash" },
+    "m3": { "route": "minimax,MiniMax-M3" }
+  },
+  "Persistence": { "mode": "none" },
+  "DebugCapture": { "enabled": false }
+}

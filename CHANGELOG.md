@@ -24,6 +24,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Purpose-built for quality-ordered fallback chains (e.g. GLM 5.3 →
   GLM 5.3-FlashX → GLM 5.3-Flash) where a faster cheap model must not
   preempt the preferred one.
+- Validation: a unit test now walks `examples/*.json`, sets placeholder
+  values for every `${VAR}` reference, and loads each file through the real
+  `Config::from_file` path (env expansion, credential gate, provider
+  contracts, model aliases, retry sweeps), so shipped example templates can
+  no longer rot silently after field renames or loader changes.
+- Added `examples/config.followers.json`: a follower-oriented multi-provider
+  template (GLM coding plan primary tier, MiniMax Token Plan secondary,
+  NVIDIA NIM free overflow tier, retry sweeps enabled with a bounded
+  hold: an 8-minute maxHoldMs kept below the 10-minute client timeout
+  Claude Code and the Anthropic SDK default to, a 3-minute per-attempt
+  API_TIMEOUT_MS, and maxSweeps bounded to 4). The template validates as
+  shipped and uses only environment-variable credential placeholders.
+- README: added a "Why route at all" section documenting the defense-in-depth
+  rationale (provider-layer failure modes, held retries, client/provider
+  decoupling, quota isolation, single credential path, per-tier measurement),
+  and the Quickstart now points to the follower template as the recommended
+  multi-provider starting point.
 - Hardened retry sweeps from review round 3: the inter-sweep cooldown is
   floored at 1ms after clamping (defense in depth against a zero-cooldown
   config re-cascading back-to-back), and `ccr_retry_sweeps_total` plus the
