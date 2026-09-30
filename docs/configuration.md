@@ -285,6 +285,7 @@ The `Router` section configures how incoming requests are routed to providers.
 | `tierRetries` | object | No | - | Per-tier retry configuration. |
 | `forceNonStreaming` | boolean | No | false | Disable streaming for agent workloads. |
 | `ignoreDirect` | boolean | No | false | Ignore client model targeting, enforce tier order. |
+| `strictTierOrder` | boolean | No | false | Use `tiers` as a strict preference chain: configured order is attempted verbatim and a tier only serves when every earlier tier fails. Disables EWMA latency reordering, cold-start shuffling, and GP reordering of the chain. Cannot be combined with `topK` (rejected at config load). |
 | `modelAliases` | object | No | `{}` | Map exact bare client model IDs to configured `provider,model` routes. Ignored for routing when `ignoreDirect` is true. |
 | `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
 

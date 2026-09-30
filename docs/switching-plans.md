@@ -142,8 +142,9 @@ values. There is no preset `/v1/responses` route for Codex, and setting a
 
 To make Kimi the router default, change both `Router.default` and the explicit
 `Router.tiers` list to `kimi,k3-256k`, then restart. To allow automatic fallback,
-deliberately list both routes in `Router.tiers`. EWMA/GP may influence ordering;
-a direct route already in the list is prioritized but retains the other
+deliberately list both routes in `Router.tiers`. EWMA/GP may influence ordering
+(unless `Router.strictTierOrder: true`, which fixes the configured order); a
+direct route already in the list is prioritized but retains the other
 candidates. This can spend quota on another plan. A preset pin has the same
 fallback semantics.
 

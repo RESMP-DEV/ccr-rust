@@ -174,6 +174,19 @@ fn validate_retry_sweeps(router: &RouterConfig) -> Result<()> {
     Ok(())
 }
 
+/// strictTierOrder serves the entire configured tier chain in order, so
+/// topK (which truncates the EWMA-sampled candidate set) has no meaning
+/// alongside it. Reject the combination instead of silently ignoring one of
+/// two contradictory candidate-set controls.
+fn validate_tier_order_conflicts(router: &RouterConfig) -> Result<()> {
+    anyhow::ensure!(
+        !(router.strict_tier_order && router.top_k.is_some()),
+        "Router.strictTierOrder and Router.topK cannot be combined: strict ordering \
+         serves the full configured tier chain, so topK would be silently ignored"
+    );
+    Ok(())
+}
+
 fn validate_model_aliases(router: &RouterConfig, providers: &[Provider]) -> Result<()> {
     for (alias, target) in &router.model_aliases {
         anyhow::ensure!(
@@ -429,6 +442,7 @@ impl Config {
         validate_provider_contracts(&file.providers)?;
         validate_model_aliases(&file.router, &file.providers)?;
         validate_retry_sweeps(&file.router)?;
+        validate_tier_order_conflicts(&file.router)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
         let mut client_builder = reqwest::Client::builder()

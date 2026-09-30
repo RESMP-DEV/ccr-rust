@@ -1668,3 +1668,267 @@ async fn model_a_429_does_not_block_model_b_same_provider() {
     assert_eq!(status_b, StatusCode::OK);
     mock_server.verify().await;
 }
+
+// ---------------------------------------------------------------------------
+// strictTierOrder
+// ---------------------------------------------------------------------------
+
+/// Two single-model providers as a two-tier chain; `strict` sets
+/// `Router.strictTierOrder`. Tier retries are zeroed so upstream hit counts
+/// map 1:1 to tier attempts.
+fn two_provider_tier_config(url_tier0: &str, url_tier1: &str, strict: bool) -> serde_json::Value {
+    json!({
+        "Providers": [
+            {
+                "name": "tier0",
+                "api_base_url": url_tier0,
+                "api_key": "test-key",
+                "models": ["m0"]
+            },
+            {
+                "name": "tier1",
+                "api_base_url": url_tier1,
+                "api_key": "test-key",
+                "models": ["m1"]
+            }
+        ],
+        "Router": {
+            "default": "tier0,m0",
+            "tiers": ["tier0,m0", "tier1,m1"],
+            "strictTierOrder": strict,
+            "tierRetries": {
+                "tier0": {"max_retries": 0},
+                "tier1": {"max_retries": 0}
+            }
+        },
+        "API_TIMEOUT_MS": 5000
+    })
+}
+
+/// POST /v1/messages for `model` and return the status plus parsed response
+/// body, so tests can assert on translated content.
+async fn post_messages_returning_body(
+    app: &Router,
+    model: &str,
+) -> (StatusCode, serde_json::Value) {
+    let body = json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 100
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+#[test]
+fn router_config_strict_tier_order_defaults_false() {
+    let cfg: ccr_rust::config::RouterConfig =
+        serde_json::from_value(json!({"default": "a,m"})).unwrap();
+    assert!(!cfg.strict_tier_order);
+
+    let cfg: ccr_rust::config::RouterConfig =
+        serde_json::from_value(json!({"default": "a,m", "strictTierOrder": true})).unwrap();
+    assert!(cfg.strict_tier_order);
+}
+
+/// With strictTierOrder the configured first tier serves every unpinned
+/// request; later tiers are pure fallback and must receive no traffic while
+/// the first tier is healthy, even though EWMA ordering would redistribute.
+#[tokio::test]
+async fn strict_tier_order_serves_first_tier_when_healthy() {
+    if skip_if_localhost_bind_unavailable("strict_tier_order_serves_first_tier_when_healthy") {
+        return;
+    }
+    let tier0 = MockServer::start().await;
+    let tier1 = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"choices": [{"message": {"content": "from-tier-0"}}]})),
+        )
+        .expect(1)
+        .mount(&tier0)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"choices": [{"message": {"content": "from-tier-1"}}]})),
+        )
+        .expect(0)
+        .mount(&tier1)
+        .await;
+
+    // Unrouted model string: exercises default tier order, not a direct pin.
+    let app = app_from_config_value(two_provider_tier_config(&tier0.uri(), &tier1.uri(), true));
+    let (status, body) = post_messages_returning_body(&app, "no-comma-model").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.to_string().contains("from-tier-0"));
+    tier0.verify().await;
+    tier1.verify().await;
+}
+
+/// A failing first tier cascades to the second tier in configured order.
+#[tokio::test]
+async fn strict_tier_order_cascades_to_next_tier_on_failure() {
+    if skip_if_localhost_bind_unavailable("strict_tier_order_cascades_to_next_tier_on_failure") {
+        return;
+    }
+    let tier0 = MockServer::start().await;
+    let tier1 = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+        .expect(1)
+        .mount(&tier0)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"choices": [{"message": {"content": "from-tier-1"}}]})),
+        )
+        .expect(1)
+        .mount(&tier1)
+        .await;
+
+    let app = app_from_config_value(two_provider_tier_config(&tier0.uri(), &tier1.uri(), true));
+    let (status, body) = post_messages_returning_body(&app, "no-comma-model").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.to_string().contains("from-tier-1"));
+    tier0.verify().await;
+    tier1.verify().await;
+}
+
+/// A 429-exhausted first tier falls through to the second tier in the same
+/// sweep: rate-limit backoff skips the tier rather than failing the request.
+#[tokio::test]
+async fn strict_tier_order_rate_limited_first_tier_falls_through() {
+    if skip_if_localhost_bind_unavailable("strict_tier_order_rate_limited_first_tier_falls_through")
+    {
+        return;
+    }
+    let tier0 = MockServer::start().await;
+    let tier1 = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": {"message": "rate limited", "code": 429}
+        })))
+        .expect(1)
+        .mount(&tier0)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"choices": [{"message": {"content": "from-tier-1"}}]})),
+        )
+        .expect(1)
+        .mount(&tier1)
+        .await;
+
+    let app = app_from_config_value(two_provider_tier_config(&tier0.uri(), &tier1.uri(), true));
+    let (status, body) = post_messages_returning_body(&app, "no-comma-model").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.to_string().contains("from-tier-1"));
+    tier0.verify().await;
+    tier1.verify().await;
+}
+
+/// A direct-route request under strictTierOrder pins its tier to the front
+/// even though an earlier-configured tier is healthy: the strict chain
+/// defines fallback order, the pin defines preference.
+#[tokio::test]
+async fn strict_tier_order_direct_route_pins_requested_tier() {
+    if skip_if_localhost_bind_unavailable("strict_tier_order_direct_route_pins_requested_tier") {
+        return;
+    }
+    let tier0 = MockServer::start().await;
+    let tier1 = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"choices": [{"message": {"content": "from-tier-0"}}]})),
+        )
+        .expect(0)
+        .mount(&tier0)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"choices": [{"message": {"content": "from-tier-1"}}]})),
+        )
+        .expect(1)
+        .mount(&tier1)
+        .await;
+
+    let app = app_from_config_value(two_provider_tier_config(&tier0.uri(), &tier1.uri(), true));
+    let (status, body) = post_messages_returning_body(&app, "tier1,m1").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.to_string().contains("from-tier-1"));
+    tier0.verify().await;
+    tier1.verify().await;
+}
+
+/// Config load rejects strictTierOrder combined with topK: strict mode serves
+/// the full chain, so topK would be silently inert.
+#[test]
+fn strict_tier_order_with_top_k_rejected_at_config_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    let config = json!({
+        "Providers": [
+            {"name": "a", "api_base_url": "http://127.0.0.1:1", "api_key": "k", "models": ["m"]},
+            {"name": "b", "api_base_url": "http://127.0.0.1:2", "api_key": "k", "models": ["m"]}
+        ],
+        "Router": {
+            "default": "a,m",
+            "tiers": ["a,m", "b,m"],
+            "strictTierOrder": true,
+            "topK": 1
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let err = ccr_rust::config::Config::from_file(config_path.to_str().unwrap())
+        .expect_err("strictTierOrder + topK must be rejected");
+    assert!(
+        err.to_string().contains("cannot be combined"),
+        "unexpected error: {err}"
+    );
+}

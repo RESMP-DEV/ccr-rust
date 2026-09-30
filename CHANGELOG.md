@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added `Router.strictTierOrder` (default `false`): when true, the tier list
+  is a strict preference chain — tiers are attempted in configured order and
+  a later tier only serves when every earlier tier fails — instead of the
+  EWMA latency-weighted reordering, which load-balances by measured latency
+  and shuffles equal or unmeasured tiers. Direct-route requests still pin
+  their tier to the front, GP reranking never reorders a strict chain (the
+  GP plan is still used for observations), and combining it with `topK` is
+  rejected at config load since strict mode always serves the full chain.
+  Purpose-built for quality-ordered fallback chains (e.g. GLM 5.3 →
+  GLM 5.3-FlashX → GLM 5.3-Flash) where a faster cheap model must not
+  preempt the preferred one.
 - Validation: a unit test now walks `examples/*.json`, sets placeholder
   values for every `${VAR}` reference, and loads each file through the real
   `Config::from_file` path (env expansion, credential gate, provider
