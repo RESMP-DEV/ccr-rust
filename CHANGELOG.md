@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added `examples/config.followers.json`: a follower-oriented multi-provider
+  template (GLM coding plan primary tier, MiniMax Token Plan secondary,
+  NVIDIA NIM free overflow tier, retry sweeps enabled with a bounded
+  10-minute hold cap). The template validates as shipped and uses only
+  environment-variable credential placeholders.
+- README: added a "Why route at all" section documenting the defense-in-depth
+  rationale (provider-layer failure modes, held retries, client/provider
+  decoupling, quota isolation, single credential path, per-tier measurement),
+  and the Quickstart now points to the follower template as the recommended
+  multi-provider starting point.
 - Hardened retry sweeps from review round 3: the inter-sweep cooldown is
   floored at 1ms after clamping (defense in depth against a zero-cooldown
   config re-cascading back-to-back), and `ccr_retry_sweeps_total` plus the

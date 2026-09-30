@@ -4,6 +4,19 @@ CCR-Rust is a lightweight, self-hosted **LLM router** that sits between your AI 
 
 The most common reason people install it: **when your Claude plan runs out, keep using Claude Code with GLM, MiniMax, DeepSeek, or another provider instead of changing tools.**
 
+## Why route at all
+
+A coding agent and its model provider are two independent layers, and the failures that actually kill long agent sessions happen in the provider layer: quota windows (5-hour, weekly, monthly) run out, providers emit 429 storms at peak hours, endpoints have regional outages, models get deprecated or silently rerouted, and pricing or terms change without notice. No agent, however good, can fix a provider that is rate-limiting it. A router places one local, provider-agnostic endpoint between the agent and that entire failure surface:
+
+- **Failover instead of failure.** Providers are arranged in tiers; 5xx errors and timeouts cascade to the next tier automatically.
+- **Held retries instead of dropped work.** With [retry sweeps](docs/configuration.md#retry-sweeps-hold-the-request-open-mode) enabled, a request that exhausts every tier is held in flight and re-cascaded after a cooldown, so the agent observes latency instead of a 429. Deterministic rejections (401/402/403/404) are attempted once and skipped afterward.
+- **Client choice decoupled from provider choice.** The router speaks both the Anthropic and OpenAI wire formats and translates as needed, so adding or replacing a provider never means changing tools or editing credentials in each tool.
+- **Quota isolation.** Run separate router instances per workload class (interactive sessions, bulk sub-agents, automated review) so one workload cannot consume another's quota window.
+- **One credential path.** Keys are expanded from environment variables in one config file; they are never pasted into per-tool settings or logs.
+- **Measurement.** Per-tier token, latency, and rate-limit metrics show which provider actually served each request and what each quota window cost. Without a router this is invisible.
+
+A router does not create capacity. It maximizes the availability of whatever capacity you already hold, across as many providers as you point it at.
+
 ## Features
 
 - **Automatic failover** — providers are arranged in tiers; 5xx errors and timeouts cascade to the next tier automatically. Rate limits (429) are tracked and reported transparently.
@@ -81,6 +94,12 @@ The complete [documentation index](docs/index.md) covers setup and operations.
 Use [Switching coding plans](docs/switching-plans.md) to choose Kimi or Z.AI GLM
 per session, save Codex profiles, or configure deliberate fallback. A tested
 two-provider starting point is [examples/coding-plans.json](examples/coding-plans.json).
+
+The recommended multi-provider starting point is
+[examples/config.followers.json](examples/config.followers.json): a GLM coding
+plan as the primary tier, MiniMax Token Plan as the second tier, the free NVIDIA
+NIM trial tier for overflow, and retry sweeps enabled with a bounded hold. See
+[Why route at all](#why-route-at-all) for the reasoning behind this shape.
 
 This gets a router running locally with one provider in about two minutes.
 
