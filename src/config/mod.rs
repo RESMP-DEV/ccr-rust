@@ -1255,8 +1255,8 @@ mod example_config_tests {
             for var in &vars {
                 std::env::remove_var(var);
             }
-            let config = loaded
-                .unwrap_or_else(|e| panic!("example {} must load: {:#}", path.display(), e));
+            let config =
+                loaded.unwrap_or_else(|e| panic!("example {} must load: {:#}", path.display(), e));
             assert!(
                 !config.providers().is_empty(),
                 "example {} must declare providers",
