@@ -1864,6 +1864,110 @@ async fn strict_tier_order_rate_limited_first_tier_falls_through() {
     tier1.verify().await;
 }
 
+/// The production GLM chain has four tiers. Rate-limit all three GLM models
+/// and prove that one request traverses them in strict order and reaches the
+/// paid DeepSeek last resort.
+#[tokio::test]
+async fn strict_tier_order_rate_limited_glm_chain_reaches_deepseek() {
+    if skip_if_localhost_bind_unavailable(
+        "strict_tier_order_rate_limited_glm_chain_reaches_deepseek",
+    ) {
+        return;
+    }
+    let flashx = MockServer::start().await;
+    let flash = MockServer::start().await;
+    let glm = MockServer::start().await;
+    let deepseek = MockServer::start().await;
+
+    for (server, model) in [
+        (&flashx, "glm-5.3-flashx"),
+        (&flash, "glm-5.3-flash"),
+        (&glm, "glm-5.3"),
+    ] {
+        use wiremock::matchers::body_partial_json;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(json!({"model": model})))
+            .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                "error": {"message": "rate limited", "code": 429}
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    {
+        use wiremock::matchers::body_partial_json;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(json!({"model": "deepseek-flash"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"content": "deepseek-last-resort"}}]
+            })))
+            .expect(1)
+            .mount(&deepseek)
+            .await;
+    }
+
+    let config = json!({
+        "Providers": [
+            {
+                "name": "zai",
+                "api_base_url": flashx.uri(),
+                "api_key": "test-key",
+                "models": ["glm-5.3-flashx"]
+            },
+            {
+                "name": "zai-flash",
+                "api_base_url": flash.uri(),
+                "api_key": "test-key",
+                "models": ["glm-5.3-flash"]
+            },
+            {
+                "name": "zai-base",
+                "api_base_url": glm.uri(),
+                "api_key": "test-key",
+                "models": ["glm-5.3"]
+            },
+            {
+                "name": "deepseek",
+                "api_base_url": deepseek.uri(),
+                "api_key": "test-key",
+                "models": ["deepseek-flash"]
+            }
+        ],
+        "Router": {
+            "default": "zai,glm-5.3-flashx",
+            "tiers": [
+                "zai,glm-5.3-flashx",
+                "zai-flash,glm-5.3-flash",
+                "zai-base,glm-5.3",
+                "deepseek,deepseek-flash"
+            ],
+            "strictTierOrder": true,
+            "tierRetries": {
+                "zai,glm-5.3-flashx": {"max_retries": 0},
+                "zai-flash,glm-5.3-flash": {"max_retries": 0},
+                "zai-base,glm-5.3": {"max_retries": 0},
+                "deepseek,deepseek-flash": {"max_retries": 0}
+            }
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+
+    let app = app_from_config_value(config);
+    let (status, body) = post_messages_returning_body(&app, "no-comma-model").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.to_string().contains("deepseek-last-resort"));
+    flashx.verify().await;
+    flash.verify().await;
+    glm.verify().await;
+    deepseek.verify().await;
+}
+
 /// A direct-route request under strictTierOrder pins its tier to the front
 /// even though an earlier-configured tier is healthy: the strict chain
 /// defines fallback order, the pin defines preference.
