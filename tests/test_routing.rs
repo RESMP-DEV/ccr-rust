@@ -1864,9 +1864,9 @@ async fn strict_tier_order_rate_limited_first_tier_falls_through() {
     tier1.verify().await;
 }
 
-/// The production GLM chain has four tiers. Rate-limit all three GLM models
-/// and prove that one request traverses them in strict order and reaches the
-/// paid DeepSeek last resort.
+/// Rate-limit all three GLM models in a synthetic four-tier strict chain and
+/// prove that one request traverses the configured order and reaches the
+/// DeepSeek last resort.
 #[tokio::test]
 async fn strict_tier_order_rate_limited_glm_chain_reaches_deepseek() {
     if skip_if_localhost_bind_unavailable(
@@ -1945,10 +1945,10 @@ async fn strict_tier_order_rate_limited_glm_chain_reaches_deepseek() {
             ],
             "strictTierOrder": true,
             "tierRetries": {
-                "zai,glm-5.3-flashx": {"max_retries": 0},
-                "zai-flash,glm-5.3-flash": {"max_retries": 0},
-                "zai-base,glm-5.3": {"max_retries": 0},
-                "deepseek,deepseek-flash": {"max_retries": 0}
+                "zai": {"max_retries": 0},
+                "zai-flash": {"max_retries": 0},
+                "zai-base": {"max_retries": 0},
+                "deepseek": {"max_retries": 0}
             }
         },
         "API_TIMEOUT_MS": 5000
