@@ -30,7 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the consumer file once, preflights the credentials file before rewriting
   anything, and injects runtime credentials only for registered consumers, and
   `restart_required` is documented as empty under `check` because no files were
-  rewritten.
+  rewritten. Follow-up review fixes: duplicate provider names in a consumer or
+  the shared provider list are rejected instead of silently keeping the last
+  entry, consumer names containing glob metacharacters are rejected so the
+  staging-file scan stays literal, that scan follows symlinked consumers to
+  their resolved target directory, `serve` resolves credential values before
+  rewriting the consumer configuration and tolerates an absent
+  `runtime-credentials.json` when every referenced variable is inherited, the
+  credential mode check runs on the opened descriptor instead of a separate
+  stat, a failed parent-directory fsync after the rename no longer aborts the
+  remaining consumers, the umask is read once at import to close the
+  process-global 0666 window, and a failing `fchmod` can no longer leak the
+  raw staging descriptor.
 - Added `Router.strictTierOrder` (default `false`): when true, the tier list
   is a strict preference chain — tiers are attempted in configured order and
   a later tier only serves when every earlier tier fails — instead of the

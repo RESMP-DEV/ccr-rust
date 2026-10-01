@@ -15,6 +15,11 @@ from typing import Any
 
 ROOT = Path.home() / ".claude-code-router"
 ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# os.umask is process-global and not atomic, so a set/restore dance inside each
+# write leaves a window where an importing thread creates files mode 0666.
+# Reading it once at import confines that window to interpreter startup.
+UMASK = os.umask(0)
+os.umask(UMASK)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -41,9 +46,18 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
         raise ValueError("Policy requires registered consumers")
     reserved = {"fallback-policy.json", "runtime-credentials.json"}
     for name, settings in consumers.items():
-        if Path(name).name != name or not name.endswith(".json") or name in reserved:
+        # Metacharacters are rejected because consumer names are interpolated
+        # into literal staging-file scans; a pattern like "wor[k].json" would
+        # match unrelated dot-files instead of that consumer's staging files.
+        if (
+            Path(name).name != name
+            or not name.endswith(".json")
+            or name in reserved
+            or set(name) & set("*?[]")
+        ):
             raise ValueError(
-                "Consumer names must be JSON basenames that do not collide with policy files"
+                "Consumer names must be plain JSON basenames without glob"
+                " metacharacters or policy-file collisions"
             )
         if not isinstance(settings, dict) or not isinstance(
             settings.get("primary"), str
@@ -74,7 +88,16 @@ def derive(
     if tiers[-1] != chain[-1]:
         raise ValueError("Additional routes cannot move the final fallback")
     result = copy.deepcopy(config)
-    providers = {p["name"]: p for p in result["Providers"]}
+    # A silent last-wins overwrite would hide a misconfigured duplicate entry,
+    # so collisions in either list are rejected like duplicate routes are.
+    providers: dict[str, dict[str, Any]] = {}
+    for provider in result["Providers"]:
+        if provider["name"] in providers:
+            raise ValueError(
+                f"Consumer {consumer} defines provider {provider['name']} more than once"
+            )
+        providers[provider["name"]] = provider
+    shared: set[str] = set()
     for provider in policy.get("providers", []):
         if not isinstance(provider, dict) or not isinstance(provider.get("name"), str):
             raise TypeError("Invalid shared provider definition")
@@ -83,6 +106,11 @@ def derive(
             raise ValueError(
                 "Shared providers require environment credential references"
             )
+        if provider["name"] in shared:
+            raise ValueError(
+                f"Policy defines shared provider {provider['name']} more than once"
+            )
+        shared.add(provider["name"])
         providers[provider["name"]] = copy.deepcopy(provider)
     for route in tiers:
         parts = route.split(",", 1)
@@ -119,26 +147,39 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
     # restore the destination's own mode; a first write uses the umask default
     # a plain file creation would get, because a fixed 0600 config is unreadable
     # for the service user in deploy/ccr-rust.service.
-    mask = os.umask(0)
-    os.umask(mask)
-    mode = path.stat().st_mode & 0o777 if path.exists() else 0o666 & ~mask
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o666 & ~UMASK
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as output:
+            # fchmod through the wrapper: if it raises, the context manager
+            # closes the descriptor instead of leaking the raw fd.
+            os.fchmod(output.fileno(), mode)
             json.dump(value, output, indent=2)
             output.write("\n")
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
-        # The rename itself is not durable until the directory entry is synced.
-        directory = os.open(path.parent, os.O_RDONLY)
+        # The rename itself is not durable until the directory entry is synced,
+        # but some filesystems reject directory fsync outright; the write has
+        # already committed, so that failure must not abort remaining consumers.
         try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError:
+            pass
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def staging_files(consumer: Path) -> list[Path]:
+    """Staging files for one consumer, beside its symlink-resolved target."""
+    # atomic_json stages beside the realpath target, so a symlinked consumer's
+    # stranded files live in the target's directory, never in the policy root.
+    resolved = Path(os.path.realpath(consumer))
+    return [c for c in resolved.parent.glob(f".{resolved.name}.*") if c.is_file()]
 
 
 def prepare(
@@ -154,10 +195,11 @@ def prepare(
     # concurrent writer's in-flight staging file can match the same pattern, and
     # check is documented read-only. So stale files are reported, never deleted.
     stale = sorted(
-        str(candidate)
-        for name in policy["consumers"]
-        for candidate in root.glob(f".{name}.*")
-        if candidate.is_file()
+        {
+            str(candidate)
+            for name in policy["consumers"]
+            for candidate in staging_files(root / name)
+        }
     )
     snapshots: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     for name in policy["consumers"]:
@@ -190,11 +232,18 @@ def sync(root: Path = ROOT, check: bool = False) -> dict[str, Any]:
     }
 
 
-def credential_environment(config: dict[str, Any], path: Path) -> dict[str, str]:
-    if path.stat().st_mode & 0o077:
-        raise ValueError("Runtime credentials must be private (mode 0600)")
-    values = read_json(path)
+def credential_environment(config: dict[str, Any], path: Path | None) -> dict[str, str]:
     env = os.environ.copy()
+    values: dict[str, Any] = {}
+    if path is not None:
+        # Open once and fstat that same handle: a separate stat→read pair lets
+        # the mode widen (or the file be swapped) between check and load.
+        with open(path, encoding="utf-8") as handle:
+            if os.fstat(handle.fileno()).st_mode & 0o077:
+                raise ValueError("Runtime credentials must be private (mode 0600)")
+            values = json.load(handle)
+        if not isinstance(values, dict):
+            raise TypeError(f"Expected an object: {path.name}")
     for name in set(ENV_REF.findall(json.dumps(config))):
         value = values.get(name, env.get(name))
         if not isinstance(value, str) or not value:
@@ -221,8 +270,8 @@ def installed_binary() -> Path | None:
 
 
 def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
-    # Preflight before any side effect: a missing binary or credential file must
-    # not leave the consumer config rewritten or credentials read for a failed
+    # Preflight before any side effect: a missing binary or an unresolvable
+    # credential must not leave the consumer config rewritten for a failed
     # launch.
     binary = installed_binary()
     if binary is None:
@@ -236,17 +285,18 @@ def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
         config_path.parent.resolve() == root.resolve()
         and config_path.name in policy["consumers"]
     ):
-        credentials = root / "runtime-credentials.json"
-        if not credentials.is_file():
-            raise FileNotFoundError(f"Runtime credentials not found: {credentials}")
-        if credentials.stat().st_mode & 0o077:
-            raise ValueError("Runtime credentials must be private (mode 0600)")
         config = derive(on_disk, policy, config_path.name)
-        if config != on_disk:
-            atomic_json(config_path, config)
+        # A missing credentials file is acceptable when every referenced variable
+        # is already inherited; values are resolved before the rewrite so a
+        # failed launch cannot leave the consumer config updated but unserved.
         # Credential injection stays scoped to registered consumers so an
         # arbitrary --config cannot pull runtime credentials into its environment.
-        env = credential_environment(config, credentials)
+        credentials = root / "runtime-credentials.json"
+        env = credential_environment(
+            config, credentials if credentials.is_file() else None
+        )
+        if config != on_disk:
+            atomic_json(config_path, config)
     else:
         env = os.environ.copy()
     os.execve(str(binary), [str(binary), "--config", str(config_path), *arguments], env)

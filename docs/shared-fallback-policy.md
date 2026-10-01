@@ -46,6 +46,10 @@ list per consumer inserts its existing extra providers before that final route;
 those providers must be defined in that consumer. Shared provider definitions
 replace providers with the same name. Other provider definitions remain local,
 so one listener can use native Responses while another uses Anthropic for Z.ai.
+A consumer must not define the same provider name twice, and the shared list
+must not either; duplicates are rejected instead of silently keeping the last
+entry. Consumer names must be plain JSON basenames: path components, glob
+metacharacters and the two policy file names are all rejected at load.
 
 Each consumer must already enable `Router.retrySweeps`. The helper preserves its
 cooldown and hold limits and sets `strictTierOrder: true` and `ignoreDirect: false`.
@@ -70,7 +74,8 @@ before writing and replaces each changed file atomically, preserving its file
 mode and writing through symlinked consumers. Updates across multiple files are
 not a transaction; if an I/O failure interrupts a sync, run `check` and sync
 again before restart. An interrupted run can strand a dot-prefixed staging file;
-both commands report leftover staging files beside registered consumers and
+both commands report leftover staging files beside registered consumers —
+including beside the symlink-resolved target when a consumer is a link — and
 never delete anything, so remove reported leftovers manually. The reported hash
 identifies the policy, not the state of a running listener.
 
@@ -90,17 +95,19 @@ from ccr_fallback_policy import ROOT, serve
 serve(ROOT / "glm-workers.json", ["start", "--host", "127.0.0.1", "--port", "3457"])
 ```
 
-`serve` derives that registered consumer at startup, reads its referenced
-variables from `runtime-credentials.json` in the policy directory, then executes
-the installed `ccr-rust`, resolved from `CCR_TEST_BINARY`, `CARGO_HOME` or
-`PATH`; the binary and the credentials file are both checked before the
-consumer configuration is rewritten. The credential file must be private
-(mode 0600).
-Explicit inherited environment variables can supply references absent from the
-file. Credentials are injected only for registered consumers; launching an
-arbitrary configuration outside the policy directory runs with the inherited
-environment alone. Other client settings and filesystem/network permissions are
-unchanged.
+`serve` derives that registered consumer at startup, resolves every variable
+its derived configuration references from `runtime-credentials.json` in the
+policy directory or the inherited environment, and only then rewrites the
+consumer configuration and executes the installed `ccr-rust`, resolved from
+`CCR_TEST_BINARY`, `CARGO_HOME` or `PATH`. The binary and every referenced
+credential value are verified before the configuration is rewritten, so a
+failed launch never leaves a rewritten file behind. The credential file must
+be private (mode 0600) when present; explicit inherited environment variables
+can supply references absent from the file, and the file itself is optional
+when they cover every reference. Credentials are injected only for registered
+consumers; launching an arbitrary configuration outside the policy directory
+runs with the inherited environment alone. Other client settings and
+filesystem/network permissions are unchanged.
 Worker launchers can use `load_policy` and `derive` to validate approved routes
 instead of maintaining their own allowed-model list. A requested model in a
 worker receipt is not proof of the upstream used; inspect actual router logs or

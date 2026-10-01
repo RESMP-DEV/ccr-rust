@@ -117,6 +117,10 @@ class PolicyTests(unittest.TestCase):
         path.chmod(0o644)
         with self.assertRaises(ValueError):
             policy.credential_environment(config, path)
+        # No file at all: inherited variables alone satisfy the references.
+        with unittest.mock.patch.dict(os.environ, {"LAST_KEY": "from-env"}):
+            env = policy.credential_environment(config, None)
+        self.assertEqual(env["LAST_KEY"], "from-env")
 
     def test_path_escape_and_duplicate_chain_rejected(self) -> None:
         self.policy["consumers"]["../escape.json"] = {"primary": "fast,x"}
@@ -124,6 +128,13 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             policy.load_policy(self.root)
         self.policy["consumers"].pop("../escape.json")
+        # Glob metacharacters would turn the staging-file scan into a pattern.
+        for name in ("wor[k].json", "glm*.json", "worker?.json"):
+            self.policy["consumers"][name] = {"primary": "fast,x"}
+            self.write_policy()
+            with self.assertRaises(ValueError):
+                policy.load_policy(self.root)
+            self.policy["consumers"].pop(name)
         for reserved in ("fallback-policy.json", "runtime-credentials.json"):
             self.policy["consumers"][reserved] = {"primary": "fast,x"}
             self.write_policy()
@@ -134,6 +145,33 @@ class PolicyTests(unittest.TestCase):
         self.write_policy()
         with self.assertRaises(ValueError):
             policy.load_policy(self.root)
+
+    def test_duplicate_provider_names_rejected(self) -> None:
+        duplicated = copy.deepcopy(self.config)
+        duplicated["Providers"].append({"name": "fast", "models": ["x"]})
+        with self.assertRaises(ValueError):
+            policy.derive(duplicated, self.policy, "worker.json")
+        shared = copy.deepcopy(self.policy)
+        shared["providers"].append(shared["providers"][0])
+        with self.assertRaises(ValueError):
+            policy.derive(self.config, shared, "worker.json")
+
+    def test_stale_staging_report_follows_symlinked_consumers(self) -> None:
+        managed = self.root / "managed"
+        managed.mkdir()
+        target = managed / "real.json"
+        policy.atomic_json(target, self.config)
+        link = self.root / "linked.json"
+        link.symlink_to(target)
+        self.policy["consumers"]["linked.json"] = {"primary": "fast,x"}
+        self.write_policy()
+        stale = managed / ".real.json.orphaned"
+        stale.write_text("{}", encoding="utf-8")
+        self.assertEqual(
+            policy.sync(self.root, check=True)["stale_staging"],
+            [str(Path(os.path.realpath(stale)))],
+        )
+        self.assertTrue(stale.exists())
 
     def test_non_list_provider_models_rejected(self) -> None:
         for broken in ("x y", {"x": 1}):
@@ -167,11 +205,12 @@ class PolicyTests(unittest.TestCase):
         unrelated = self.root / ".unrelated.json.bak"
         unrelated.write_text("{}", encoding="utf-8")
         _, _, reported = policy.prepare(self.root)
-        self.assertEqual(reported, [str(stale)])
+        self.assertEqual(reported, [str(Path(os.path.realpath(stale)))])
         self.assertTrue(stale.exists())
         self.assertTrue(unrelated.exists())
         self.assertEqual(
-            policy.sync(self.root, check=True)["stale_staging"], [str(stale)]
+            policy.sync(self.root, check=True)["stale_staging"],
+            [str(Path(os.path.realpath(stale)))],
         )
 
     def test_installed_binary_resolution(self) -> None:
@@ -218,15 +257,35 @@ class PolicyTests(unittest.TestCase):
             self.assertRaises(FileNotFoundError),
         ):
             policy.serve(self.root / "worker.json", ["start"], root=self.root)
-        credentials.unlink()
+        # A credentials file that cannot resolve every referenced variable
+        # fails the launch before the consumer config is rewritten.
+        credentials.write_text("{}", encoding="utf-8")
+        credentials.chmod(0o600)
         policy.atomic_json(self.root / "worker.json", self.config)
         before = (self.root / "worker.json").read_bytes()
         with (
             unittest.mock.patch.object(policy, "installed_binary", lambda: fake),
-            self.assertRaises(FileNotFoundError),
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+            unittest.mock.patch(
+                "os.execve", side_effect=lambda *args: execve.append(args)
+            ),
+            self.assertRaises(ValueError),
         ):
             policy.serve(self.root / "worker.json", ["start"], root=self.root)
         self.assertEqual((self.root / "worker.json").read_bytes(), before)
+        # Without the file, inherited variables alone satisfy the references
+        # and the rewrite proceeds.
+        credentials.unlink()
+        with (
+            unittest.mock.patch.object(policy, "installed_binary", lambda: fake),
+            unittest.mock.patch.dict(os.environ, {"LAST_KEY": "inherited-only"}),
+            unittest.mock.patch(
+                "os.execve", side_effect=lambda *args: execve.append(args)
+            ),
+        ):
+            policy.serve(self.root / "worker.json", ["start"], root=self.root)
+        self.assertEqual(execve[-1][2]["LAST_KEY"], "inherited-only")
+        self.assertNotEqual((self.root / "worker.json").read_bytes(), before)
 
 
 if __name__ == "__main__":
