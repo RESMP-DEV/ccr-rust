@@ -8,7 +8,7 @@ use axum::routing::post;
 use axum::Router;
 use serde_json::json;
 use tower::ServiceExt;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ccr_rust::config::TierRetryConfig;
@@ -1878,36 +1878,33 @@ async fn strict_tier_order_rate_limited_glm_chain_reaches_deepseek() {
     let flash = MockServer::start().await;
     let glm = MockServer::start().await;
     let deepseek = MockServer::start().await;
+    let request_order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
-    for (server, model) in [
-        (&flashx, "glm-5.3-flashx"),
-        (&flash, "glm-5.3-flash"),
-        (&glm, "glm-5.3"),
+    for (server, model, status) in [
+        (&flashx, "glm-5.3-flashx", 429),
+        (&flash, "glm-5.3-flash", 429),
+        (&glm, "glm-5.3", 429),
+        (&deepseek, "deepseek-flash", 200),
     ] {
-        use wiremock::matchers::body_partial_json;
-
+        let order = std::sync::Arc::clone(&request_order);
+        let response = if status == 429 {
+            ResponseTemplate::new(status).set_body_json(json!({
+                "error": {"message": "rate limited", "code": 429}
+            }))
+        } else {
+            ResponseTemplate::new(status).set_body_json(json!({
+                "choices": [{"message": {"content": "deepseek-last-resort"}}]
+            }))
+        };
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .and(body_partial_json(json!({"model": model})))
-            .respond_with(ResponseTemplate::new(429).set_body_json(json!({
-                "error": {"message": "rate limited", "code": 429}
-            })))
+            .respond_with(move |_request: &wiremock::Request| {
+                order.lock().unwrap().push(model.to_string());
+                response.clone()
+            })
             .expect(1)
             .mount(server)
-            .await;
-    }
-
-    {
-        use wiremock::matchers::body_partial_json;
-
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .and(body_partial_json(json!({"model": "deepseek-flash"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "choices": [{"message": {"content": "deepseek-last-resort"}}]
-            })))
-            .expect(1)
-            .mount(&deepseek)
             .await;
     }
 
@@ -1962,6 +1959,15 @@ async fn strict_tier_order_rate_limited_glm_chain_reaches_deepseek() {
 
     assert_eq!(status, StatusCode::OK);
     assert!(body.to_string().contains("deepseek-last-resort"));
+    assert_eq!(
+        *request_order.lock().unwrap(),
+        [
+            "glm-5.3-flashx",
+            "glm-5.3-flash",
+            "glm-5.3",
+            "deepseek-flash"
+        ]
+    );
     flashx.verify().await;
     flash.verify().await;
     glm.verify().await;
