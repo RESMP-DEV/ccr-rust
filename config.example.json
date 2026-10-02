@@ -32,6 +32,17 @@
             }
         },
         {
+            "name": "minimax-anthropic",
+            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_key": "${MINIMAX_API_KEY}",
+            "protocol": "anthropic",
+            "auth_header": "authorization",
+            "models": [
+                "MiniMax-M3.1-Flash-Preview",
+                "MiniMax-M3"
+            ]
+        },
+        {
             "name": "openrouter",
             "api_base_url": "https://openrouter.ai/api/v1",
             "api_key": "${OPENROUTER_API_KEY}",
