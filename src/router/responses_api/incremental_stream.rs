@@ -41,6 +41,7 @@ pub(super) struct ResponsesStreamConverter {
     next_message_content_index: usize,
     next_output_index: usize,
     message_text: String,
+    message_quote_prefix_held: bool,
     refusal_text: String,
     reasoning_text: String,
     response_status: String,
@@ -50,6 +51,18 @@ pub(super) struct ResponsesStreamConverter {
     tools: BTreeMap<usize, ToolAccum>,
     usage: serde_json::Value,
     finished: bool,
+}
+
+fn is_quote_only(text: &str) -> bool {
+    let mut quotes = false;
+    text.chars().all(|ch| {
+        if matches!(ch, '"' | '\'' | '“' | '”' | '‘' | '’') {
+            quotes = true;
+            true
+        } else {
+            ch.is_whitespace()
+        }
+    }) && quotes
 }
 
 impl ResponsesStreamConverter {
@@ -79,6 +92,7 @@ impl ResponsesStreamConverter {
             next_message_content_index: 0,
             next_output_index: 0,
             message_text: String::new(),
+            message_quote_prefix_held: false,
             refusal_text: String::new(),
             reasoning_text: String::new(),
             response_status,
@@ -389,14 +403,7 @@ impl ResponsesStreamConverter {
             .and_then(|value| value.as_str())
             .filter(|text| !text.is_empty())
         {
-            self.ensure_message_content_part("output_text", output);
-            self.message_text.push_str(text);
-            append_response_delta(
-                output,
-                "response.output_text.delta",
-                text,
-                self.message_identity("output_text"),
-            );
+            self.push_message_text_delta(text, output);
         }
 
         if let Some(reasoning) = delta
@@ -425,6 +432,9 @@ impl ResponsesStreamConverter {
         let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array()) else {
             return;
         };
+        if !tool_calls.is_empty() {
+            self.discard_quote_prefix_before_tool();
+        }
         for tool_call in tool_calls {
             let index = tool_call
                 .get("index")
@@ -455,6 +465,61 @@ impl ResponsesStreamConverter {
                 self.ensure_tool_item(index, output);
             }
             self.emit_pending_tool_arguments(index, output);
+        }
+    }
+
+    fn push_message_text_delta(&mut self, text: &str, output: &mut String) {
+        if self.preserved_response.is_none() && self.message_text.is_empty() && is_quote_only(text)
+        {
+            self.message_text.push_str(text);
+            self.message_quote_prefix_held = true;
+            return;
+        }
+
+        if self.message_quote_prefix_held {
+            if is_quote_only(text) {
+                self.message_text.push_str(text);
+                return;
+            }
+            self.message_quote_prefix_held = false;
+            self.ensure_message_content_part("output_text", output);
+            self.message_text.push_str(text);
+            append_response_delta(
+                output,
+                "response.output_text.delta",
+                &self.message_text.clone(),
+                self.message_identity("output_text"),
+            );
+            return;
+        }
+
+        self.ensure_message_content_part("output_text", output);
+        self.message_text.push_str(text);
+        append_response_delta(
+            output,
+            "response.output_text.delta",
+            text,
+            self.message_identity("output_text"),
+        );
+    }
+
+    fn discard_quote_prefix_before_tool(&mut self) {
+        if self.message_quote_prefix_held {
+            self.message_text.clear();
+            self.message_quote_prefix_held = false;
+        }
+    }
+
+    fn flush_held_quote_prefix(&mut self, output: &mut String) {
+        if self.message_quote_prefix_held {
+            self.ensure_message_content_part("output_text", output);
+            append_response_delta(
+                output,
+                "response.output_text.delta",
+                &self.message_text.clone(),
+                self.message_identity("output_text"),
+            );
+            self.message_quote_prefix_held = false;
         }
     }
 
@@ -525,6 +590,7 @@ impl ResponsesStreamConverter {
         let Some(block) = chunk.get("content_block") else {
             return;
         };
+        self.discard_quote_prefix_before_tool();
         if block.get("type").and_then(|value| value.as_str()) != Some("tool_use") {
             return;
         }
@@ -594,14 +660,7 @@ impl ResponsesStreamConverter {
                     .and_then(|value| value.as_str())
                     .filter(|text| !text.is_empty())
                 {
-                    self.ensure_message_content_part("output_text", output);
-                    self.message_text.push_str(text);
-                    append_response_delta(
-                        output,
-                        "response.output_text.delta",
-                        text,
-                        self.message_identity("output_text"),
-                    );
+                    self.push_message_text_delta(text, output);
                 }
                 if let Some(thinking) = delta
                     .get("thinking")
@@ -637,6 +696,7 @@ impl ResponsesStreamConverter {
             append_output_item_done(&mut output, output_index, &reasoning_item);
         }
 
+        self.flush_held_quote_prefix(&mut output);
         self.finish_message_content_parts(&mut output);
 
         if self.preserved_response.is_none() && self.message_item_added {

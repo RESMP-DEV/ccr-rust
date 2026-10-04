@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   following user turn. This prevents fallback providers from rejecting a
   sequence with `tool_use` blocks that lack adjacent `tool_result` blocks, and
   avoids feeding Codex quote-only continuation messages back as visible text.
+  Streaming Responses conversion also withholds a quote-only assistant prefix until
+  the turn's next item is known: tool use drops it, while completing without a
+  tool call emits the text unchanged.
   Validation: regression coverage reproduces blank Codex continuations plus parallel
   tool calls/results, and `cargo clippy --all-targets -- -D warnings` plus
   `cargo test --all-features` pass locally.
