@@ -207,6 +207,92 @@ pub(super) fn transform_tool_result_message_to_anthropic(
     );
 }
 
+/// Normalize OpenAI-style message fragments into Anthropic conversational turns.
+///
+/// Codex continuation history can contain blank assistant messages and one
+/// assistant message per parallel tool call. Anthropic-compatible providers
+/// require one assistant turn containing every tool_use and the immediately
+/// following user turn containing every matching tool_result.
+pub(super) fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
+    let mut normalized: Vec<Value> = Vec::with_capacity(messages.len());
+
+    for message in messages {
+        let Some(message_obj) = message.as_object() else {
+            normalized.push(message);
+            continue;
+        };
+        let role = message_obj
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if role == "assistant" && is_blank_anthropic_message(message_obj) {
+            continue;
+        }
+
+        let merge_with_last = normalized
+            .last()
+            .and_then(Value::as_object)
+            .and_then(|last| last.get("role"))
+            .and_then(Value::as_str)
+            .is_some_and(|last_role| last_role == role);
+
+        if merge_with_last {
+            let last = normalized.last_mut().expect("last message was checked");
+            merge_anthropic_message_content(last, message_obj);
+        } else {
+            normalized.push(Value::Object(message_obj.clone()));
+        }
+    }
+
+    normalized
+}
+
+fn is_blank_anthropic_message(message: &serde_json::Map<String, Value>) -> bool {
+    match message.get("content") {
+        Some(Value::Array(blocks)) => blocks.iter().all(|block| {
+            block.as_object().is_some_and(|obj| {
+                obj.get("type").and_then(Value::as_str) == Some("text")
+                    && obj
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.trim().is_empty())
+            })
+        }),
+        Some(Value::String(text)) => text.trim().is_empty(),
+        Some(Value::Null) | None => true,
+        Some(_) => false,
+    }
+}
+
+fn merge_anthropic_message_content(
+    target: &mut Value,
+    additional: &serde_json::Map<String, Value>,
+) {
+    let target_obj = target
+        .as_object_mut()
+        .expect("target message must be an object");
+    let target_content = target_obj
+        .entry("content".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !target_content.is_array() {
+        *target_content = serde_json::json!([target_content.clone()]);
+    }
+
+    let Some(target_blocks) = target_content.as_array_mut() else {
+        return;
+    };
+    match additional.get("content") {
+        Some(Value::Array(blocks)) => target_blocks.extend(blocks.iter().cloned()),
+        Some(Value::String(text)) if !text.is_empty() => target_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": text
+        })),
+        Some(Value::Null) | None => {}
+        Some(other) => target_blocks.push(other.clone()),
+    }
+}
+
 /// Extract plain text from content that may be a string, block array, or object.
 pub(super) fn extract_text_content(content: &Value) -> String {
     match content {

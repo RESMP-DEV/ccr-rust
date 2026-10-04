@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Hardened Responses-to-Anthropic continuation normalization for Codex tool
+  turns: blank assistant messages are dropped, parallel tool calls are merged
+  into one assistant turn, and their results are merged into the immediately
+  following user turn. This prevents fallback providers from rejecting a
+  sequence with `tool_use` blocks that lack adjacent `tool_result` blocks, and
+  avoids feeding Codex quote-only continuation messages back as visible text.
+  Validation: regression coverage reproduces blank Codex continuations plus parallel
+  tool calls/results, and `cargo clippy --all-targets -- -D warnings` plus
+  `cargo test --all-features` pass locally.
 - Added an optional shared fallback-policy helper for multiple local listeners.
   One policy derives registered configurations while retaining their primary
   routes, protocol settings and retry hold limits. Service launchers and worker

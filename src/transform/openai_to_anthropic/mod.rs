@@ -81,7 +81,7 @@ impl Transformer for OpenAiToAnthropicTransformer {
                         transformed_messages.push(message.clone());
                     }
                 }
-                *messages_array = transformed_messages;
+                *messages_array = normalize_anthropic_messages(transformed_messages);
             }
         }
 
@@ -639,6 +639,84 @@ mod tests {
         assert_eq!(messages[1]["content"][0]["type"], "tool_result");
         assert_eq!(messages[1]["content"][0]["tool_use_id"], "call_123");
         assert_eq!(messages[1]["content"][0]["content"], "tool output");
+    }
+
+    #[test]
+    fn test_transform_request_merges_parallel_tool_turns_and_drops_blank_assistant() {
+        let transformer = OpenAiToAnthropicTransformer;
+
+        let openai_request = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "Check state"},
+                {"role": "assistant", "content": "Checking"},
+                {"role": "assistant", "content": ""},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "first", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "second", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "one"},
+                {"role": "tool", "tool_call_id": "call_2", "content": "two"},
+                {"role": "assistant", "content": ""},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_3",
+                        "type": "function",
+                        "function": {"name": "third", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_3", "content": "three"},
+                {"role": "assistant", "content": "Finished"}
+            ]
+        });
+
+        let result = transformer.transform_request(openai_request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 6);
+        assert_eq!(messages[0]["role"], "user");
+
+        let assistant = &messages[1];
+        assert_eq!(assistant["role"], "assistant");
+        let blocks = assistant["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "Checking");
+        let tool_ids: Vec<_> = blocks[1..]
+            .iter()
+            .map(|block| block["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(tool_ids, vec!["call_1", "call_2"]);
+
+        let results = &messages[2];
+        assert_eq!(results["role"], "user");
+        let result_ids: Vec<_> = results["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["tool_use_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(result_ids, vec!["call_1", "call_2"]);
+        assert_eq!(messages[3]["role"], "assistant");
+        assert_eq!(messages[3]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[3]["content"][0]["id"], "call_3");
+        assert_eq!(messages[4]["role"], "user");
+        assert_eq!(messages[4]["content"][0]["tool_use_id"], "call_3");
+        assert_eq!(messages[5]["role"], "assistant");
+        assert_eq!(messages[5]["content"][0]["text"], "Finished");
     }
 
     #[test]
