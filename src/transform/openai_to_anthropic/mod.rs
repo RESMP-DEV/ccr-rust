@@ -758,6 +758,52 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_request_keeps_malformed_tool_call_paired_with_result() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_bad_json",
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{truncated"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_bad_json", "content": "real result"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[0]["content"][0]["id"], "call_bad_json");
+        assert_eq!(
+            messages[0]["content"][0]["input"]["ccr_invalid_arguments"],
+            "{truncated"
+        );
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[1]["content"][0]["tool_use_id"], "call_bad_json");
+    }
+
+    #[test]
+    fn test_transform_request_drops_blank_user_fragment() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": " "},
+                {"role": "user", "content": "real request"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"][0]["text"], "real request");
+    }
+
+    #[test]
     fn test_transform_request_orders_tool_results_before_user_text() {
         let transformer = OpenAiToAnthropicTransformer;
         let request = serde_json::json!({

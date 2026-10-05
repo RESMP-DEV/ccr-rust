@@ -226,7 +226,7 @@ pub(super) fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
             .and_then(Value::as_str)
             .unwrap_or_default();
 
-        if role == "assistant" && is_blank_anthropic_message(message_obj) {
+        if matches!(role, "assistant" | "user") && is_blank_anthropic_message(message_obj) {
             continue;
         }
 
@@ -256,32 +256,26 @@ pub(super) fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
 /// rather than silently discarded.
 fn repair_anthropic_tool_turns(messages: Vec<Value>) -> Vec<Value> {
     let mut repaired = Vec::with_capacity(messages.len() + 1);
-    let mut index = 0;
+    let mut messages = messages.into_iter().peekable();
 
-    while index < messages.len() {
-        let message = messages[index].clone();
+    while let Some(mut message) = messages.next() {
         let expected_ids = assistant_tool_use_ids(&message);
         if expected_ids.is_empty() {
-            let mut message = message;
             neutralize_unmatched_tool_results(&mut message, &[]);
             repaired.push(message);
-            index += 1;
             continue;
         }
 
         repaired.push(message);
-        index += 1;
-
-        if index < messages.len()
-            && messages[index]
-                .get("role")
-                .and_then(Value::as_str)
-                .is_some_and(|role| role == "user")
+        if messages
+            .peek()
+            .and_then(|next| next.get("role"))
+            .and_then(Value::as_str)
+            .is_some_and(|role| role == "user")
         {
-            let mut result_message = messages[index].clone();
+            let mut result_message = messages.next().expect("peek confirmed a message");
             repair_user_tool_results(&mut result_message, &expected_ids);
             repaired.push(result_message);
-            index += 1;
         } else {
             repaired.push(synthetic_tool_results(&expected_ids));
         }
@@ -299,6 +293,7 @@ fn assistant_tool_use_ids(message: &Value) -> Vec<String> {
         return Vec::new();
     }
 
+    let mut seen = std::collections::HashSet::new();
     message
         .get("content")
         .and_then(Value::as_array)
@@ -307,6 +302,7 @@ fn assistant_tool_use_ids(message: &Value) -> Vec<String> {
                 .iter()
                 .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
                 .filter_map(|block| block.get("id").and_then(Value::as_str))
+                .filter(|id| seen.insert((*id).to_string()))
                 .map(str::to_string)
                 .collect()
         })
@@ -633,12 +629,21 @@ pub(super) fn convert_openai_content_block(block: &Value) -> Result<Value> {
 /// ```
 pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
     let function = tool_call.get("function")?;
-
-    let name = function.get("name")?.as_str()?;
-    let arguments_str = function.get("arguments")?.as_str()?;
-
-    // Parse arguments JSON string into an object
-    let input: Value = serde_json::from_str(arguments_str).ok()?;
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("tool");
+    let arguments_str = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
+    let parsed = serde_json::from_str::<Value>(arguments_str).unwrap_or(Value::Null);
+    let input = if parsed.is_object() {
+        parsed
+    } else {
+        serde_json::json!({ "ccr_invalid_arguments": arguments_str })
+    };
 
     // Get or generate tool ID
     let id = tool_call
@@ -657,6 +662,30 @@ pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_tool_use_ids_deduplicates_repeated_ids() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_same", "name": "probe", "input": {}},
+                {"type": "tool_use", "id": "call_same", "name": "probe", "input": {}}
+            ]
+        });
+        assert_eq!(assistant_tool_use_ids(&message), vec!["call_same"]);
+    }
+
+    #[test]
+    fn malformed_tool_arguments_remain_a_paired_tool_use() {
+        let tool_call = serde_json::json!({
+            "id": "call_bad_json",
+            "function": {"name": "probe", "arguments": "{truncated"}
+        });
+        let converted = convert_openai_tool_call(&tool_call).expect("tool call must remain paired");
+        assert_eq!(converted["type"], "tool_use");
+        assert_eq!(converted["id"], "call_bad_json");
+        assert_eq!(converted["input"]["ccr_invalid_arguments"], "{truncated");
+    }
 
     #[test]
     fn repair_user_tool_results_wraps_raw_string_content() {

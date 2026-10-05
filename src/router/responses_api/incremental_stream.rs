@@ -53,16 +53,9 @@ pub(super) struct ResponsesStreamConverter {
     finished: bool,
 }
 
-fn is_quote_only(text: &str) -> bool {
-    let mut quotes = false;
-    text.chars().all(|ch| {
-        if matches!(ch, '"' | '\'' | '“' | '”' | '‘' | '’') {
-            quotes = true;
-            true
-        } else {
-            ch.is_whitespace()
-        }
-    }) && quotes
+fn is_quote_prefix_candidate(text: &str) -> bool {
+    text.chars()
+        .all(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '“' | '”' | '‘' | '’'))
 }
 
 impl ResponsesStreamConverter {
@@ -469,16 +462,13 @@ impl ResponsesStreamConverter {
     }
 
     fn push_message_text_delta(&mut self, text: &str, output: &mut String) {
-        if self.preserved_response.is_none() && self.message_text.is_empty() && is_quote_only(text)
-        {
+        let can_hold_prefix = self.preserved_response.is_none()
+            && !self.message_text_part_added
+            && is_quote_prefix_candidate(text);
+        if can_hold_prefix || self.message_quote_prefix_held {
             self.message_text.push_str(text);
             self.message_quote_prefix_held = true;
-            return;
-        }
-
-        if self.message_quote_prefix_held {
-            self.message_text.push_str(text);
-            if is_quote_only(&self.message_text) {
+            if is_quote_prefix_candidate(&self.message_text) {
                 return;
             }
             self.message_quote_prefix_held = false;

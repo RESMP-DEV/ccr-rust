@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unmatched or duplicate result is retained as labeled text, and the next user turn
   remains protocol-valid. This is applied only after malformed continuation shape is
   detected, so complete tool histories pass through unchanged.
+- Review hardening preserves pairing when OpenAI tool arguments are truncated or
+  invalid by carrying the raw arguments in a typed marker, deduplicates repeated
+  tool IDs, drops blank user/assistant fragments, moves tool results ahead of text,
+  and moves continuation repair inputs instead of deep-cloning whole histories.
 - Added an optional shared fallback-policy helper for multiple local listeners.
   One policy derives registered configurations while retaining their primary
   routes, protocol settings and retry hold limits. Service launchers and worker
