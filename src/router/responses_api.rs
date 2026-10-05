@@ -1639,6 +1639,49 @@ mod tests {
     }
 
     #[test]
+    fn incremental_stream_does_not_suppress_post_tool_quote_text() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_post_tool_quote", "model": "test-model"}
+        });
+        let first_tool = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_before_quote",
+                "name": "probe",
+                "input": {}
+            }
+        });
+        let quote_text = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        let second_tool = serde_json::json!({
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_after_quote",
+                "name": "probe",
+                "input": {}
+            }
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let first = converter.push_frame(Some("content_block_start"), &first_tool.to_string());
+        let quote = converter.push_frame(Some("content_block_delta"), &quote_text.to_string());
+        let second = converter.push_frame(Some("content_block_start"), &second_tool.to_string());
+        let terminal = converter.finish();
+        let combined = format!("{first}{quote}{second}{terminal}");
+        assert!(combined.contains("response.output_text.delta"));
+        assert!(combined.contains("response.output_text.done"));
+    }
+
+    #[test]
     fn incremental_stream_preserves_quote_only_final_text() {
         let mut converter = ResponsesStreamConverter::new(None);
         let message_start = serde_json::json!({

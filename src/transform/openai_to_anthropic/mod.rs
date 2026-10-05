@@ -788,19 +788,56 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_request_drops_blank_user_fragment() {
+    fn test_transform_request_leaves_complete_ordered_tool_turn_unchanged() {
         let transformer = OpenAiToAnthropicTransformer;
         let request = serde_json::json!({
             "messages": [
-                {"role": "user", "content": " "},
-                {"role": "user", "content": "real request"}
+                {"role": "user", "content": "run"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_complete",
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{\"ok\":true}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_complete", "content": "result"},
+                {"role": "user", "content": "continue"}
             ]
         });
 
         let result = transformer.transform_request(request).unwrap();
         let messages = result["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["content"][0]["text"], "real request");
+        assert_eq!(messages.len(), 3);
+        let blocks = messages[2]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "call_complete");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "continue");
+    }
+
+    #[test]
+    fn test_transform_request_does_not_synthesize_result_for_final_tool_turn() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "run"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_pending",
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{}"}
+                    }]
+                }
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["id"], "call_pending");
     }
 
     #[test]
@@ -848,13 +885,14 @@ mod tests {
 
         let result = transformer.transform_request(request).unwrap();
         let messages = result["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[1]["role"], "assistant");
         assert_eq!(messages[1]["content"][0]["type"], "tool_use");
-        assert_eq!(messages[1]["content"][1]["text"], "done");
         assert_eq!(messages[2]["role"], "user");
         assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_missing");
         assert_eq!(messages[2]["content"][0]["is_error"], true);
+        assert_eq!(messages[3]["role"], "assistant");
+        assert_eq!(messages[3]["content"][0]["text"], "done");
     }
 
     #[test]
