@@ -590,10 +590,10 @@ impl ResponsesStreamConverter {
         let Some(block) = chunk.get("content_block") else {
             return;
         };
-        self.discard_quote_prefix_before_tool();
         if block.get("type").and_then(|value| value.as_str()) != Some("tool_use") {
             return;
         }
+        self.discard_quote_prefix_before_tool();
         let index = chunk
             .get("index")
             .and_then(|value| value.as_u64())

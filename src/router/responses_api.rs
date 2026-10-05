@@ -1505,6 +1505,49 @@ mod tests {
     }
 
     #[test]
+    fn incremental_stream_preserves_quote_prefix_across_non_tool_block_start() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_quote_block", "model": "test-model"}
+        });
+        let quote_preamble = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        let text_block_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""}
+        });
+        let continuation = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "hello"}
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let preamble_events =
+            converter.push_frame(Some("content_block_delta"), &quote_preamble.to_string());
+        let block_events =
+            converter.push_frame(Some("content_block_start"), &text_block_start.to_string());
+        let continuation_events =
+            converter.push_frame(Some("content_block_delta"), &continuation.to_string());
+        let terminal = converter.finish();
+
+        assert!(preamble_events.is_empty());
+        let delta_text = parse_sse_frames(&format!(
+            "{preamble_events}{block_events}{continuation_events}{terminal}"
+        ))
+        .into_iter()
+        .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+        .find(|event| event["type"] == "response.output_text.delta")
+        .and_then(|event| event["delta"].as_str().map(str::to_string));
+        assert_eq!(delta_text.as_deref(), Some("\"\"hello"));
+    }
+
+    #[test]
     fn incremental_stream_preserves_quote_only_final_text() {
         let mut converter = ResponsesStreamConverter::new(None);
         let message_start = serde_json::json!({
