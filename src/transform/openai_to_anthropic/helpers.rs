@@ -336,7 +336,7 @@ fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
     let mut rest = Vec::new();
     for block in std::mem::take(blocks) {
         if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-            rest.push(block);
+            rest.push(normalize_non_tool_content_block(block));
             continue;
         }
         match block.get("tool_use_id").and_then(Value::as_str) {
@@ -386,6 +386,16 @@ fn neutralize_unmatched_tool_results(message: &mut Value, expected_ids: &[String
             *block = unmatched_tool_result_text(block);
         }
     }
+}
+
+fn normalize_non_tool_content_block(block: Value) -> Value {
+    if block.is_object() {
+        return block;
+    }
+    serde_json::json!({
+        "type": "text",
+        "text": extract_text_content(&block),
+    })
 }
 
 fn synthetic_tool_results(ids: &[String]) -> Value {
@@ -642,4 +652,25 @@ pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
         "name": name,
         "input": input
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repair_user_tool_results_wraps_raw_string_content() {
+        let mut message = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_a", "content": "ok"},
+                "continue"
+            ]
+        });
+        repair_user_tool_results(&mut message, &["call_a".to_string()]);
+        let blocks = message["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "continue");
+    }
 }
