@@ -758,6 +758,35 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_request_orders_tool_results_before_user_text() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_a", "type": "function", "function": {"name": "a", "arguments": "{}"}},
+                        {"id": "call_b", "type": "function", "function": {"name": "b", "arguments": "{}"}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "call_a", "content": "real a"},
+                {"role": "user", "content": "continue"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        let blocks = messages[1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "call_a");
+        assert_eq!(blocks[1]["type"], "tool_result");
+        assert_eq!(blocks[1]["tool_use_id"], "call_b");
+        assert_eq!(blocks[1]["is_error"], true);
+        assert_eq!(blocks[2]["type"], "text");
+        assert_eq!(blocks[2]["text"], "continue");
+    }
+
+    #[test]
     fn test_transform_request_inserts_missing_result_before_next_assistant() {
         let transformer = OpenAiToAnthropicTransformer;
         let request = serde_json::json!({

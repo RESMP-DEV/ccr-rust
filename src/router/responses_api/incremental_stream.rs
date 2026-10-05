@@ -477,13 +477,12 @@ impl ResponsesStreamConverter {
         }
 
         if self.message_quote_prefix_held {
-            if is_quote_only(text) {
-                self.message_text.push_str(text);
+            self.message_text.push_str(text);
+            if is_quote_only(&self.message_text) {
                 return;
             }
             self.message_quote_prefix_held = false;
             self.ensure_message_content_part("output_text", output);
-            self.message_text.push_str(text);
             append_response_delta(
                 output,
                 "response.output_text.delta",

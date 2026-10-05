@@ -332,18 +332,19 @@ fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
         .cloned()
         .collect::<std::collections::HashSet<_>>();
     let mut seen = std::collections::HashSet::new();
-    for block in blocks.iter_mut() {
+    let mut results = Vec::new();
+    let mut rest = Vec::new();
+    for block in std::mem::take(blocks) {
         if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            rest.push(block);
             continue;
         }
-        let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
-            *block = unmatched_tool_result_text(block);
-            continue;
-        };
-        if expected.contains(id) && seen.insert(id.to_string()) {
-            continue;
+        match block.get("tool_use_id").and_then(Value::as_str) {
+            Some(id) if expected.contains(id) && seen.insert(id.to_string()) => {
+                results.push(block);
+            }
+            _ => rest.push(unmatched_tool_result_text(&block)),
         }
-        *block = unmatched_tool_result_text(block);
     }
 
     let missing = expected_ids
@@ -351,7 +352,9 @@ fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
         .filter(|id| !seen.contains(*id))
         .cloned()
         .collect::<Vec<_>>();
-    blocks.extend(synthetic_tool_result_blocks(&missing));
+    results.extend(synthetic_tool_result_blocks(&missing));
+    results.extend(rest);
+    *blocks = results;
 }
 
 fn neutralize_unmatched_tool_results(message: &mut Value, expected_ids: &[String]) {

@@ -1505,6 +1505,54 @@ mod tests {
     }
 
     #[test]
+    fn incremental_stream_holds_split_quote_prefix_until_nonquote_text() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_quote_split", "model": "test-model"}
+        });
+        let first_quote = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\""}
+        });
+        let whitespace = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": " "}
+        });
+        let second_quote = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\""}
+        });
+        let tool_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_split_quote",
+                "name": "probe",
+                "input": {}
+            }
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let first = converter.push_frame(Some("content_block_delta"), &first_quote.to_string());
+        let space = converter.push_frame(Some("content_block_delta"), &whitespace.to_string());
+        let second = converter.push_frame(Some("content_block_delta"), &second_quote.to_string());
+        let tool = converter.push_frame(Some("content_block_start"), &tool_start.to_string());
+        let terminal = converter.finish();
+        let event_types = parse_sse_frames(&format!("{first}{space}{second}{tool}{terminal}"))
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .filter_map(|event| event["type"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(!event_types.contains(&"response.output_text.delta".to_string()));
+        assert!(!event_types.contains(&"response.output_text.done".to_string()));
+    }
+
+    #[test]
     fn incremental_stream_preserves_quote_prefix_across_non_tool_block_start() {
         let mut converter = ResponsesStreamConverter::new(None);
         let message_start = serde_json::json!({
