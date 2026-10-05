@@ -214,7 +214,9 @@ pub(super) fn transform_tool_result_message_to_anthropic(
 /// Codex continuation history can contain blank assistant messages and one
 /// assistant message per parallel tool call. Anthropic-compatible providers
 /// require one assistant turn containing every tool_use and the immediately
-/// following user turn containing every matching tool_result.
+/// following user turn containing every matching tool_result. Merged turns
+/// intentionally carry Anthropic role/content semantics; source-only OpenAI
+/// metadata is not forwarded because it is not part of the Messages request.
 pub(super) fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
     let mut normalized: Vec<Value> = Vec::with_capacity(messages.len());
 
@@ -702,15 +704,17 @@ pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
         .get("name")
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())?;
-    let arguments_str = function
-        .get("arguments")
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
-    let parsed = serde_json::from_str::<Value>(arguments_str).unwrap_or(Value::Null);
-    let input = if parsed.is_object() {
-        parsed
-    } else {
-        serde_json::json!({ "ccr_invalid_arguments": arguments_str })
+    let input = match function.get("arguments") {
+        Some(value @ Value::Object(_)) => value.clone(),
+        Some(Value::String(arguments_str)) => {
+            let parsed = serde_json::from_str::<Value>(arguments_str).unwrap_or(Value::Null);
+            if parsed.is_object() {
+                parsed
+            } else {
+                serde_json::json!({ "ccr_invalid_arguments": arguments_str })
+            }
+        }
+        _ => serde_json::json!({}),
     };
 
     // Get a tool ID, or derive a stable request-local ID for an idless call.
@@ -719,7 +723,7 @@ pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
         .and_then(|v| v.as_str())
         .filter(|id| !id.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| generated_tool_id(name, arguments_str));
+        .unwrap_or_else(|| generated_tool_id(name, &input.to_string()));
 
     Some(serde_json::json!({
         "type": "tool_use",
@@ -764,6 +768,16 @@ mod tests {
             &message,
             &["call_complete".to_string()]
         ));
+    }
+
+    #[test]
+    fn object_tool_arguments_are_preserved_directly() {
+        let tool_call = serde_json::json!({
+            "id": "call_object_args",
+            "function": {"name": "probe", "arguments": {"ok": true}}
+        });
+        let converted = convert_openai_tool_call(&tool_call).expect("named call must convert");
+        assert_eq!(converted["input"], serde_json::json!({"ok": true}));
     }
 
     #[test]
