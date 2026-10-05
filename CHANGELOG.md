@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Validation: regression coverage reproduces blank Codex continuations plus parallel
   tool calls/results, and `cargo clippy --all-targets -- -D warnings` plus
   `cargo test --all-features` pass locally.
+- Continuation repair now handles structurally incomplete histories without
+  fabricating success: a missing tool result becomes an explicit error result, an
+  unmatched or duplicate result is retained as labeled text, and the next user turn
+  remains protocol-valid. This is applied only after malformed continuation shape is
+  detected, so complete tool histories pass through unchanged.
 - Added an optional shared fallback-policy helper for multiple local listeners.
   One policy derives registered configurations while retaining their primary
   routes, protocol settings and retry hold limits. Service launchers and worker

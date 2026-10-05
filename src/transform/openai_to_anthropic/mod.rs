@@ -623,7 +623,15 @@ mod tests {
         let openai_request = serde_json::json!({
             "model": "gpt-4",
             "messages": [
-                {"role": "assistant", "content": "Calling tool"},
+                {
+                    "role": "assistant",
+                    "content": "Calling tool",
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "tool", "arguments": "{}"}
+                    }]
+                },
                 {
                     "role": "tool",
                     "tool_call_id": "call_123",
@@ -717,6 +725,79 @@ mod tests {
         assert_eq!(messages[4]["content"][0]["tool_use_id"], "call_3");
         assert_eq!(messages[5]["role"], "assistant");
         assert_eq!(messages[5]["content"][0]["text"], "Finished");
+    }
+
+    #[test]
+    fn test_transform_request_repairs_missing_parallel_tool_result() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_a", "type": "function", "function": {"name": "a", "arguments": "{}"}},
+                        {"id": "call_b", "type": "function", "function": {"name": "b", "arguments": "{}"}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "call_a", "content": "real a"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        let results = messages[1]["content"].as_array().unwrap();
+        assert_eq!(results[0]["tool_use_id"], "call_a");
+        assert_eq!(results[0]["content"], "real a");
+        assert_eq!(results[1]["tool_use_id"], "call_b");
+        assert_eq!(results[1]["is_error"], true);
+        assert!(results[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("CCR_TOOL_RESULT_MISSING"));
+    }
+
+    #[test]
+    fn test_transform_request_inserts_missing_result_before_next_assistant() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "run"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{"id": "call_missing", "type": "function", "function": {"name": "probe", "arguments": "{}"}}]
+                },
+                {"role": "assistant", "content": "done"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][1]["text"], "done");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_missing");
+        assert_eq!(messages[2]["content"][0]["is_error"], true);
+    }
+
+    #[test]
+    fn test_transform_request_retains_orphan_tool_result_as_text() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "history begins mid-turn"},
+                {"role": "tool", "tool_call_id": "orphan", "content": "orphan output"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        let text = messages[0]["content"][1]["text"].as_str().unwrap();
+        assert!(text.contains("Unmatched tool result orphan"));
+        assert!(text.contains("orphan output"));
+        assert!(!text.contains("\"type\":\"tool_result\""));
     }
 
     #[test]

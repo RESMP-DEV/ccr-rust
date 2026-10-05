@@ -245,7 +245,175 @@ pub(super) fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
         }
     }
 
-    normalized
+    repair_anthropic_tool_turns(normalized)
+}
+
+/// Repair structurally incomplete tool turns without inventing success.
+///
+/// A missing result becomes an explicit error `tool_result` so the provider
+/// accepts the conversation and the model knows the client did not supply the
+/// output. An unmatched incoming `tool_result` is retained as quoted text
+/// rather than silently discarded.
+fn repair_anthropic_tool_turns(messages: Vec<Value>) -> Vec<Value> {
+    let mut repaired = Vec::with_capacity(messages.len() + 1);
+    let mut index = 0;
+
+    while index < messages.len() {
+        let message = messages[index].clone();
+        let expected_ids = assistant_tool_use_ids(&message);
+        if expected_ids.is_empty() {
+            let mut message = message;
+            neutralize_unmatched_tool_results(&mut message, &[]);
+            repaired.push(message);
+            index += 1;
+            continue;
+        }
+
+        repaired.push(message);
+        index += 1;
+
+        if index < messages.len()
+            && messages[index]
+                .get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|role| role == "user")
+        {
+            let mut result_message = messages[index].clone();
+            repair_user_tool_results(&mut result_message, &expected_ids);
+            repaired.push(result_message);
+            index += 1;
+        } else {
+            repaired.push(synthetic_tool_results(&expected_ids));
+        }
+    }
+
+    repaired
+}
+
+fn assistant_tool_use_ids(message: &Value) -> Vec<String> {
+    let role_is_assistant = message
+        .get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role == "assistant");
+    if !role_is_assistant {
+        return Vec::new();
+    }
+
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|block| block.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
+    let Some(message_obj) = message.as_object_mut() else {
+        return;
+    };
+    let content = message_obj
+        .entry("content".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !content.is_array() {
+        *content = Value::Array(vec![content.clone()]);
+    }
+
+    let Some(blocks) = content.as_array_mut() else {
+        return;
+    };
+    let expected = expected_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen = std::collections::HashSet::new();
+    for block in blocks.iter_mut() {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+            *block = unmatched_tool_result_text(block);
+            continue;
+        };
+        if expected.contains(id) && seen.insert(id.to_string()) {
+            continue;
+        }
+        *block = unmatched_tool_result_text(block);
+    }
+
+    let missing = expected_ids
+        .iter()
+        .filter(|id| !seen.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    blocks.extend(synthetic_tool_result_blocks(&missing));
+}
+
+fn neutralize_unmatched_tool_results(message: &mut Value, expected_ids: &[String]) {
+    if message.get("role").and_then(Value::as_str) != Some("user") {
+        return;
+    }
+    let expected = expected_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let Some(message_obj) = message.as_object_mut() else {
+        return;
+    };
+    let Some(content) = message_obj.get_mut("content") else {
+        return;
+    };
+    let Some(blocks) = content.as_array_mut() else {
+        return;
+    };
+    for block in blocks.iter_mut() {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let matched = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| expected.contains(id));
+        if !matched {
+            *block = unmatched_tool_result_text(block);
+        }
+    }
+}
+
+fn synthetic_tool_results(ids: &[String]) -> Value {
+    serde_json::json!({
+        "role": "user",
+        "content": synthetic_tool_result_blocks(ids),
+    })
+}
+
+fn synthetic_tool_result_blocks(ids: &[String]) -> Vec<Value> {
+    ids.iter()
+        .map(|id| {
+            serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": id,
+                "content": "CCR_TOOL_RESULT_MISSING: the client continuation omitted this tool output",
+                "is_error": true,
+            })
+        })
+        .collect()
+}
+
+fn unmatched_tool_result_text(block: &Value) -> Value {
+    let id = block
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    serde_json::json!({
+        "type": "text",
+        "text": format!("Unmatched tool result {id}: {}", extract_text_content(block.get("content").unwrap_or(&Value::Null))),
+    })
 }
 
 fn is_blank_anthropic_message(message: &serde_json::Map<String, Value>) -> bool {
