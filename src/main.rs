@@ -450,6 +450,8 @@ async fn run_server(
     let max_request_body_bytes = config.max_request_body_bytes();
     let auth_host = config.auth_host().to_string();
     let auth_port = config.auth_port();
+    // Read the TTL before `config` moves into `AppState`.
+    let sticky_ttl = std::time::Duration::from_millis(config.router().sticky_sessions.ttl_ms);
 
     let state = AppState {
         config,
@@ -459,6 +461,9 @@ async fn run_server(
         active_streams: Arc::new(AtomicUsize::new(0)),
         max_streams,
         ratelimit_tracker,
+        admission_tracker: Arc::new(ccr_rust::admission::AdmissionTracker::new()),
+        retry_budget: Arc::new(ccr_rust::retry_budget::RetryBudget::new()),
+        sticky_sessions: Arc::new(ccr_rust::stickiness::StickySessionTracker::new(sticky_ttl)),
         shutdown_timeout,
         debug_capture,
     };
@@ -825,6 +830,7 @@ mod client_listener_tests {
         let path = directory.path().join("config.json");
         std::fs::write(&path, serde_json::to_vec(&config_json).unwrap()).unwrap();
         let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        let sticky_ttl = std::time::Duration::from_millis(config.router().sticky_sessions.ttl_ms);
         let state = AppState {
             config,
             ewma_tracker: Arc::new(EwmaTracker::new()),
@@ -833,6 +839,9 @@ mod client_listener_tests {
             active_streams: Arc::new(AtomicUsize::new(0)),
             max_streams: 0,
             ratelimit_tracker: Arc::new(RateLimitTracker::new()),
+            admission_tracker: Arc::new(ccr_rust::admission::AdmissionTracker::new()),
+            retry_budget: Arc::new(ccr_rust::retry_budget::RetryBudget::new()),
+            sticky_sessions: Arc::new(ccr_rust::stickiness::StickySessionTracker::new(sticky_ttl)),
             shutdown_timeout: 30,
             debug_capture: None,
         };

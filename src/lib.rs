@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+pub mod admission;
 pub mod client_auth;
 pub mod config;
 #[cfg(feature = "dashboard")]
@@ -11,10 +12,12 @@ pub mod mcp;
 pub mod metrics;
 pub mod proxy;
 pub mod ratelimit;
+pub mod retry_budget;
 pub mod router;
 pub mod routing;
 pub mod schema_validate;
 pub mod sse;
+pub mod stickiness;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 pub mod transform;
