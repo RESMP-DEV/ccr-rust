@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 
+use crate::client_auth::ClientApiKey;
 use crate::debug_capture::DebugCaptureConfig;
 
 const REASONING_EFFORT_VALUES: &[&str] =
@@ -134,6 +135,28 @@ fn validate_provider_credentials(
          Set CCR_ALLOW_UNEXPANDED_CREDENTIALS=true to override.",
         offenders.join(", ")
     );
+}
+
+fn validate_client_credentials(
+    config: &serde_json::Value,
+    expansion_failures: &[(String, String)],
+    allow_unexpanded: bool,
+) -> Result<()> {
+    if allow_unexpanded {
+        return Ok(());
+    }
+    if config.get("CLIENT_API_KEY").is_some()
+        && expansion_failures
+            .iter()
+            .any(|(pointer, _error)| pointer == "/CLIENT_API_KEY")
+    {
+        anyhow::bail!(
+            "unexpanded client API key reference: /CLIENT_API_KEY. Start via the credential \
+             launcher or export CCR_CLIENT_API_KEY before exposing the API. Set \
+             CCR_ALLOW_UNEXPANDED_CREDENTIALS=true to override for a loopback-only setup."
+        );
+    }
+    Ok(())
 }
 
 /// Validate cross-field provider requirements before the router accepts traffic.
@@ -328,6 +351,13 @@ pub struct ConfigFile {
     #[serde(default = "default_max_request_body_bytes")]
     #[serde(rename = "MAX_REQUEST_BODY_BYTES")]
     pub max_request_body_bytes: usize,
+
+    /// Client-facing API key. When set, standard `Authorization: Bearer` and
+    /// Anthropic-style `x-api-key` requests must present this key before any
+    /// API or metrics route is served.
+    #[serde(default)]
+    #[serde(rename = "CLIENT_API_KEY")]
+    pub client_api_key: Option<String>,
 }
 
 /// Runtime configuration shared across all handlers via Axum state.
@@ -345,6 +375,7 @@ struct ConfigInner {
     /// Effective request-body limit, computed (and warned about) once at
     /// load so the accessor stays side-effect free per request.
     effective_max_request_body_bytes: usize,
+    client_api_key: Option<ClientApiKey>,
 }
 
 impl Config {
@@ -392,6 +423,11 @@ impl Config {
         self.inner.effective_max_request_body_bytes
     }
 
+    /// Configured client-facing authentication, if enabled.
+    pub fn client_api_key(&self) -> Option<&ClientApiKey> {
+        self.inner.client_api_key.as_ref()
+    }
+
     /// Resolve the broker socket path.
     ///
     /// Priority: config file `BROKER_SOCKET` field > `CCR_BROKER_SOCKET` env var.
@@ -437,6 +473,7 @@ impl Config {
         // expands to text containing `$word` must not block startup.
         let allow_unexpanded_credentials = allow_unexpanded_credentials_override();
         validate_provider_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
+        validate_client_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
         let file: ConfigFile =
             serde_json::from_value(value).context("Failed to parse config JSON")?;
         validate_provider_contracts(&file.providers)?;
@@ -460,12 +497,18 @@ impl Config {
         let presets = file.presets.clone();
         let effective_max_request_body_bytes =
             compute_max_request_body_bytes(file.max_request_body_bytes);
+        let client_api_key = file
+            .client_api_key
+            .as_ref()
+            .map(|token| ClientApiKey::new(token.clone()))
+            .transpose()?;
 
         Ok(Config {
             inner: Arc::new(ConfigInner {
                 file,
                 http_client,
                 effective_max_request_body_bytes,
+                client_api_key,
             }),
             presets,
         })
@@ -1126,7 +1169,8 @@ mod credential_guard_tests {
         let mut value = config;
         let mut failures = Vec::new();
         expand_env_references(&mut value, &mut failures, "");
-        validate_provider_credentials(&value, &failures, allow_unexpanded)
+        validate_provider_credentials(&value, &failures, allow_unexpanded)?;
+        validate_client_credentials(&value, &failures, allow_unexpanded)
     }
 
     #[test]
@@ -1149,6 +1193,15 @@ mod credential_guard_tests {
         let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"api-key": "${CCR_AZURE_API_KEY}"}}], "Router": {"default": "p1,m"}}"#;
         let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
         assert!(error.to_string().contains("header 'api-key'"));
+    }
+
+    #[test]
+    fn unexpanded_client_api_key_is_rejected() {
+        let raw = r#"{"CLIENT_API_KEY": "${CCR_CLIENT_API_KEY}", "Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"]}], "Router": {"default": "p1,m"}}"#;
+        let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("client API key"), "{message}");
+        assert!(message.contains("CCR_CLIENT_API_KEY"), "{message}");
     }
 
     #[test]

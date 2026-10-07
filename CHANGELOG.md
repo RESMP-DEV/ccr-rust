@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added optional client-facing authentication through `CLIENT_API_KEY`. When
+  configured, callers must present the same key as standard
+  `Authorization: Bearer` or Anthropic-style `x-api-key`; all API, preset,
+  metrics, and observability routes are gated while `/health` remains a
+  content-free liveness probe. The key is stored as a constant-time digest and
+  can be exposed through a path-scoped Cloudflare Tunnel without sharing
+  upstream provider credentials. New remote-API documentation covers client
+  base URLs and ingress rules.
 - Hardened Responses-to-Anthropic continuation normalization for Codex tool
   turns: blank assistant messages are dropped, parallel tool calls are merged
   into one assistant turn, and their results are merged into the immediately

@@ -21,6 +21,8 @@ pub use streaming::{
 mod openai_compat;
 pub use openai_compat::handle_chat_completions;
 
+pub use crate::client_auth::require_client_auth;
+
 mod responses_api;
 pub use responses_api::handle_responses;
 

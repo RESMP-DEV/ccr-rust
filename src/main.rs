@@ -485,6 +485,10 @@ async fn run_server(
         )
         .route("/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            router::require_client_auth,
+        ))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(max_request_body_bytes))
@@ -518,6 +522,9 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     }
 
     let tiers = config.backend_tiers();
+    if config.client_api_key().is_some() {
+        println!("✓ Client API key authentication enabled");
+    }
     println!("✓ {} tier(s)", tiers.len());
     for tier in &tiers {
         println!("  - {}", tier);
