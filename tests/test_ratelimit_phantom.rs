@@ -232,3 +232,49 @@ fn test_stale_generation_success_still_updates_quota_headers() {
     // from quota exhaustion: remaining=7 alone would never block.
     assert!(tracker.should_skip_tier(tier, true));
 }
+
+/// A 429 without a server Retry-After must only pace the tier briefly.
+/// Coding-plan endpoints reject some requests under concurrency while still
+/// admitting others, so escalating local backoff blanket-skips a tier that
+/// remains partially available.
+#[test]
+fn test_429_without_retry_after_only_paces_briefly() {
+    let tracker = RateLimitTracker::new();
+    let tier = "zai-tier";
+
+    for _ in 0..10 {
+        tracker.record_429(tier, None);
+    }
+
+    let remaining = tracker
+        .backoff_remaining(tier)
+        .expect("a short pacing backoff should be active");
+    assert!(
+        remaining <= Duration::from_secs(1),
+        "backoff must not escalate without server Retry-After, got {remaining:?}"
+    );
+}
+
+/// A server-directed Retry-After is honored verbatim but capped at 60s.
+#[test]
+fn test_retry_after_honored_verbatim_and_capped() {
+    let tracker = RateLimitTracker::new();
+
+    tracker.record_429("capped-tier", Some(Duration::from_secs(120)));
+    let remaining = tracker
+        .backoff_remaining("capped-tier")
+        .expect("backoff should be active");
+    assert!(
+        remaining <= Duration::from_secs(60),
+        "backoff must be capped at 60s, got {remaining:?}"
+    );
+
+    tracker.record_429("exact-tier", Some(Duration::from_secs(30)));
+    let remaining = tracker
+        .backoff_remaining("exact-tier")
+        .expect("backoff should be active");
+    assert!(
+        remaining > Duration::from_secs(25),
+        "server-directed Retry-After must be honored, got {remaining:?}"
+    );
+}
