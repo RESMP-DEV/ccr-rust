@@ -332,18 +332,24 @@ fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
         .cloned()
         .collect::<std::collections::HashSet<_>>();
     let mut seen = std::collections::HashSet::new();
-    for block in blocks.iter_mut() {
+    let mut kept_results: Vec<Value> = Vec::new();
+    let mut others: Vec<Value> = Vec::new();
+    for block in blocks.drain(..) {
         if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            others.push(block);
             continue;
         }
-        let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
-            *block = unmatched_tool_result_text(block);
-            continue;
-        };
-        if expected.contains(id) && seen.insert(id.to_string()) {
-            continue;
+        let matched = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| expected.contains(id) && seen.insert(id.to_string()));
+        if matched {
+            kept_results.push(block);
+        } else {
+            // A duplicate or unexpected result becomes inert text, and must
+            // not sit between the kept results the API requires first.
+            others.push(unmatched_tool_result_text(&block));
         }
-        *block = unmatched_tool_result_text(block);
     }
 
     let missing = expected_ids
@@ -351,7 +357,13 @@ fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
         .filter(|id| !seen.contains(*id))
         .cloned()
         .collect::<Vec<_>>();
-    blocks.extend(synthetic_tool_result_blocks(&missing));
+    kept_results.extend(synthetic_tool_result_blocks(&missing));
+    // Anthropic requires every tool_result block to precede any text in the
+    // user message that answers a tool_use turn. Merged histories can produce
+    // [result, text] upstream, so the repaired order is: kept results,
+    // synthetic results, then text and other blocks in their original order.
+    kept_results.extend(others);
+    *blocks = kept_results;
 }
 
 fn neutralize_unmatched_tool_results(message: &mut Value, expected_ids: &[String]) {

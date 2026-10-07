@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed shared fallback policy operation on the main workstation: the route
+  order, registered listener files, consumer primaries, and shared provider
+  definitions are pinned in source, so editing the derived JSON policy cannot
+  expand routing. Before changing or restarting a shared route, operators run
+  `ccr-fallback-policy preflight --json`; unresolved credentials, transport
+  failures, and non-2xx/3xx authorization responses block the operation.
 - Changed 429 backoff marking so a rate-limit response without a server
   `Retry-After` only paces the tier for one second instead of escalating
   exponentially into a 60-second cross-request skip. Server-directed

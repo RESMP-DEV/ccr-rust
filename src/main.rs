@@ -507,10 +507,7 @@ async fn run_server(
         let auth_app = build_router(state, true, max_request_body_bytes, telemetry_enabled);
         let auth_server = axum::serve(auth_listener, auth_app)
             .with_graceful_shutdown(shutdown_signal(shutdown_timeout));
-        tokio::select! {
-            result = local_server => result?,
-            result = auth_server => result?,
-        }
+        tokio::try_join!(local_server, auth_server)?;
     } else {
         local_server.await?;
     }

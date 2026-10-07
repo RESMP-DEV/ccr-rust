@@ -539,16 +539,6 @@ pub async fn handle_messages(
                                 state.sticky_sessions.remember(key, &provider);
                             }
                         }
-                        let response_is_stream = response
-                            .headers()
-                            .get(axum::http::header::CONTENT_TYPE)
-                            .and_then(|value| value.to_str().ok())
-                            .is_some_and(|value| value.starts_with("text/event-stream"));
-                        if !response_is_stream {
-                            state
-                                .ratelimit_tracker
-                                .record_success(tier.as_str(), None, None);
-                        }
                         record_request_with_frontend(tier_name, frontend);
                         record_request_duration_with_frontend(tier_name, total_duration, frontend);
                         sync_ewma_gauge(&state.ewma_tracker);

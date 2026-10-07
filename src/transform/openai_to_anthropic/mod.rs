@@ -275,6 +275,87 @@ impl Transformer for OpenAiToAnthropicTransformer {
 mod tests {
     use super::*;
 
+    /// Anthropic requires `tool_result` blocks before any text in the user
+    /// message answering a `tool_use` turn. A merged history can arrive as
+    /// [result, text], so repairing a partially answered multi-tool turn must
+    /// emit kept results, synthetic results, then text, in that order.
+    #[test]
+    fn partial_tool_turn_keeps_results_before_text() {
+        let assistant_with_two_calls = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_a", "name": "read", "input": {}},
+                {"type": "tool_use", "id": "call_b", "name": "shell", "input": {}}
+            ]
+        });
+        let user_with_one_result_and_text = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_a", "content": "file text"},
+                {"type": "text", "text": "now explain"}
+            ]
+        });
+
+        let repaired = normalize_anthropic_messages(vec![
+            assistant_with_two_calls,
+            user_with_one_result_and_text,
+        ]);
+
+        let content = repaired[1]["content"].as_array().expect("content array");
+        let types: Vec<&str> = content
+            .iter()
+            .filter_map(|block| block.get("type").and_then(|value| value.as_str()))
+            .collect();
+
+        assert_eq!(
+            types,
+            vec!["tool_result", "tool_result", "text"],
+            "every tool_result must precede text blocks, got {types:?}"
+        );
+        assert_eq!(content[0]["tool_use_id"], "call_a");
+        assert_eq!(
+            content[1]["tool_use_id"], "call_b",
+            "the synthetic missing result keeps its own id"
+        );
+        assert!(content[1]["is_error"].as_bool().unwrap_or(false));
+        assert_eq!(content[2]["text"], "now explain");
+    }
+
+    /// A duplicate or unexpected `tool_result` degrades to text and must not
+    /// be interleaved between kept results and the remaining blocks.
+    #[test]
+    fn unmatched_tool_results_become_text_after_kept_results() {
+        let assistant = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_a", "name": "read", "input": {}},
+                {"type": "tool_use", "id": "call_b", "name": "read", "input": {}}
+            ]
+        });
+        let user = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_a", "content": "a"},
+                {"type": "tool_result", "tool_use_id": "call_a", "content": "duplicate"},
+                {"type": "text", "text": "follow up"}
+            ]
+        });
+
+        let repaired = normalize_anthropic_messages(vec![assistant, user]);
+
+        let content = repaired[1]["content"].as_array().expect("content array");
+        let types: Vec<&str> = content
+            .iter()
+            .filter_map(|block| block.get("type").and_then(|value| value.as_str()))
+            .collect();
+
+        assert_eq!(
+            types,
+            vec!["tool_result", "tool_result", "text", "text"],
+            "kept results, synthetic results, then converted and original text, got {types:?}"
+        );
+    }
+
     #[test]
     fn test_transformer_name() {
         let transformer = OpenAiToAnthropicTransformer;

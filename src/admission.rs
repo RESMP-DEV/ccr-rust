@@ -21,6 +21,7 @@ const DEFAULT_MAX_LIMIT: usize = 64;
 struct TierAdmission {
     inflight: AtomicU64,
     limit: AtomicU64,
+    ceiling: u64,
 }
 
 impl TierAdmission {
@@ -29,12 +30,13 @@ impl TierAdmission {
         Self {
             inflight: AtomicU64::new(0),
             limit: AtomicU64::new(initial as u64),
+            ceiling: initial as u64,
         }
     }
 
     fn record_success(&self, key: &str) {
         let old = self.limit.fetch_add(1, Ordering::AcqRel);
-        let next = (old + 1).min(DEFAULT_MAX_LIMIT as u64);
+        let next = (old + 1).min(self.ceiling);
         self.limit.store(next, Ordering::Release);
         metrics::record_tier_limit(key, next);
     }
@@ -101,18 +103,12 @@ impl AdmissionTracker {
             .clone()
     }
 
-    /// Install or update a provider's configured limit for one route.
+    /// Install one route's configured initial limit. Later calls never reset
+    /// AIMD state; the configured value is only the route's ceiling.
     pub fn configure(&self, key: &str, provider_limit: Option<usize>) {
-        if let Some(maximum) = provider_limit {
-            let bounded = maximum.clamp(DEFAULT_MIN_LIMIT, DEFAULT_MAX_LIMIT) as u64;
-            let state = self.state(key, provider_limit);
-            state.limit.store(bounded, Ordering::Release);
-            metrics::record_tier_limit(key, bounded);
-        } else {
-            // Touch the default state so gauges exist before the first attempt.
-            let state = self.state(key, None);
-            metrics::record_tier_limit(key, state.limit.load(Ordering::Acquire));
-        }
+        // `state` installs the configured initial limit only on first insert.
+        let state = self.state(key, provider_limit);
+        metrics::record_tier_limit(key, state.limit.load(Ordering::Acquire));
     }
 
     /// Acquire a slot if the route is below its current AIMD limit.
@@ -166,6 +162,16 @@ mod tests {
         assert_eq!(tracker.state("p,m", None).limit.load(Ordering::Acquire), 2);
         tracker.state("p,m", None).record_success("p,m");
         assert_eq!(tracker.state("p,m", None).limit.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn configure_does_not_reset_an_aimd_cut() {
+        let tracker = AdmissionTracker::new();
+        tracker.configure("p,m", Some(8));
+        tracker.record_rejection("p,m");
+        tracker.configure("p,m", Some(8));
+        tracker.at_capacity("p,m", Some(8));
+        assert_eq!(tracker.state("p,m", None).limit.load(Ordering::Acquire), 4);
     }
 
     #[test]
