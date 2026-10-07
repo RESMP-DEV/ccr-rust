@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed Responses streaming conversion to withhold a trailing run of at least
+  two double quotes from an assistant message until the next item is known.
+  The quote suffix is discarded when the same response contains a tool call
+  (the provider prelude corruption observed from MiniMax) and preserved when
+  text completes without a tool call.
 - Changed 429 backoff marking so a rate-limit response without a server
   `Retry-After` only paces the tier for one second instead of escalating
   exponentially into a 60-second cross-request skip. Server-directed

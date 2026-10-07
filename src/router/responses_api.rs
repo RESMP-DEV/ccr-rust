@@ -1532,6 +1532,99 @@ mod tests {
         assert_eq!(delta_text.as_deref(), Some("\"\""));
     }
 
+    #[test]
+    fn incremental_stream_drops_quote_suffix_before_tool_use() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_quote_suffix_tool", "model": "test-model"}
+        });
+        let text = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Now writing the backend"}
+        });
+        let quote_suffix = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "text_delta",
+                "text": "\n\n\"\"\n\n\"\"\"\"\"\"\"\"\"\"\"\""
+            }
+        });
+        let tool_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_quote_suffix",
+                "name": "write",
+                "input": {}
+            }
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let text_events = converter.push_frame(Some("content_block_delta"), &text.to_string());
+        let suffix_events =
+            converter.push_frame(Some("content_block_delta"), &quote_suffix.to_string());
+        let tool_events =
+            converter.push_frame(Some("content_block_start"), &tool_start.to_string());
+        let terminal = converter.finish();
+
+        assert!(suffix_events.is_empty());
+        let mut output_text = None;
+        for (_, data) in parse_sse_frames(&format!(
+            "{text_events}{suffix_events}{tool_events}{terminal}"
+        )) {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
+            if event["type"] == "response.output_text.done" {
+                output_text = event["item"]["text"]
+                    .as_str()
+                    .or_else(|| event["text"].as_str())
+                    .map(str::to_string);
+            }
+        }
+        assert_eq!(output_text.as_deref(), Some("Now writing the backend"));
+    }
+
+    #[test]
+    fn incremental_stream_preserves_quote_suffix_without_tool_use() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_quote_suffix_final", "model": "test-model"}
+        });
+        let text = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "The empty value is "}
+        });
+        let quote_suffix = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let text_events = converter.push_frame(Some("content_block_delta"), &text.to_string());
+        let suffix_events =
+            converter.push_frame(Some("content_block_delta"), &quote_suffix.to_string());
+        let terminal = converter.finish();
+
+        let mut delta_text = String::new();
+        for (_, data) in parse_sse_frames(&format!("{text_events}{suffix_events}{terminal}")) {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
+            if event["type"] == "response.output_text.delta" {
+                delta_text.push_str(event["delta"].as_str().unwrap_or_default());
+            }
+        }
+        assert_eq!(delta_text, "The empty value is \"\"");
+    }
+
     #[tokio::test]
     async fn incremental_stream_failure_retains_active_response_id() {
         let first = format!(
