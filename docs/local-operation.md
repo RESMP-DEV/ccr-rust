@@ -30,16 +30,19 @@ ccr-local validate
 | `ccr-local start` / `stop` / `restart` | Control the launchd service |
 | `ccr-local status` / `validate` | Check the listener or load and validate its configuration |
 
-The configured listener is `http://127.0.0.1:3456`. The original setup routes
-Claude Code to Z.AI GLM-5.3 and Codex to Azure GPT-6 Astra. Treat these as a dated
-setup record; inspect the active config and live route counters before claiming
-which backend a session used.
+The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
+authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
+Ordinary Claude and Codex sessions use Z.AI GLM routes through the shared
+fallback policy. Worker sessions start at GLM-5.3-FlashX and, after explicit
+qualification, can fall through DeepSeek to MiniMax-M3.1-Flash-Preview.
+Inspect the active config and live route counters before claiming which
+backend served a request.
 
 | Local file | Responsibility |
 | --- | --- |
 | `~/.claude-code-router/config.json` | Providers and routing; `${ENV_VAR}` credential placeholders |
 | `~/.claude-code-router/runtime-credentials.json` | Private credential values, mode `0600`; never print or commit |
-| `~/.claude-code-router/serve.py` | Load the allowed credentials and execute CCR |
+| `~/.claude-code-router/serve*.py` | Load allowed credentials and execute governed CCR listeners |
 | `~/Library/LaunchAgents/com.kearm.ccr-rust.plist` | Start at login and restart after exit |
 | `~/.claude-code-router/logs/` | Service logs; inspect locally, redact before sharing |
 | `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers |
