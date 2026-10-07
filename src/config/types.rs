@@ -355,6 +355,12 @@ pub struct Provider {
     /// a provider-specific requirement.
     #[serde(default)]
     pub force_reasoning_effort: Option<String>,
+
+    /// Initial and maximum in-flight attempts for AIMD admission control.
+    /// Omitting it uses the global default of 8 with a minimum of 1 and
+    /// maximum of 64.
+    #[serde(default, alias = "maxInflight")]
+    pub max_inflight: Option<usize>,
 }
 
 fn default_honor_ratelimit_headers() -> bool {
@@ -614,6 +620,17 @@ pub struct RouterConfig {
     #[serde(rename = "retrySweeps")]
     pub retry_sweeps: RetrySweepConfig,
 
+    /// Percentage of active requests allowed as in-flight retries, with a
+    /// floor of three. Default 20; 0 disables retries.
+    #[serde(default = "default_retry_budget_percent")]
+    #[serde(rename = "retryBudgetPercent")]
+    pub retry_budget_percent: u8,
+
+    /// Conversation-provider stickiness. Disabled by default.
+    #[serde(default)]
+    #[serde(rename = "stickySessions")]
+    pub sticky_sessions: StickySessionsConfig,
+
     /// Named presets that override model parameters and routing.
     #[serde(default)]
     #[serde(rename = "presets")]
@@ -708,8 +725,9 @@ pub struct RetrySweepConfig {
 
     /// Wall-clock cap on how long a single request may be held open, in
     /// milliseconds. When exceeded, the next exhausted sweep synthesizes the
-    /// 429/503 as usual. 0 means unlimited.
-    #[serde(default)]
+    /// 429/503 as usual. 0 is an explicit unlimited opt-in; an omitted value
+    /// uses the bounded 60-second default.
+    #[serde(default = "default_max_hold_ms")]
     #[serde(rename = "maxHoldMs")]
     pub max_hold_ms: u64,
 }
@@ -720,13 +738,65 @@ impl Default for RetrySweepConfig {
             enabled: false,
             max_sweeps: 0,
             sweep_cooldown_ms: default_sweep_cooldown_ms(),
-            max_hold_ms: 0,
+            max_hold_ms: default_max_hold_ms(),
         }
     }
 }
 
 fn default_sweep_cooldown_ms() -> u64 {
     2000
+}
+
+fn default_max_hold_ms() -> u64 {
+    60_000
+}
+
+/// Percentage of active client requests allowed as global retries, with a
+/// floor of three. `0` disables retries entirely.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RetryBudgetConfig {
+    /// Percent from 0..=100. Default 20; 0 disables retries.
+    #[serde(default = "default_retry_budget_percent")]
+    pub percent: u8,
+}
+
+/// Conversation-provider stickiness configuration.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct StickySessionsConfig {
+    /// Keep fallback conversations on their last successful provider family
+    /// while eligible. Disabled by default pending live verification.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// TTL for a remembered provider family, in milliseconds.
+    #[serde(default = "default_sticky_ttl_ms")]
+    #[serde(rename = "ttlMs")]
+    pub ttl_ms: u64,
+}
+
+impl Default for StickySessionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ttl_ms: default_sticky_ttl_ms(),
+        }
+    }
+}
+
+fn default_sticky_ttl_ms() -> u64 {
+    3_600_000
+}
+
+impl Default for RetryBudgetConfig {
+    fn default() -> Self {
+        Self {
+            percent: default_retry_budget_percent(),
+        }
+    }
+}
+
+fn default_retry_budget_percent() -> u8 {
+    20
 }
 
 /// Request batching configuration.
@@ -915,7 +985,7 @@ mod backoff_tests {
         let router: RouterConfig = serde_json::from_str(r#"{"default": "p,m"}"#).unwrap();
         assert!(!router.retry_sweeps.enabled);
         assert_eq!(router.retry_sweeps.max_sweeps, 0);
-        assert_eq!(router.retry_sweeps.max_hold_ms, 0);
+        assert_eq!(router.retry_sweeps.max_hold_ms, 60_000);
         // Cooldown still parses to its default so enabling later needs no
         // other fields.
         assert_eq!(router.retry_sweeps.sweep_cooldown_ms, 2000);
@@ -934,14 +1004,23 @@ mod backoff_tests {
     }
 
     #[test]
-    fn retry_sweeps_enabled_alone_is_unlimited() {
+    fn retry_sweeps_enabled_alone_uses_bounded_default() {
         let router: RouterConfig =
             serde_json::from_str(r#"{"default": "p,m", "retrySweeps": {"enabled": true}}"#)
                 .unwrap();
         assert!(router.retry_sweeps.enabled);
         assert_eq!(router.retry_sweeps.max_sweeps, 0);
-        assert_eq!(router.retry_sweeps.max_hold_ms, 0);
+        assert_eq!(router.retry_sweeps.max_hold_ms, 60_000);
         assert_eq!(router.retry_sweeps.sweep_cooldown_ms, 2000);
+    }
+
+    #[test]
+    fn retry_sweeps_zero_hold_is_explicit_unlimited_opt_in() {
+        let router: RouterConfig = serde_json::from_str(
+            r#"{"default": "p,m", "retrySweeps": {"enabled": true, "maxHoldMs": 0}}"#,
+        )
+        .unwrap();
+        assert_eq!(router.retry_sweeps.max_hold_ms, 0);
     }
 
     #[test]
