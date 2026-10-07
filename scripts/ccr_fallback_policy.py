@@ -8,13 +8,43 @@ import json
 import os
 import re
 import shutil
+import ssl
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 ROOT = Path.home() / ".claude-code-router"
 ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# The live policy JSON is operator-editable state, not an approval authority.
+# Main-machine routes and listener ownership are pinned here so an agent can
+# repair credentials or consumer drift, but cannot expand routing by editing
+# JSON. Route changes require a source change, tests, and live qualification.
+MACHINE_ROOT = ROOT
+MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
+    "zai,glm-5.3-flashx",
+    "zai,glm-5.3-flash",
+    "zai,glm-5.3",
+    "deepseek,deepseek-flash",
+)
+MACHINE_CONSUMERS: dict[str, str] = {
+    "config.json": "zai,glm-5.3",
+    "config-auth.json": "zai,glm-5.3",
+    "glm-workers.json": "zai,glm-5.3-flashx",
+    # OCR keeps its distinct local primary; shared fallback remains governed.
+    "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
+}
+MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
+    "deepseek": {
+        "name": "deepseek",
+        "api_base_url": "https://api.deepseek.com/anthropic/v1",
+        "api_key": "${CCR_DEEPSEEK_API_KEY}",
+        "protocol": "anthropic",
+        "models": ["deepseek-flash"],
+    }
+}
 # os.umask is process-global and not atomic, so a set/restore dance inside each
 # write leaves a window where an importing thread creates files mode 0666.
 # Reading it once at import confines that window to interpreter startup.
@@ -66,6 +96,38 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
         extras = settings.get("additional_routes", [])
         if not isinstance(extras, list) or any(not isinstance(r, str) for r in extras):
             raise ValueError(f"Invalid additional routes for {name}")
+    if root.resolve() == MACHINE_ROOT.resolve():
+        if tuple(routes) != MACHINE_ROUTE_CHAIN:
+            raise ValueError(
+                "Machine fallback routes do not match the approved source policy:"
+                f" expected {list(MACHINE_ROUTE_CHAIN)}"
+            )
+        if set(consumers) != set(MACHINE_CONSUMERS):
+            missing = sorted(set(MACHINE_CONSUMERS) - set(consumers))
+            extra = sorted(set(consumers) - set(MACHINE_CONSUMERS))
+            raise ValueError(
+                "Machine listener registrations do not match the approved source"
+                f" policy: missing={missing}, extra={extra}"
+            )
+        for name, expected_primary in MACHINE_CONSUMERS.items():
+            if consumers[name]["primary"] != expected_primary:
+                raise ValueError(
+                    f"Consumer {name} primary must remain {expected_primary}"
+                )
+            if consumers[name].get("additional_routes", []) != []:
+                raise ValueError(
+                    f"Consumer {name} cannot add routes outside the approved chain"
+                )
+        shared = {
+            provider["name"]: provider
+            for provider in policy.get("providers", [])
+            if isinstance(provider, dict) and isinstance(provider.get("name"), str)
+        }
+        if shared != MACHINE_SHARED_PROVIDERS:
+            raise ValueError(
+                "Machine shared provider definitions do not match the approved"
+                f" source policy: expected {sorted(MACHINE_SHARED_PROVIDERS)}"
+            )
     return policy
 
 
@@ -117,8 +179,28 @@ def derive(
         models = providers.get(parts[0], {}).get("models") if len(parts) == 2 else None
         if len(parts) != 2 or not isinstance(models, list) or parts[1] not in models:
             raise ValueError(f"Consumer {consumer} has an unavailable route: {route}")
-    result["Providers"] = list(providers.values())
+    required_providers = {route.split(",", 1)[0] for route in tiers}
+    result["Providers"] = [
+        provider
+        for provider in providers.values()
+        if provider["name"] in required_providers
+    ]
     router = result["Router"]
+    aliases = router.get("modelAliases")
+    if isinstance(aliases, dict):
+
+        def alias_route(value: Any) -> str | None:
+            if isinstance(value, str):
+                return value
+            if isinstance(value, dict) and isinstance(value.get("route"), str):
+                return value["route"]
+            return None
+
+        result["Router"]["modelAliases"] = {
+            name: value
+            for name, value in aliases.items()
+            if (route := alias_route(value)) is None or route in set(tiers)
+        }
     if router.get("topK") is not None:
         raise ValueError(
             f"Consumer {consumer} must remove topK before using strict fallback"
@@ -252,6 +334,191 @@ def credential_environment(config: dict[str, Any], path: Path | None) -> dict[st
     return env
 
 
+def _probe_headers(provider: dict[str, Any], secret: str) -> list[tuple[str, str]]:
+    """Credential headers in the same precedence CCR dispatch uses.
+
+    Responses providers send `Authorization: Bearer`. Anthropic providers send
+    the configured `auth_header`, defaulting to `x-api-key`. Provider
+    `extra_headers` are attached to every attempt so a provider that
+    authenticates through a custom header is probed the way CCR calls it.
+    """
+    protocol = provider.get("protocol", "responses")
+    if protocol == "anthropic":
+        configured = provider.get("auth_header") or "x-api-key"
+        name = str(configured).strip().lower()
+        if name in ("authorization", "bearer", "authorization-bearer"):
+            pairs = [("Authorization", f"Bearer {secret}")]
+        else:
+            pairs = [(name, secret)]
+    else:
+        pairs = [("Authorization", f"Bearer {secret}")]
+    for extra_name, extra_value in (provider.get("extra_headers") or {}).items():
+        if isinstance(extra_value, str):
+            pairs.append((extra_name, extra_value))
+    return pairs
+
+
+def _probe_requests(
+    provider: dict[str, Any], secret: str
+) -> list[tuple[str, urllib.request.Request]]:
+    """Credential-carrying probes, cheapest first.
+
+    The read-only `/models` listing is preferred. Anthropic-compatible
+    upstreams that do not implement it answer 404 or 405, so a single-token
+    `/messages` call is the fallback: it is the same request CCR dispatch makes,
+    capped at one output token, and only runs after the listing endpoint has
+    proved unusable.
+    """
+    protocol = provider.get("protocol", "responses")
+    base = str(provider.get("api_base_url", "")).rstrip("/")
+    headers = list(_probe_headers(provider, secret))
+    requests: list[tuple[str, urllib.request.Request]] = []
+    for header, value in headers:
+        requests.append(
+            (
+                "models",
+                urllib.request.Request(
+                    f"{base}/models",
+                    headers={
+                        header: value,
+                        "accept": "application/json",
+                        "user-agent": "ccr-fallback-policy-preflight/1",
+                    },
+                    method="GET",
+                ),
+            )
+        )
+    if protocol == "anthropic":
+        models = provider.get("models")
+        model = models[0] if isinstance(models, list) and models else ""
+        body = json.dumps(
+            {
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            }
+        ).encode()
+        version = provider.get("anthropic_version") or "2023-06-01"
+        for header, value in headers:
+            requests.append(
+                (
+                    "messages",
+                    urllib.request.Request(
+                        f"{base}/messages",
+                        data=body,
+                        headers={
+                            header: value,
+                            "content-type": "application/json",
+                            "anthropic-version": version,
+                            "user-agent": "ccr-fallback-policy-preflight/1",
+                        },
+                        method="POST",
+                    ),
+                )
+            )
+    return requests
+
+
+def probe_provider(
+    provider: dict[str, Any], env: dict[str, str], timeout: float
+) -> dict[str, Any]:
+    """Authenticate one shared provider against its live endpoint.
+
+    Only the credential path is exercised. No routed listener is touched, and
+    neither the credential nor any response body is returned or logged.
+    """
+    name = provider.get("name")
+    base = provider.get("api_base_url")
+    if not isinstance(base, str) or not base.startswith(("http://", "https://")):
+        return {
+            "provider": name,
+            "ok": False,
+            "status": None,
+            "detail": "provider has no usable api_base_url",
+        }
+    key_ref = provider.get("api_key", "")
+    match = ENV_REF.fullmatch(key_ref) if isinstance(key_ref, str) else None
+    if match is None:
+        return {
+            "provider": name,
+            "ok": False,
+            "status": None,
+            "detail": "api_key is not an environment reference",
+        }
+    secret = env.get(match.group(1))
+    if not secret:
+        return {
+            "provider": name,
+            "ok": False,
+            "status": None,
+            "detail": "credential reference unresolved",
+        }
+    attempts: list[dict[str, Any]] = []
+    for kind, request in _probe_requests(provider, secret):
+        header = next(
+            iter(
+                k
+                for k in request.headers
+                if k.lower()
+                not in ("accept", "content-type", "anthropic-version", "user-agent")
+            )
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=timeout, context=ssl.create_default_context()
+            ) as response:
+                status = response.status
+                response.read(2048)
+            if status < 400:
+                return {
+                    "provider": name,
+                    "ok": True,
+                    "status": status,
+                    "detail": f"authenticated on {kind} with {header}",
+                }
+            attempts.append({"probe": kind, "header": header, "status": status})
+        except urllib.error.HTTPError as exc:
+            attempts.append({"probe": kind, "header": header, "status": exc.code})
+            # The body of an auth failure is not needed: the status alone says
+            # which credential to rotate, and it may echo secrets.
+            exc.close()
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return {
+                "provider": name,
+                "ok": False,
+                "status": None,
+                "detail": f"transport failure: {exc}",
+            }
+    rejected = [a for a in attempts if a["status"] in (401, 403)]
+    return {
+        "provider": name,
+        "ok": False,
+        "status": rejected[0]["status"] if rejected else None,
+        "detail": "credential rejected" if rejected else "no probe endpoint answered",
+        "attempts": attempts,
+    }
+
+
+def preflight(root: Path = ROOT, timeout: float = 15.0) -> dict[str, Any]:
+    """Verify every shared provider credential before a route change is trusted."""
+    policy = load_policy(root)
+    credentials = root / "runtime-credentials.json"
+    shared = policy.get("providers", [])
+    if not shared:
+        return {"providers": [], "ok": True, "detail": "no shared providers"}
+    env = credential_environment(
+        {"probe": json.dumps(shared)}, credentials if credentials.is_file() else None
+    )
+    results = [probe_provider(p, env, timeout) for p in shared]
+    return {
+        "providers": results,
+        "ok": all(r["ok"] for r in results),
+        "policy_sha256": hashlib.sha256(
+            json.dumps(policy, sort_keys=True).encode()
+        ).hexdigest(),
+    }
+
+
 def installed_binary() -> Path | None:
     """Resolve the binary from the runtime-test override, cargo, or PATH."""
     candidates = [
@@ -304,13 +571,28 @@ def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("sync", "check"))
+    parser.add_argument("command", choices=("sync", "check", "preflight"))
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument(
         "--json", action="store_true", help="Print machine-readable results"
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=15.0,
+        help="Per-provider credential probe timeout in seconds (default: 15)",
+    )
     args = parser.parse_args(argv)
     try:
+        if args.command == "preflight":
+            result = preflight(args.root, args.timeout)
+            if args.json:
+                print(json.dumps(result))
+            else:
+                for entry in result["providers"]:
+                    mark = "ok" if entry["ok"] else "FAILED"
+                    print(f"{entry['provider']}: {mark} {entry.get('detail', '')}")
+            return 0 if result["ok"] else 1
         result = sync(args.root, check=args.command == "check")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"Fallback policy error: {exc}", file=sys.stderr)
