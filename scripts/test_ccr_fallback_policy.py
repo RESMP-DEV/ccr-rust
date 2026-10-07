@@ -1,8 +1,11 @@
 import copy
+import json
 import os
 import tempfile
+import threading
 import unittest
 import unittest.mock
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +64,9 @@ class PolicyTests(unittest.TestCase):
             config = policy.read_json(self.root / name)
             self.assertEqual(config["Router"]["retrySweeps"]["maxHoldMs"], 12345)
             self.assertEqual(
-                config["Router"]["modelAliases"], self.config["Router"]["modelAliases"]
+                config["Router"]["modelAliases"],
+                {},
+                "aliases for routes outside the active chain must be pruned",
             )
             self.assertEqual(config["PORT"], 1234)
         self.assertFalse(policy.sync(self.root, check=True)["changed"])
@@ -155,6 +160,63 @@ class PolicyTests(unittest.TestCase):
         shared["providers"].append(shared["providers"][0])
         with self.assertRaises(ValueError):
             policy.derive(self.config, shared, "worker.json")
+
+    def test_derive_prunes_dormant_providers_and_aliases(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["Providers"].append(
+            {
+                "name": "dormant",
+                "models": ["stale"],
+                "api_key": "unused",
+            }
+        )
+        config["Router"]["modelAliases"]["stale"] = "dormant,stale"
+        derived = policy.derive(config, self.policy, "worker.json")
+        provider_names = [provider["name"] for provider in derived["Providers"]]
+        self.assertEqual(provider_names, ["fast", "full", "last"])
+        self.assertNotIn("stale", derived["Router"]["modelAliases"])
+
+    def test_machine_policy_is_pinned_to_source(self) -> None:
+        machine_policy: dict[str, Any] = {
+            "version": 1,
+            "routes": list(policy.MACHINE_ROUTE_CHAIN),
+            "providers": copy.deepcopy(list(policy.MACHINE_SHARED_PROVIDERS.values())),
+            "consumers": {
+                name: {"primary": primary}
+                for name, primary in policy.MACHINE_CONSUMERS.items()
+            },
+        }
+        self.policy = machine_policy
+        self.write_policy()
+        with unittest.mock.patch.object(policy, "MACHINE_ROOT", self.root):
+            policy.load_policy(self.root)
+
+            self.policy["routes"].insert(3, "azure,gpt-6-astra")
+            self.write_policy()
+            with self.assertRaisesRegex(ValueError, "approved source policy"):
+                policy.load_policy(self.root)
+            self.policy["routes"].pop(3)
+
+            missing = min(policy.MACHINE_CONSUMERS)
+            original_primary = self.policy["consumers"][missing]["primary"]
+            self.policy["consumers"].pop(missing)
+            self.write_policy()
+            with self.assertRaisesRegex(ValueError, "listener registrations"):
+                policy.load_policy(self.root)
+            self.policy["consumers"][missing] = {"primary": original_primary}
+
+            self.policy["consumers"]["config.json"]["additional_routes"] = [
+                "azure,gpt-6-astra"
+            ]
+            self.write_policy()
+            with self.assertRaisesRegex(ValueError, "outside the approved chain"):
+                policy.load_policy(self.root)
+            self.policy["consumers"]["config.json"]["additional_routes"] = []
+
+            self.policy["providers"][0]["api_base_url"] = "https://tampered.invalid/v1"
+            self.write_policy()
+            with self.assertRaisesRegex(ValueError, "shared provider definitions"):
+                policy.load_policy(self.root)
 
     def test_stale_staging_report_follows_symlinked_consumers(self) -> None:
         managed = self.root / "managed"
@@ -290,3 +352,179 @@ class PolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreflightTests(unittest.TestCase):
+    """Live credential probes use a local fixture, never real providers."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.seen_headers: list[dict[str, str]] = []
+        self.status = 401
+        handler = self._handler_class()
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.addCleanup(self.server.server_close)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.server.shutdown)
+        self.endpoint = f"http://127.0.0.1:{self.server.server_port}/v1"
+
+    def _handler_class(self) -> type[BaseHTTPRequestHandler]:
+        seen = self.seen_headers
+        status_ref = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                seen.append({k.lower(): v for k, v in self.headers.items()})
+                self.send_response(status_ref.status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"data":[]}')
+
+        return Handler
+
+    def _policy(self, provider: dict[str, Any]) -> None:
+        policy.atomic_json(
+            self.root / "fallback-policy.json",
+            {
+                "version": 1,
+                "routes": ["fixture,model"],
+                "providers": [provider],
+                "consumers": {"worker.json": {"primary": "fixture,model"}},
+            },
+        )
+        credentials = self.root / "runtime-credentials.json"
+        policy.atomic_json(credentials, {"FIXTURE_KEY": "private-example"})
+        credentials.chmod(0o600)
+
+    def test_rejected_credential_fails_preflight_without_leaking_the_secret(
+        self,
+    ) -> None:
+        self._policy(
+            {
+                "name": "fixture",
+                "api_base_url": self.endpoint,
+                "api_key": "${FIXTURE_KEY}",
+                "protocol": "responses",
+                "models": ["model"],
+            }
+        )
+        self.status = 401
+        result = policy.preflight(self.root)
+        self.assertFalse(result["ok"])
+        entry = result["providers"][0]
+        self.assertEqual(entry["provider"], "fixture")
+        self.assertEqual(entry["detail"], "credential rejected")
+        # CCR sends exactly one credential header per protocol, not a retry.
+        self.assertEqual([a["status"] for a in entry["attempts"]], [401])
+        self.assertNotIn("private-example", json.dumps(result))
+        self.assertTrue(self.seen_headers)
+        self.assertEqual(
+            self.seen_headers[0]["authorization"], "Bearer private-example"
+        )
+
+    def test_accepted_credential_passes_and_tries_bearer_before_api_key(self) -> None:
+        self._policy(
+            {
+                "name": "fixture",
+                "api_base_url": self.endpoint,
+                "api_key": "${FIXTURE_KEY}",
+                "protocol": "anthropic",
+                "models": ["model"],
+            }
+        )
+        self.status = 200
+        result = policy.preflight(self.root)
+        self.assertTrue(result["ok"], result)
+        entry = result["providers"][0]
+        self.assertEqual(entry["status"], 200)
+        self.assertEqual(len(self.seen_headers), 1)
+        self.assertEqual(self.seen_headers[0]["x-api-key"], "private-example")
+        self.assertNotIn("authorization", self.seen_headers[0])
+
+    def test_missing_listing_endpoint_falls_back_to_a_single_token_call(self) -> None:
+        """Anthropic upstreams without /models must still preflight."""
+        methods: list[str] = []
+        bodies: list[dict[str, Any]] = []
+        seen = self.seen_headers
+        parent = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+            def _respond(self, code: int) -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def do_GET(self) -> None:
+                methods.append("GET")
+                seen.append({k.lower(): v for k, v in self.headers.items()})
+                self._respond(404)
+
+            def do_POST(self) -> None:
+                length = int(self.headers["Content-Length"])
+                body = json.loads(self.rfile.read(length))
+                bodies.append(body)
+                methods.append("POST")
+                seen.append({k.lower(): v for k, v in self.headers.items()})
+                self._respond(parent.status)
+
+        replacement = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(replacement.server_close)
+        threading.Thread(target=replacement.serve_forever, daemon=True).start()
+        self.addCleanup(replacement.shutdown)
+        self.endpoint = f"http://127.0.0.1:{replacement.server_port}/anthropic/v1"
+        self._policy(
+            {
+                "name": "fixture",
+                "api_base_url": self.endpoint,
+                "api_key": "${FIXTURE_KEY}",
+                "protocol": "anthropic",
+                "models": ["flash-model"],
+            }
+        )
+        # Real Anthropic-compatible upstreams such as DeepSeek answer 404 on
+        # /models and 200 on /messages; the fixture reproduces exactly that.
+        self.status = 200
+        result = policy.preflight(self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(methods[0], "GET")
+        self.assertEqual(methods[-1], "POST")
+        self.assertEqual(bodies[-1]["max_tokens"], 1)
+        entry = result["providers"][0]
+        self.assertEqual(entry["status"], 200)
+        self.assertIn("messages", entry["detail"])
+        self.assertNotIn("private-example", json.dumps(result))
+
+    def test_unresolved_credential_is_reported_before_any_network_call(self) -> None:
+        policy.atomic_json(
+            self.root / "fallback-policy.json",
+            {
+                "version": 1,
+                "routes": ["fixture,model"],
+                "providers": [
+                    {
+                        "name": "fixture",
+                        "api_base_url": self.endpoint,
+                        "api_key": "${MISSING_KEY}",
+                        "protocol": "responses",
+                        "models": ["model"],
+                    }
+                ],
+                "consumers": {"worker.json": {"primary": "fixture,model"}},
+            },
+        )
+        credentials = self.root / "runtime-credentials.json"
+        policy.atomic_json(credentials, {})
+        credentials.chmod(0o600)
+        with self.assertRaises(ValueError):
+            policy.preflight(self.root)
+        self.assertEqual(self.seen_headers, [])
