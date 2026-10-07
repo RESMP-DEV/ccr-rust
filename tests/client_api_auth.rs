@@ -61,6 +61,8 @@ async fn client_api_key_gates_routes_but_not_health() {
 
     let config_json = json!({
         "CLIENT_API_KEY": "test-client-key",
+        "AUTH_HOST": "127.0.0.1",
+        "AUTH_PORT": 3459,
         "Providers": [{
             "name": "mock",
             "api_base_url": upstream.uri(),

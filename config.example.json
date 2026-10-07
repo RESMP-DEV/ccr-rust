@@ -1,6 +1,8 @@
 {
     "PORT": 3456,
     "HOST": "127.0.0.1",
+    "AUTH_PORT": 3459,
+    "AUTH_HOST": "127.0.0.1",
     "API_TIMEOUT_MS": 600000,
     "CLIENT_API_KEY": "${CCR_CLIENT_API_KEY}",
     "Persistence": {

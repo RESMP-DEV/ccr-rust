@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed client-key activation to a dedicated `AUTH_HOST`/`AUTH_PORT` listener.
+  The existing `HOST`/`PORT` listener remains unauthenticated for local
+  clients, while Cloudflare or another reverse proxy targets only the separate
+  authenticated listener. Configuration rejects a key without an auth port and
+  rejects using the same port for both contracts.
 - Added optional client-facing authentication through `CLIENT_API_KEY`. When
   configured, callers must present the same key as standard
   `Authorization: Bearer` or Anthropic-style `x-api-key`; all API, preset,

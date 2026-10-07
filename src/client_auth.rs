@@ -74,8 +74,8 @@ pub async fn require_client_auth(
     request: Request,
     next: Next,
 ) -> Response {
-    // Health remains local-service liveness data. Every API, preset,
-    // observability, and metrics route is authenticated when a key is set.
+    // Health remains service liveness data. Every API, preset, observability,
+    // and metrics route on the dedicated authenticated listener is gated.
     if request.uri().path() == "/health" {
         return next.run(request).await;
     }

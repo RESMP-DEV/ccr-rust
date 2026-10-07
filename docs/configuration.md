@@ -111,6 +111,8 @@ See [Gemini Integration](gemini-integration.md) for detailed security guidance.
   },
   "PORT": 3456,
   "HOST": "127.0.0.1",
+  "AUTH_PORT": 3459,
+  "AUTH_HOST": "127.0.0.1",
   "API_TIMEOUT_MS": 600000,
   "CLIENT_API_KEY": "${CCR_CLIENT_API_KEY}",
   "PROXY_URL": "http://proxy.example.com:8080",

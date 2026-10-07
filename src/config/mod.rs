@@ -159,6 +159,24 @@ fn validate_client_credentials(
     Ok(())
 }
 
+fn validate_client_listener(file: &ConfigFile) -> Result<()> {
+    anyhow::ensure!(
+        file.client_api_key.is_some() == file.auth_port.is_some(),
+        "CLIENT_API_KEY and AUTH_PORT must be configured together: the normal HOST/PORT \
+         listener stays unauthenticated for local clients, while AUTH_PORT requires the key"
+    );
+    anyhow::ensure!(
+        file.auth_port != Some(file.port),
+        "AUTH_PORT must differ from PORT so the authenticated endpoint cannot displace or gate \
+         the existing local listener"
+    );
+    anyhow::ensure!(
+        file.auth_host.parse::<std::net::IpAddr>().is_ok(),
+        "AUTH_HOST must be an IP address"
+    );
+    Ok(())
+}
+
 /// Validate cross-field provider requirements before the router accepts traffic.
 fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
     for provider in providers {
@@ -298,6 +316,18 @@ pub struct ConfigFile {
     #[serde(rename = "HOST")]
     pub host: String,
 
+    /// Dedicated authenticated listener host. The normal HOST/PORT listener
+    /// remains on the historical local contract and is never client-key gated.
+    #[serde(default = "default_auth_host")]
+    #[serde(rename = "AUTH_HOST")]
+    pub auth_host: String,
+
+    /// Dedicated authenticated listener port. Required when CLIENT_API_KEY is
+    /// configured; Cloudflare should point at this listener, not HOST/PORT.
+    #[serde(default)]
+    #[serde(rename = "AUTH_PORT")]
+    pub auth_port: Option<u16>,
+
     #[serde(default = "default_timeout")]
     #[serde(rename = "API_TIMEOUT_MS")]
     pub api_timeout_ms: u64,
@@ -423,6 +453,14 @@ impl Config {
         self.inner.effective_max_request_body_bytes
     }
 
+    pub fn auth_host(&self) -> &str {
+        &self.inner.file.auth_host
+    }
+
+    pub fn auth_port(&self) -> Option<u16> {
+        self.inner.file.auth_port
+    }
+
     /// Configured client-facing authentication, if enabled.
     pub fn client_api_key(&self) -> Option<&ClientApiKey> {
         self.inner.client_api_key.as_ref()
@@ -476,6 +514,7 @@ impl Config {
         validate_client_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
         let file: ConfigFile =
             serde_json::from_value(value).context("Failed to parse config JSON")?;
+        validate_client_listener(&file)?;
         validate_provider_contracts(&file.providers)?;
         validate_model_aliases(&file.router, &file.providers)?;
         validate_retry_sweeps(&file.router)?;
@@ -597,6 +636,10 @@ fn default_port() -> u16 {
 }
 
 fn default_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_auth_host() -> String {
     "127.0.0.1".to_string()
 }
 
@@ -1202,6 +1245,34 @@ mod credential_guard_tests {
         let message = error.to_string();
         assert!(message.contains("client API key"), "{message}");
         assert!(message.contains("CCR_CLIENT_API_KEY"), "{message}");
+    }
+
+    #[test]
+    fn client_api_key_requires_a_distinct_auth_listener() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let base = r#"{"CLIENT_API_KEY": "test-key", "Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"]}], "Router": {"default": "p1,m"}}"#;
+        std::fs::write(&path, base).unwrap();
+        let error = Config::from_file(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("CLIENT_API_KEY and AUTH_PORT must be configured together"),
+            "{error}"
+        );
+
+        std::fs::write(
+            &path,
+            format!("{},\"AUTH_PORT\":3456}}", &base[..base.len() - 1]),
+        )
+        .unwrap();
+        let error = Config::from_file(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("AUTH_PORT must differ from PORT"),
+            "{error}"
+        );
     }
 
     #[test]
