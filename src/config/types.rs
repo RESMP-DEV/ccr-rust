@@ -631,6 +631,10 @@ pub struct RouterConfig {
     #[serde(rename = "stickySessions")]
     pub sticky_sessions: StickySessionsConfig,
 
+    /// Optional tail-latency hedging. Disabled by default.
+    #[serde(default)]
+    pub hedging: HedgingConfig,
+
     /// Named presets that override model parameters and routing.
     #[serde(default)]
     #[serde(rename = "presets")]
@@ -785,6 +789,33 @@ impl Default for StickySessionsConfig {
 
 fn default_sticky_ttl_ms() -> u64 {
     3_600_000
+}
+
+/// Tail-latency hedging configuration.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct HedgingConfig {
+    /// Launch one fallback attempt when the primary has not produced a usable
+    /// first result before `ttft_threshold_ms`. Disabled by default.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Hedge threshold in milliseconds. Must be greater than zero when enabled.
+    #[serde(default = "default_hedge_threshold_ms")]
+    #[serde(rename = "ttftThresholdMs")]
+    pub ttft_threshold_ms: u64,
+}
+
+impl Default for HedgingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ttft_threshold_ms: default_hedge_threshold_ms(),
+        }
+    }
+}
+
+fn default_hedge_threshold_ms() -> u64 {
+    10_000
 }
 
 impl Default for RetryBudgetConfig {

@@ -49,7 +49,8 @@ use crate::config::ModelAliasTarget;
 use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::record_deterministic_rejection;
 use crate::metrics::{
-    increment_active_requests, record_failure, record_hold_wait, record_pre_request_tokens,
+    increment_active_requests, record_failure, record_hedge_launched, record_hedge_win,
+    record_hold_wait, record_pre_request_tokens, record_primary_hedge_win,
     record_request_duration_with_frontend, record_request_with_frontend, record_retry_sweep,
     sync_ewma_gauge,
 };
@@ -73,6 +74,188 @@ impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         increment_active_requests(-1);
         // `_retry_budget` drops after this method and decrements its own count.
+    }
+}
+
+struct SelectedAttempt<'a> {
+    result: Result<Response, TryRequestError>,
+    tier: String,
+    tier_name: String,
+    forced_non_streaming: bool,
+    timer: AttemptTimer<'a>,
+    hedge_launched: bool,
+}
+
+fn forced_non_streaming(config: &crate::config::Config, tier: &str) -> bool {
+    config
+        .resolve_provider(tier)
+        .map(|provider| {
+            provider.protocol == crate::config::ProviderProtocol::Responses
+                || (config.router().force_non_streaming && !provider.allow_streaming)
+        })
+        .unwrap_or(false)
+}
+
+fn request_for_tier(
+    request: &AnthropicRequest,
+    tier: &str,
+    client_wants_stream: bool,
+    config: &crate::config::Config,
+) -> AnthropicRequest {
+    let mut value = serde_json::to_value(request).expect("request should serialize");
+    value["model"] = serde_json::Value::String(tier.to_string());
+    value["stream"] =
+        serde_json::Value::Bool(client_wants_stream && !forced_non_streaming(config, tier));
+    serde_json::from_value(value).expect("tier request should deserialize")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_attempt<'a>(
+    state: &'a AppState,
+    config: &'a crate::config::Config,
+    request: &AnthropicRequest,
+    tier: &str,
+    tier_name: &str,
+    hedge_tier: Option<(&str, &str)>,
+    retry_permit: Option<crate::retry_budget::RetryPermit>,
+    attempt: usize,
+    frontend: FrontendType,
+    local_estimate: u64,
+    client_wants_stream: bool,
+) -> Option<SelectedAttempt<'a>> {
+    let primary_request = request_for_tier(request, tier, client_wants_stream, config);
+    let retry_config = config.get_tier_retry(tier_name);
+    let provider_limit = config.resolve_provider(tier).and_then(|p| p.max_inflight);
+    let admission_permit = state.admission_tracker.acquire(tier, provider_limit)?;
+    let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
+    let primary_future = try_request(TryRequestArgs {
+        config,
+        registry: &state.transformer_registry,
+        request: &primary_request,
+        tier,
+        tier_name,
+        local_estimate,
+        stream_first_event_timeout: retry_config.stream_first_event_timeout(),
+        stream_idle_timeout: retry_config.stream_idle_timeout(),
+        ratelimit_tracker: state.ratelimit_tracker.clone(),
+        admission_permit,
+        debug_capture: state.debug_capture.clone(),
+        openai_passthrough_body: request.openai_passthrough_body.as_ref(),
+        render_refusal_as_anthropic_text: frontend == FrontendType::ClaudeCode,
+    });
+    tokio::pin!(primary_future);
+    let _primary_retry_permit = (retry_permit, attempt);
+
+    let hedging = config.router().hedging;
+    let Some((hedge_tier, hedge_tier_name)) = hedge_tier.filter(|_| hedging.enabled) else {
+        let result = primary_future.await;
+        return Some(SelectedAttempt {
+            result,
+            tier: tier.to_string(),
+            tier_name: tier_name.to_string(),
+            forced_non_streaming: forced_non_streaming(config, tier),
+            timer,
+            hedge_launched: false,
+        });
+    };
+
+    let hedge_sleep =
+        tokio::time::sleep(std::time::Duration::from_millis(hedging.ttft_threshold_ms));
+    tokio::pin!(hedge_sleep);
+
+    tokio::select! {
+        // Preserve tier preference if both attempts become ready on the same
+        // wakeup; the hedge must be earlier, not merely lucky scheduling.
+        biased;
+        result = &mut primary_future => Some(SelectedAttempt {
+            result,
+            tier: tier.to_string(),
+            tier_name: tier_name.to_string(),
+            forced_non_streaming: forced_non_streaming(config, tier),
+            timer,
+            hedge_launched: false,
+        }),
+        _ = &mut hedge_sleep => {
+            let Some(hedge_retry_permit) = state
+                .retry_budget
+                .acquire_retry(config.router().retry_budget_percent)
+            else {
+                let result = primary_future.await;
+                return Some(SelectedAttempt {
+                    result,
+                    tier: tier.to_string(),
+                    tier_name: tier_name.to_string(),
+                    forced_non_streaming: forced_non_streaming(config, tier),
+                    timer,
+                    hedge_launched: false,
+                });
+            };
+            let _hedge_retry_permit = hedge_retry_permit;
+            let hedge_provider_limit = config
+                .resolve_provider(hedge_tier)
+                .and_then(|provider| provider.max_inflight);
+            let Some(hedge_admission_permit) = state
+                .admission_tracker
+                .acquire(hedge_tier, hedge_provider_limit)
+            else {
+                let result = primary_future.await;
+                return Some(SelectedAttempt {
+                    result,
+                    tier: tier.to_string(),
+                    tier_name: tier_name.to_string(),
+                    forced_non_streaming: forced_non_streaming(config, tier),
+                    timer,
+                    hedge_launched: false,
+                });
+            };
+            let hedge_request =
+                request_for_tier(request, hedge_tier, client_wants_stream, config);
+            let hedge_retry_config = config.get_tier_retry(hedge_tier_name);
+            let hedge_timer = AttemptTimer::start(&state.ewma_tracker, hedge_tier_name);
+            let hedge_future = try_request(TryRequestArgs {
+                config,
+                registry: &state.transformer_registry,
+                request: &hedge_request,
+                tier: hedge_tier,
+                tier_name: hedge_tier_name,
+                local_estimate,
+                stream_first_event_timeout: hedge_retry_config.stream_first_event_timeout(),
+                stream_idle_timeout: hedge_retry_config.stream_idle_timeout(),
+                ratelimit_tracker: state.ratelimit_tracker.clone(),
+                admission_permit: hedge_admission_permit,
+                debug_capture: state.debug_capture.clone(),
+                openai_passthrough_body: request.openai_passthrough_body.as_ref(),
+                render_refusal_as_anthropic_text: frontend == FrontendType::ClaudeCode,
+            });
+            tokio::pin!(hedge_future);
+            record_hedge_launched();
+
+            tokio::select! {
+                biased;
+                result = &mut primary_future => {
+                    record_primary_hedge_win(tier);
+                    Some(SelectedAttempt {
+                        result,
+                        tier: tier.to_string(),
+                        tier_name: tier_name.to_string(),
+                        forced_non_streaming: forced_non_streaming(config, tier),
+                        timer,
+                        hedge_launched: true,
+                    })
+                }
+                result = hedge_future => {
+                    record_hedge_win(hedge_tier);
+                    Some(SelectedAttempt {
+                        result,
+                        tier: hedge_tier.to_string(),
+                        tier_name: hedge_tier_name.to_string(),
+                        forced_non_streaming: forced_non_streaming(config, hedge_tier),
+                        timer: hedge_timer,
+                        hedge_launched: true,
+                    })
+                }
+            }
+        }
     }
 }
 
@@ -342,10 +525,13 @@ pub async fn handle_messages(
         }
         let all_admission_deferred =
             !ordered.is_empty() && admission_deferred.len() == ordered.len();
-        let pass_order = admission_ready.into_iter().chain(admission_deferred);
+        let pass_order: Vec<&(String, String)> = admission_ready
+            .into_iter()
+            .chain(admission_deferred)
+            .collect();
 
         // Try each tier with retries.
-        'tier_pass: for (tier, tier_name) in pass_order {
+        'tier_pass: for (pass_index, (tier, tier_name)) in pass_order.iter().enumerate() {
             if rejected_tiers.contains(tier) {
                 tracing::debug!(tier = %tier_name, "Skipping deterministically rejected tier");
                 continue;
@@ -361,7 +547,7 @@ pub async fn handle_messages(
                 .should_skip_tier(tier.as_str(), honor_remaining)
             {
                 saw_rate_limit = true;
-                last_rate_limited_tier = Some(tier_name.clone());
+                last_rate_limited_tier = Some(tier_name.to_string());
                 // Carry the tracker's live backoff window into this sweep's
                 // Retry-After hint so an all-skipped sweep still cools down
                 // for the actual recovery time (and the terminal 429 keeps
@@ -384,25 +570,21 @@ pub async fn handle_messages(
                 tool_values.as_deref(),
             );
 
-            // Per-provider streaming decision: allow_streaming bypasses forceNonStreaming
-            let provider = config.resolve_provider(tier);
-            let provider_allows_streaming = provider.map(|p| p.allow_streaming).unwrap_or(false);
-            let provider_uses_responses =
-                provider.is_some_and(|p| p.protocol == crate::config::ProviderProtocol::Responses);
-            let forced_non_streaming = provider_uses_responses
-                || (config.router().force_non_streaming && !provider_allows_streaming);
-            if client_wants_stream && forced_non_streaming {
-                request.stream = Some(false);
-            } else {
-                request.stream = Some(client_wants_stream);
-            }
+            request.stream = Some(client_wants_stream);
 
             let retry_config = config.get_tier_retry(tier_name);
             let max_retries = retry_config.max_retries;
-            let provider_limit = config.resolve_provider(tier).and_then(|p| p.max_inflight);
+            let hedge_tier = if config.router().hedging.enabled {
+                pass_order
+                    .get(pass_index + 1)
+                    .map(|(next_tier, next_tier_name)| (next_tier.clone(), next_tier_name.clone()))
+                    .filter(|(next_tier, _)| !rejected_tiers.contains(next_tier))
+            } else {
+                None
+            };
 
             for attempt in 0..=max_retries {
-                let _retry_permit = if total_attempts > 0 {
+                let retry_permit = if total_attempts > 0 {
                     match state
                         .retry_budget
                         .acquire_retry(config.router().retry_budget_percent)
@@ -417,17 +599,6 @@ pub async fn handle_messages(
                 } else {
                     None
                 };
-                let admission_permit = match state
-                    .admission_tracker
-                    .acquire(tier.as_str(), provider_limit)
-                {
-                    Some(permit) => permit,
-                    None => {
-                        saw_non_rate_limit_failure = true;
-                        saw_retryable_failure = true;
-                        continue;
-                    }
-                };
                 total_attempts += 1;
                 info!(
                     sweep,
@@ -438,30 +609,40 @@ pub async fn handle_messages(
                     max_retries + 1
                 );
 
-                // Override model with current tier
-                request.model = tier.clone();
-
-                // Start per-attempt latency timer for EWMA tracking
                 let effective_timeout_secs = config.api_timeout_ms() as f64 / 1000.0;
-                let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
-
-                match try_request(TryRequestArgs {
-                    config,
-                    registry: &state.transformer_registry,
-                    request: &request,
+                let Some(SelectedAttempt {
+                    result,
                     tier,
                     tier_name,
+                    forced_non_streaming,
+                    timer,
+                    hedge_launched,
+                }) = execute_attempt(
+                    &state,
+                    config,
+                    &request,
+                    tier,
+                    tier_name,
+                    hedge_tier
+                        .as_ref()
+                        .map(|(tier, name)| (tier.as_str(), name.as_str())),
+                    retry_permit,
+                    attempt,
+                    frontend,
                     local_estimate,
-                    stream_first_event_timeout: retry_config.stream_first_event_timeout(),
-                    stream_idle_timeout: retry_config.stream_idle_timeout(),
-                    ratelimit_tracker: state.ratelimit_tracker.clone(),
-                    admission_permit,
-                    debug_capture: state.debug_capture.clone(),
-                    openai_passthrough_body: request.openai_passthrough_body.as_ref(),
-                    render_refusal_as_anthropic_text: frontend == FrontendType::ClaudeCode,
-                })
+                    client_wants_stream,
+                )
                 .await
-                {
+                else {
+                    saw_non_rate_limit_failure = true;
+                    saw_retryable_failure = true;
+                    continue;
+                };
+                total_attempts += usize::from(hedge_launched);
+                let tier = tier.as_str();
+                let tier_name = tier_name.as_str();
+
+                match result {
                     Ok(response) => {
                         if response.status() == StatusCode::TOO_MANY_REQUESTS {
                             // 429 passthrough is an intentional non-cascading return path,
@@ -491,17 +672,15 @@ pub async fn handle_messages(
                                 .and_then(|v| v.to_str().ok())
                                 .and_then(|s| s.parse::<u64>().ok())
                                 .map(std::time::Duration::from_secs);
-                            state
-                                .ratelimit_tracker
-                                .record_429(tier.as_str(), retry_after);
-                            state.admission_tracker.record_rejection(tier.as_str());
+                            state.ratelimit_tracker.record_429(tier, retry_after);
+                            state.admission_tracker.record_rejection(tier);
                             // Metric parity with dispatch's classified-429 path:
                             // record the hit and the backoff, keyed by the same
                             // full route string dispatch uses.
-                            crate::metrics::record_rate_limit_hit(tier.as_str());
-                            crate::metrics::record_rate_limit_backoff(tier.as_str());
+                            crate::metrics::record_rate_limit_hit(tier);
+                            crate::metrics::record_rate_limit_backoff(tier);
                             saw_rate_limit = true;
-                            last_rate_limited_tier = Some(tier_name.clone());
+                            last_rate_limited_tier = Some(tier_name.to_string());
                             retry_after_hint = match (retry_after_hint, retry_after) {
                                 (Some(current), Some(candidate)) => Some(current.max(candidate)),
                                 (None, some) => some,
@@ -564,7 +743,7 @@ pub async fn handle_messages(
                         // metrics) before returning this error; only the EWMA
                         // bookkeeping and tier transition happen here.
                         timer.finish_failure_with_limit(effective_timeout_secs);
-                        state.admission_tracker.record_rejection(tier.as_str());
+                        state.admission_tracker.record_rejection(tier);
                         #[cfg(feature = "gp")]
                         if let (Some(gp_router), Some(plan)) =
                             (state.gp_router.as_ref(), gp_plan.as_ref())
@@ -572,7 +751,7 @@ pub async fn handle_messages(
                             gp_router.record_attempt(plan, tier, attempt, None, config);
                         }
                         saw_rate_limit = true;
-                        last_rate_limited_tier = Some(tier_name.clone());
+                        last_rate_limited_tier = Some(tier_name.to_string());
                         retry_after_hint = match (retry_after_hint, retry_after) {
                             (Some(current), Some(candidate)) => Some(current.max(candidate)),
                             (None, some) => some,
@@ -611,7 +790,7 @@ pub async fn handle_messages(
                         // block sibling models. Fail this tier immediately, and
                         // remember the rejection so later sweeps skip the tier
                         // instead of re-attempting it once per sweep.
-                        rejected_tiers.insert(tier.clone());
+                        rejected_tiers.insert(tier.to_string());
                         break;
                     }
                     Err(TryRequestError::Other(e)) => {

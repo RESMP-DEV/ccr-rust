@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Router.stickySessions`. It is disabled by default, honors the pinned route
   prefix, preserves configured order within each family, and only reorders
   the fallback portion when a remembered provider family is available.
+- Added optional tail-latency hedging under `Router.hedging`. When enabled, a
+  primary attempt that exceeds `ttftThresholdMs` races one next-tier attempt;
+  the first usable result wins and the loser is cancelled. Hedges draw from
+  the global retry budget and fallback admission permits. Hedging is disabled
+  by default and exposes launch, hedge-win, and primary-win counters.
 - Changed client-key activation to a dedicated `AUTH_HOST`/`AUTH_PORT` listener.
   The existing `HOST`/`PORT` listener remains unauthenticated for local
   clients, while Cloudflare or another reverse proxy targets only the separate

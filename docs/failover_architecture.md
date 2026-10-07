@@ -1,7 +1,7 @@
 # Failover Architecture — Design and Execution Plan
 
-Status: Phases 0 through 3 implemented and locally verified on 2026-10-07;
-Phase 4 hedging remains intentionally unimplemented and disabled. All
+Status: Phases 0 through 4 implemented and locally verified on 2026-10-07.
+Phases 3 and 4 are disabled by default pending production qualification. All
 `file:line` references in the original design were checked against the
 pre-implementation tree and may drift as the repository changes; the tests
 and contracts below are authoritative.
@@ -17,7 +17,7 @@ incident-driven fixes of 2026-10-07.
 | 1. AIMD admission | Implemented | `src/admission.rs` and two-upstream integration test |
 | 2. Bounded amplification | Implemented | `src/retry_budget.rs`, retry-sweep/failover tests |
 | 3. Conversation stickiness | Implemented, disabled by default | `src/stickiness.rs` and conversation integration test |
-| 4. Hedging | Not implemented; intentionally deferred | Requires measured TTFT and explicit spend authorization |
+| 4. Hedging | Implemented, disabled by default | `test_failover_controls.rs` and hedge Prometheus counters |
 
 ## How to execute this document
 
@@ -337,13 +337,15 @@ enabled shows conversations staying on-family through intermittent primary
 
 ### Phase 4 — hedging (optional, last)
 
-If enabled (`Router.hedging {enabled: false, ttftThresholdMs}`), duplicate
-a request to the next eligible tier when no first token has arrived after
-`ttftThresholdMs` (or that tier's p95 TTFT); first token wins, the loser is
-cancelled. Hedges draw from the retry budget; disabled by default because
-it doubles token spend on the hedged tail. Requires the pre-first-token
-peek path (dispatch.rs:147-238). Implement only after phases 0-2 are
-verified in production traffic.
+When enabled (`Router.hedging {enabled: false, ttftThresholdMs}`), CCR
+launches the next eligible tier when the primary attempt has not produced a
+usable result after `ttftThresholdMs`; the first usable result wins and the
+loser is cancelled. Hedges draw from both the global retry budget and the
+fallback tier's admission permits. Hedging remains disabled by default so
+production TTFT and spend behavior can be reviewed before activation. For
+streaming providers the existing pre-first-token peek bounds the primary;
+for non-streaming providers the usable completed response is the race
+boundary.
 
 ## Configuration surface summary
 
@@ -448,6 +450,8 @@ implemented.
   retry budgets, bounded default hold, EWMA clamps, hold-wait telemetry, and
   optional conversation-provider stickiness are implemented. Full
   `cargo test --all-features --locked`, strict Clippy, and formatting passed.
-  Phase 4 hedging remains optional and unimplemented because it duplicates
-  spend on the hedged tail; it must stay out of default behavior until that
-  tradeoff is explicitly selected with measured TTFT data.
+  Follow-up in the same review round: Phase 4 hedging is implemented but
+  disabled by default. It draws from the retry budget and fallback admission
+  permits, cancels the loser, and exposes launch/win counters. The operator
+  explicitly accepted hedged duplicate spend for these quota-backed tiers;
+  default-off remains conservative until production TTFT is measured.

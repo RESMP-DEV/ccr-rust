@@ -232,6 +232,14 @@ fn validate_retry_budget(router: &RouterConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_hedging(router: &RouterConfig) -> Result<()> {
+    anyhow::ensure!(
+        !(router.hedging.enabled && router.hedging.ttft_threshold_ms == 0),
+        "Router.hedging.ttftThresholdMs must be > 0 when hedging is enabled"
+    );
+    Ok(())
+}
+
 /// strictTierOrder serves the entire configured tier chain in order, so
 /// topK (which truncates the EWMA-sampled candidate set) has no meaning
 /// alongside it. Reject the combination instead of silently ignoring one of
@@ -536,6 +544,7 @@ impl Config {
         validate_model_aliases(&file.router, &file.providers)?;
         validate_retry_sweeps(&file.router)?;
         validate_retry_budget(&file.router)?;
+        validate_hedging(&file.router)?;
         validate_tier_order_conflicts(&file.router)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
