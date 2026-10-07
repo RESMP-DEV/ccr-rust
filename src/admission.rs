@@ -185,13 +185,25 @@ mod tests {
         assert!(!tracker.at_capacity("p,m", Some(1)));
     }
 
+    /// A configured `maxInflight` is a ceiling, not only a starting point:
+    /// AIMD growth after successes must never exceed it.
     #[test]
-    fn permit_success_is_idempotent() {
+    fn permit_success_is_idempotent_and_respects_the_configured_ceiling() {
         let tracker = Arc::new(AdmissionTracker::new());
         tracker.configure("p,m", Some(2));
         let permit = tracker.acquire("p,m", Some(2)).unwrap();
         permit.record_success();
         permit.record_success();
-        assert_eq!(tracker.state("p,m", None).limit.load(Ordering::Acquire), 3);
+        assert_eq!(
+            tracker.state("p,m", None).limit.load(Ordering::Acquire),
+            2,
+            "success growth must not exceed the configured maxInflight"
+        );
+
+        // Without a provider ceiling, the global AIMD ceiling remains 64 even
+        // when the default starting limit is 8.
+        let free = Arc::new(AdmissionTracker::new());
+        free.configure("free,m", None);
+        assert_eq!(free.state("free,m", None).limit.load(Ordering::Acquire), 8);
     }
 }
