@@ -218,6 +218,15 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "shared provider definitions"):
                 policy.load_policy(self.root)
 
+    def test_minimax_final_tier_uses_the_disambiguated_preview_model(self) -> None:
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN[-1],
+            "minimax,MiniMax-M3.1-Flash-Preview",
+        )
+        minimax = policy.MACHINE_SHARED_PROVIDERS["minimax"]
+        self.assertEqual(minimax["auth_header"], "authorization")
+        self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash-Preview"])
+
     def test_stale_staging_report_follows_symlinked_consumers(self) -> None:
         managed = self.root / "managed"
         managed.mkdir()

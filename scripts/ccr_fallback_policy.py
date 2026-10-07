@@ -28,6 +28,9 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     "zai,glm-5.3-flash",
     "zai,glm-5.3",
     "deepseek,deepseek-flash",
+    # User-approved 2026-10-07 final tier. Do not shorten this id: the alias
+    # "MiniMax-M3.1-Flash" is accepted upstream but serves MiniMax-M3.
+    "minimax,MiniMax-M3.1-Flash-Preview",
 )
 MACHINE_CONSUMERS: dict[str, str] = {
     "config.json": "zai,glm-5.3",
@@ -43,7 +46,15 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "api_key": "${CCR_DEEPSEEK_API_KEY}",
         "protocol": "anthropic",
         "models": ["deepseek-flash"],
-    }
+    },
+    "minimax": {
+        "name": "minimax",
+        "api_base_url": "https://api.minimax.io/anthropic/v1",
+        "api_key": "${CCR_MINIMAX_API_KEY}",
+        "protocol": "anthropic",
+        "auth_header": "authorization",
+        "models": ["MiniMax-M3.1-Flash-Preview"],
+    },
 }
 # os.umask is process-global and not atomic, so a set/restore dance inside each
 # write leaves a window where an importing thread creates files mode 0666.
