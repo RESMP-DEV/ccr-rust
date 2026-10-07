@@ -1,15 +1,23 @@
 # Failover Architecture — Design and Execution Plan
 
-Status: proposed, pending implementation (2026-10-07). Source revision: `16f1f1c`
-plus the uncommitted 2026-10-07 rate-limit pacing change in `src/ratelimit.rs`
-(flat 1s pacing for 429s without `Retry-After`; see `CHANGELOG.md` Unreleased).
-All `file:line` references below are valid against that tree; re-verify after
-any intervening change.
+Status: Phases 0 through 3 implemented and locally verified on 2026-10-07;
+Phase 4 hedging remains intentionally unimplemented and disabled. All
+`file:line` references in the original design were checked against the
+pre-implementation tree and may drift as the repository changes; the tests
+and contracts below are authoritative.
 
 This document is the single plan for the "failover v2" work. An executing
 agent should be able to implement it from this file plus `AGENTS.md` without
 further conversation context. It supersedes nothing; it generalizes the
 incident-driven fixes of 2026-10-07.
+
+| Phase | Current status | Evidence owner |
+| --- | --- | --- |
+| 0. Failure classification | Implemented | `test_failover_controls.rs`, dispatch unit tests |
+| 1. AIMD admission | Implemented | `src/admission.rs` and two-upstream integration test |
+| 2. Bounded amplification | Implemented | `src/retry_budget.rs`, retry-sweep/failover tests |
+| 3. Conversation stickiness | Implemented, disabled by default | `src/stickiness.rs` and conversation integration test |
+| 4. Hedging | Not implemented; intentionally deferred | Requires measured TTFT and explicit spend authorization |
 
 ## How to execute this document
 
@@ -342,7 +350,7 @@ verified in production traffic.
 | Field | Default | Phase |
 | --- | --- | --- |
 | `Provider.maxInflight` | 8 (initial/max 8/64 AIMD bounds) | 1 |
-| `admission.enabled` (implicit via maxInflight presence) | on | 1 |
+| AIMD admission | always on for upstream attempts | 1 |
 | `Router.retryBudgetPercent` | 20 (0 = off) | 2 |
 | `retrySweeps.maxHoldMs` default when enabled | 60000 (0 = explicit infinite) | 2 |
 | `Router.stickySessions.enabled / ttlMs` | false / 3600000 | 3 |
@@ -359,7 +367,7 @@ explicit).
 | --- | --- | --- |
 | AIMD vs Gradient2 limiter | AIMD (simpler, loss-driven) | Switch if zai shows limit oscillation under live load; gradient needs RTT baselines we only have per-tier EWMA for |
 | Strict-order stickiness semantics | Stable partition by family (preserves within-family order) | If partitioning surprises in live traffic, demote stickiness to strict-order-incompatible like topK |
-| Sticky identity source | metadata.user_id → user → system-prompt hash | Verify actual headers sent by Claude Code and Codex on 3456 before Phase 3 lands |
+| Sticky identity source | system-prompt SHA-256 (normalized request has no metadata/user field) | Add metadata.user_id or user extraction when a frontend reliably carries either field |
 | Retry budget percent | 20% + floor 3 (Envoy/Finagle precedent) | Tune against `ccr_retry_budget_overflow_total` under real storms |
 | Hedge enablement | Off | Enable only with measured interactive tail latency data |
 
@@ -434,3 +442,12 @@ implemented.
   `MiniMax-M3.1-Flash` alias because it serves MiniMax-M3. All governed
   listeners were restarted at zero active connections, health checks passed,
   and real logs showed MiniMax completions on main, worker, and OCR routes.
+- 2026-10-07: Implemented failover-v2 Phases 0 through 3 on branch
+  `feat/failover-v2`. Deterministic 400/422 failures are now one-attempt
+  rejections except context-window errors; per-route AIMD admission, global
+  retry budgets, bounded default hold, EWMA clamps, hold-wait telemetry, and
+  optional conversation-provider stickiness are implemented. Full
+  `cargo test --all-features --locked`, strict Clippy, and formatting passed.
+  Phase 4 hedging remains optional and unimplemented because it duplicates
+  spend on the hedged tail; it must stay out of default behavior until that
+  tradeoff is explicitly selected with measured TTFT data.

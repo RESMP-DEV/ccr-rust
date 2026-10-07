@@ -228,6 +228,10 @@ def derive(
             minimum = 1 if name == "sweepCooldownMs" else 0
             if type(value) is not int or value < minimum:
                 raise ValueError(f"Consumer {consumer} has invalid retrySweeps.{name}")
+    if sweeps.get("enabled") is True and sweeps.get("maxHoldMs") == 0:
+        # Goverened listeners must not preserve a legacy infinite hold. The
+        # source policy can be changed only deliberately, with tests and review.
+        sweeps["maxHoldMs"] = 60_000
     return result
 
 

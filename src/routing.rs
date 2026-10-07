@@ -107,6 +107,12 @@ impl EwmaTracker {
     /// without requiring a wall-clock duration (failures often hit timeouts
     /// that don't reflect backend speed).
     pub fn record_failure(&self, tier: &str) {
+        self.record_failure_with_limit(tier, f64::INFINITY);
+    }
+
+    /// Record a failure while bounding the synthetic penalty to the effective
+    /// upstream timeout so a pathological duration cannot poison gauges.
+    pub fn record_failure_with_limit(&self, tier: &str, max_duration_secs: f64) {
         let mut state = self.state.write();
         let entry = state.entry(tier.to_string()).or_insert_with(TierState::new);
 
@@ -116,7 +122,8 @@ impl EwmaTracker {
         // Only penalize if we have a baseline EWMA to work from.
         // Otherwise we'd be multiplying zero.
         if entry.ewma > 0.0 {
-            let penalty_duration = entry.ewma * self.failure_penalty;
+            let penalty_duration =
+                (entry.ewma * self.failure_penalty).min(max_duration_secs.max(0.0));
             entry.ewma = self.alpha * penalty_duration + (1.0 - self.alpha) * entry.ewma;
         }
 
@@ -359,8 +366,18 @@ impl<'a> AttemptTimer<'a> {
     }
 
     /// Record a successful attempt. Returns the measured duration in seconds.
-    pub fn finish_success(mut self) -> f64 {
-        let duration = self.start.elapsed().as_secs_f64();
+    pub fn finish_success(self) -> f64 {
+        self.finish_success_with_limit(f64::INFINITY)
+    }
+
+    /// Finish a successful attempt and clamp the recorded duration to an
+    /// upstream timeout bound.
+    pub fn finish_success_with_limit(mut self, max_duration_secs: f64) -> f64 {
+        let duration = self
+            .start
+            .elapsed()
+            .as_secs_f64()
+            .min(max_duration_secs.max(0.0));
         self.tracker.record_success(&self.tier, duration);
         self.recorded = true;
         duration
@@ -368,8 +385,13 @@ impl<'a> AttemptTimer<'a> {
 
     /// Record a failed attempt. Applies the failure penalty to the EWMA
     /// instead of using the elapsed time.
-    pub fn finish_failure(mut self) {
-        self.tracker.record_failure(&self.tier);
+    pub fn finish_failure(self) {
+        self.finish_failure_with_limit(f64::INFINITY);
+    }
+
+    pub fn finish_failure_with_limit(mut self, max_duration_secs: f64) {
+        self.tracker
+            .record_failure_with_limit(&self.tier, max_duration_secs);
         self.recorded = true;
     }
 

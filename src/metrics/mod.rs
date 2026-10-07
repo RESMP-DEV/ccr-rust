@@ -139,6 +139,48 @@ lazy_static! {
     )
     .unwrap();
 
+    static ref DETERMINISTIC_REJECTIONS_TOTAL: CounterVec = register_counter_vec!(
+        "ccr_deterministic_rejections_total",
+        "Total deterministic upstream rejections per tier",
+        &["tier"]
+    )
+    .unwrap();
+
+    static ref TIER_INFLIGHT: GaugeVec = register_gauge_vec!(
+        "ccr_tier_inflight",
+        "Current in-flight upstream attempts per tier",
+        &["tier"]
+    )
+    .unwrap();
+
+    static ref TIER_LIMIT: GaugeVec = register_gauge_vec!(
+        "ccr_tier_limit",
+        "Current AIMD admission limit per tier",
+        &["tier"]
+    )
+    .unwrap();
+
+    static ref ADMISSION_DEFERS: CounterVec = register_counter_vec!(
+        "ccr_admission_defers_total",
+        "Attempts deferred because a tier was at its AIMD admission limit",
+        &["tier"]
+    )
+    .unwrap();
+
+    static ref RETRY_BUDGET_OVERFLOW: Counter = register_counter!(
+        "ccr_retry_budget_overflow_total",
+        "Retries rejected by the process-wide retry budget"
+    )
+    .unwrap();
+
+    static ref HOLD_WAIT_SECONDS: HistogramVec = register_histogram_vec!(
+        "ccr_hold_wait_seconds",
+        "Wall-clock time exhausted requests were held before terminal response",
+        &[],
+        vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0]
+    )
+    .unwrap();
+
     // Pre-request token audit: estimated input tokens before sending to backend
     static ref PRE_REQUEST_TOKENS: CounterVec = register_counter_vec!(
         "ccr_pre_request_tokens_total",
@@ -223,6 +265,12 @@ const METRIC_PRE_REQUEST_TOKENS: &str = "ccr_pre_request_tokens";
 const METRIC_RATE_LIMIT_HITS_TOTAL: &str = "ccr_rate_limit_hits_total";
 const METRIC_RATE_LIMIT_BACKOFFS_TOTAL: &str = "ccr_rate_limit_backoffs_total";
 const METRIC_RETRY_SWEEPS_TOTAL: &str = "ccr_retry_sweeps_total";
+const METRIC_DETERMINISTIC_REJECTIONS_TOTAL: &str = "ccr_deterministic_rejections_total";
+const METRIC_TIER_INFLIGHT: &str = "ccr_tier_inflight";
+const METRIC_TIER_LIMIT: &str = "ccr_tier_limit";
+const METRIC_ADMISSION_DEFERS_TOTAL: &str = "ccr_admission_defers_total";
+const METRIC_RETRY_BUDGET_OVERFLOW_TOTAL: &str = "ccr_retry_budget_overflow_total";
+const METRIC_HOLD_WAIT_SECONDS: &str = "ccr_hold_wait_seconds";
 const METRIC_TIER_EWMA_LATENCY_SECONDS: &str = "ccr_tier_ewma_latency_seconds";
 const METRIC_TOKEN_DRIFT_ABSOLUTE: &str = "ccr_token_drift_absolute";
 const METRIC_TOKEN_DRIFT_PCT: &str = "ccr_token_drift_pct";
@@ -385,6 +433,45 @@ pub fn record_failure(tier: &str, reason: &str) {
 pub fn record_retry_sweep() {
     RETRY_SWEEPS_TOTAL.inc();
     persist_counter_inc(METRIC_RETRY_SWEEPS_TOTAL, &[], 1.0);
+}
+
+/// Count a deterministic rejection that must not be retried on the same tier.
+pub fn record_deterministic_rejection(tier: &str) {
+    DETERMINISTIC_REJECTIONS_TOTAL
+        .with_label_values(&[tier])
+        .inc();
+    persist_counter_inc(
+        METRIC_DETERMINISTIC_REJECTIONS_TOTAL,
+        &[("tier", tier)],
+        1.0,
+    );
+}
+
+pub fn record_tier_inflight(tier: &str, value: u64) {
+    TIER_INFLIGHT.with_label_values(&[tier]).set(value as f64);
+    persist_gauge_set(METRIC_TIER_INFLIGHT, &[("tier", tier)], value as f64);
+}
+
+pub fn record_tier_limit(tier: &str, value: u64) {
+    TIER_LIMIT.with_label_values(&[tier]).set(value as f64);
+    persist_gauge_set(METRIC_TIER_LIMIT, &[("tier", tier)], value as f64);
+}
+
+pub fn record_admission_defer(tier: &str) {
+    ADMISSION_DEFERS.with_label_values(&[tier]).inc();
+    persist_counter_inc(METRIC_ADMISSION_DEFERS_TOTAL, &[("tier", tier)], 1.0);
+}
+
+pub fn record_retry_budget_overflow() {
+    RETRY_BUDGET_OVERFLOW.inc();
+    persist_counter_inc(METRIC_RETRY_BUDGET_OVERFLOW_TOTAL, &[], 1.0);
+}
+
+pub fn record_hold_wait(seconds: f64) {
+    HOLD_WAIT_SECONDS
+        .with_label_values(&[] as &[&str])
+        .observe(seconds);
+    persist_histogram_observe(METRIC_HOLD_WAIT_SECONDS, &[], seconds);
 }
 
 pub fn increment_active_streams(delta: i64) {

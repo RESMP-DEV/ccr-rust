@@ -3,12 +3,15 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
+use crate::admission::AdmissionTracker;
 use crate::config::Config;
 use crate::debug_capture::DebugCapture;
 #[cfg(feature = "gp")]
 use crate::gp_router::GpRequestRouter;
 use crate::ratelimit::RateLimitTracker;
+use crate::retry_budget::RetryBudget;
 use crate::routing::EwmaTracker;
+use crate::stickiness::StickySessionTracker;
 use crate::transformer::TransformerRegistry;
 
 // ============================================================================
@@ -69,6 +72,9 @@ pub struct AppState {
     pub active_streams: Arc<AtomicUsize>,
     pub max_streams: usize,
     pub ratelimit_tracker: Arc<RateLimitTracker>,
+    pub admission_tracker: Arc<AdmissionTracker>,
+    pub retry_budget: Arc<RetryBudget>,
+    pub sticky_sessions: Arc<StickySessionTracker>,
     #[allow(dead_code)]
     pub shutdown_timeout: u64,
     /// Debug capture manager for recording raw API interactions.

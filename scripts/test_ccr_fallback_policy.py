@@ -227,6 +227,17 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(minimax["auth_header"], "authorization")
         self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash-Preview"])
 
+    def test_governed_consumers_cannot_preserve_an_infinite_hold(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["Router"]["retrySweeps"] = {
+            "enabled": True,
+            "maxSweeps": 0,
+            "sweepCooldownMs": 100,
+            "maxHoldMs": 0,
+        }
+        derived = policy.derive(config, self.policy, "worker.json")
+        self.assertEqual(derived["Router"]["retrySweeps"]["maxHoldMs"], 60_000)
+
     def test_stale_staging_report_follows_symlinked_consumers(self) -> None:
         managed = self.root / "managed"
         managed.mkdir()

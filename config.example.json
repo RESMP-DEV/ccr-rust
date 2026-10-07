@@ -35,6 +35,17 @@
             }
         },
         {
+            "name": "minimax-anthropic",
+            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_key": "${MINIMAX_API_KEY}",
+            "protocol": "anthropic",
+            "auth_header": "authorization",
+            "models": [
+                "MiniMax-M3.1-Flash-Preview",
+                "MiniMax-M3"
+            ]
+        },
+        {
             "name": "openrouter",
             "api_base_url": "https://openrouter.ai/api/v1",
             "api_key": "${OPENROUTER_API_KEY}",
@@ -88,7 +99,13 @@
             "enabled": false,
             "maxSweeps": 0,
             "sweepCooldownMs": 2000,
-            "maxHoldMs": 0
+            "maxHoldMs": 60000
+        },
+        "retryBudgetPercent": 20,
+        "stickySessions": {
+            "_comment": "Keep a conversation on the provider family that last served it, so failover does not switch protocol families mid-conversation. The pinned prefix (direct routing, web search) never moves.",
+            "enabled": false,
+            "ttlMs": 3600000
         }
     },
     "Presets": {

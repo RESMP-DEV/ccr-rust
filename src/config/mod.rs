@@ -180,6 +180,14 @@ fn validate_client_listener(file: &ConfigFile) -> Result<()> {
 /// Validate cross-field provider requirements before the router accepts traffic.
 fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
     for provider in providers {
+        if let Some(max_inflight) = provider.max_inflight {
+            anyhow::ensure!(
+                (1..=64).contains(&max_inflight),
+                "provider '{}' maxInflight must be between 1 and 64, got {}",
+                provider.name,
+                max_inflight
+            );
+        }
         let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
             continue;
         };
@@ -211,6 +219,15 @@ fn validate_retry_sweeps(router: &RouterConfig) -> Result<()> {
         !(sweeps.enabled && sweeps.sweep_cooldown_ms == 0),
         "Router.retrySweeps.sweepCooldownMs must be > 0 when retrySweeps is enabled \
          (zero would re-cascade the tier list back-to-back in an unbounded hot loop)"
+    );
+    Ok(())
+}
+
+fn validate_retry_budget(router: &RouterConfig) -> Result<()> {
+    anyhow::ensure!(
+        router.retry_budget_percent <= 100,
+        "Router.retryBudgetPercent must be between 0 and 100, got {}",
+        router.retry_budget_percent
     );
     Ok(())
 }
@@ -518,6 +535,7 @@ impl Config {
         validate_provider_contracts(&file.providers)?;
         validate_model_aliases(&file.router, &file.providers)?;
         validate_retry_sweeps(&file.router)?;
+        validate_retry_budget(&file.router)?;
         validate_tier_order_conflicts(&file.router)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.

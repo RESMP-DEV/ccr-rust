@@ -47,26 +47,32 @@ use tracing::{error, info, warn};
 
 use crate::config::ModelAliasTarget;
 use crate::frontend::{detect_frontend, FrontendType};
+use crate::metrics::record_deterministic_rejection;
 use crate::metrics::{
-    increment_active_requests, record_failure, record_pre_request_tokens,
+    increment_active_requests, record_failure, record_hold_wait, record_pre_request_tokens,
     record_request_duration_with_frontend, record_request_with_frontend, record_retry_sweep,
     sync_ewma_gauge,
 };
 use crate::routing::AttemptTimer;
 
 /// RAII guard that decrements active_requests when dropped.
-struct ActiveRequestGuard;
+struct ActiveRequestGuard {
+    _retry_budget: crate::retry_budget::ActiveRequest,
+}
 
 impl ActiveRequestGuard {
-    fn new() -> Self {
+    fn new(retry_budget: &std::sync::Arc<crate::retry_budget::RetryBudget>) -> Self {
         increment_active_requests(1);
-        Self
+        Self {
+            _retry_budget: retry_budget.request_started(),
+        }
     }
 }
 
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         increment_active_requests(-1);
+        // `_retry_budget` drops after this method and decrements its own count.
     }
 }
 
@@ -131,7 +137,7 @@ pub async fn handle_messages(
     headers: HeaderMap,
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
-    let _guard = ActiveRequestGuard::new();
+    let _guard = ActiveRequestGuard::new(&state.retry_budget);
     let start = std::time::Instant::now();
     let config = &state.config;
     let tiers = config.backend_tiers();
@@ -237,6 +243,17 @@ pub async fn handle_messages(
         }
     }
 
+    let sticky_key = if config.router().sticky_sessions.enabled {
+        crate::stickiness::StickySessionTracker::conversation_key(&request)
+    } else {
+        None
+    };
+    if let Some(key) = sticky_key.as_deref() {
+        state
+            .sticky_sessions
+            .stable_partition(key, &mut ordered, pinned_prefix_len);
+    }
+
     // Detect frontend type from headers and request
     let body_json = serde_json::to_value(&request).unwrap_or_default();
     let frontend = detect_frontend(&headers, &body_json);
@@ -305,9 +322,30 @@ pub async fn handle_messages(
         saw_retryable_failure = false;
         retry_after_hint = None;
         last_rate_limited_tier = None;
+        let mut retry_budget_exhausted = false;
 
-        // Try each tier with retries
-        for (tier, tier_name) in ordered.iter() {
+        // A tier at its AIMD limit is deferred to the end of this pass. This
+        // is local to the pass: another tier may still admit immediately, and
+        // the deferred tier is reconsidered on the next sweep.
+        let mut admission_ready: Vec<&(String, String)> = Vec::new();
+        let mut admission_deferred: Vec<&(String, String)> = Vec::new();
+        for entry @ (tier, _) in &ordered {
+            let provider_limit = config.resolve_provider(tier).and_then(|p| p.max_inflight);
+            if state
+                .admission_tracker
+                .at_capacity(tier.as_str(), provider_limit)
+            {
+                admission_deferred.push(entry);
+            } else {
+                admission_ready.push(entry);
+            }
+        }
+        let all_admission_deferred =
+            !ordered.is_empty() && admission_deferred.len() == ordered.len();
+        let pass_order = admission_ready.into_iter().chain(admission_deferred);
+
+        // Try each tier with retries.
+        'tier_pass: for (tier, tier_name) in pass_order {
             if rejected_tiers.contains(tier) {
                 tracing::debug!(tier = %tier_name, "Skipping deterministically rejected tier");
                 continue;
@@ -361,8 +399,35 @@ pub async fn handle_messages(
 
             let retry_config = config.get_tier_retry(tier_name);
             let max_retries = retry_config.max_retries;
+            let provider_limit = config.resolve_provider(tier).and_then(|p| p.max_inflight);
 
             for attempt in 0..=max_retries {
+                let _retry_permit = if total_attempts > 0 {
+                    match state
+                        .retry_budget
+                        .acquire_retry(config.router().retry_budget_percent)
+                    {
+                        Some(permit) => Some(permit),
+                        None => {
+                            saw_non_rate_limit_failure = true;
+                            retry_budget_exhausted = true;
+                            break 'tier_pass;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let admission_permit = match state
+                    .admission_tracker
+                    .acquire(tier.as_str(), provider_limit)
+                {
+                    Some(permit) => permit,
+                    None => {
+                        saw_non_rate_limit_failure = true;
+                        saw_retryable_failure = true;
+                        continue;
+                    }
+                };
                 total_attempts += 1;
                 info!(
                     sweep,
@@ -377,6 +442,7 @@ pub async fn handle_messages(
                 request.model = tier.clone();
 
                 // Start per-attempt latency timer for EWMA tracking
+                let effective_timeout_secs = config.api_timeout_ms() as f64 / 1000.0;
                 let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
 
                 match try_request(TryRequestArgs {
@@ -389,6 +455,7 @@ pub async fn handle_messages(
                     stream_first_event_timeout: retry_config.stream_first_event_timeout(),
                     stream_idle_timeout: retry_config.stream_idle_timeout(),
                     ratelimit_tracker: state.ratelimit_tracker.clone(),
+                    admission_permit,
                     debug_capture: state.debug_capture.clone(),
                     openai_passthrough_body: request.openai_passthrough_body.as_ref(),
                     render_refusal_as_anthropic_text: frontend == FrontendType::ClaudeCode,
@@ -399,7 +466,7 @@ pub async fn handle_messages(
                         if response.status() == StatusCode::TOO_MANY_REQUESTS {
                             // 429 passthrough is an intentional non-cascading return path,
                             // but it must be tracked as a failed attempt for EWMA scoring.
-                            timer.finish_failure();
+                            timer.finish_failure_with_limit(effective_timeout_secs);
                             #[cfg(feature = "gp")]
                             if let (Some(gp_router), Some(plan)) =
                                 (state.gp_router.as_ref(), gp_plan.as_ref())
@@ -427,6 +494,7 @@ pub async fn handle_messages(
                             state
                                 .ratelimit_tracker
                                 .record_429(tier.as_str(), retry_after);
+                            state.admission_tracker.record_rejection(tier.as_str());
                             // Metric parity with dispatch's classified-429 path:
                             // record the hit and the backoff, keyed by the same
                             // full route string dispatch uses.
@@ -448,7 +516,8 @@ pub async fn handle_messages(
                             break;
                         }
 
-                        let attempt_duration = timer.finish_success();
+                        let attempt_duration =
+                            timer.finish_success_with_limit(effective_timeout_secs);
                         #[cfg(feature = "gp")]
                         if let (Some(gp_router), Some(plan)) =
                             (state.gp_router.as_ref(), gp_plan.as_ref())
@@ -462,6 +531,24 @@ pub async fn handle_messages(
                             );
                         }
                         let total_duration = start.elapsed().as_secs_f64();
+                        if let Some(key) = sticky_key.as_deref() {
+                            if let Some(provider) = config
+                                .resolve_provider(tier)
+                                .map(|provider| provider.name.clone())
+                            {
+                                state.sticky_sessions.remember(key, &provider);
+                            }
+                        }
+                        let response_is_stream = response
+                            .headers()
+                            .get(axum::http::header::CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .is_some_and(|value| value.starts_with("text/event-stream"));
+                        if !response_is_stream {
+                            state
+                                .ratelimit_tracker
+                                .record_success(tier.as_str(), None, None);
+                        }
                         record_request_with_frontend(tier_name, frontend);
                         record_request_duration_with_frontend(tier_name, total_duration, frontend);
                         sync_ewma_gauge(&state.ewma_tracker);
@@ -486,7 +573,8 @@ pub async fn handle_messages(
                         // Dispatch records the 429 (tracker, hit and backoff
                         // metrics) before returning this error; only the EWMA
                         // bookkeeping and tier transition happen here.
-                        timer.finish_failure();
+                        timer.finish_failure_with_limit(effective_timeout_secs);
+                        state.admission_tracker.record_rejection(tier.as_str());
                         #[cfg(feature = "gp")]
                         if let (Some(gp_router), Some(plan)) =
                             (state.gp_router.as_ref(), gp_plan.as_ref())
@@ -512,7 +600,7 @@ pub async fn handle_messages(
                         break;
                     }
                     Err(TryRequestError::Rejected(code, e)) => {
-                        timer.finish_failure();
+                        timer.finish_failure_with_limit(effective_timeout_secs);
                         #[cfg(feature = "gp")]
                         if let (Some(gp_router), Some(plan)) =
                             (state.gp_router.as_ref(), gp_plan.as_ref())
@@ -523,6 +611,7 @@ pub async fn handle_messages(
                         sync_ewma_gauge(&state.ewma_tracker);
                         warn!("Failed {} attempt {}: {}", tier_name, attempt + 1, e);
                         record_failure(tier_name, "provider_rejected");
+                        record_deterministic_rejection(tier_name);
                         info!(
                             tier = tier_name,
                             code, "deterministic upstream rejection; not retrying this tier"
@@ -536,7 +625,7 @@ pub async fn handle_messages(
                         break;
                     }
                     Err(TryRequestError::Other(e)) => {
-                        timer.finish_failure();
+                        timer.finish_failure_with_limit(effective_timeout_secs);
                         #[cfg(feature = "gp")]
                         if let (Some(gp_router), Some(plan)) =
                             (state.gp_router.as_ref(), gp_plan.as_ref())
@@ -572,7 +661,7 @@ pub async fn handle_messages(
         // The sweep exhausted without a success return. Decide whether to
         // hold the request open and cascade again (retrySweeps) or fall
         // through to the synthesized terminal response below.
-        if !sweeps.enabled || !(saw_rate_limit || saw_retryable_failure) {
+        if !sweeps.enabled || retry_budget_exhausted || !(saw_rate_limit || saw_retryable_failure) {
             // Either disabled, or every tier failed deterministically
             // (401/402/403/404): another sweep cannot change that outcome.
             break;
@@ -593,6 +682,13 @@ pub async fn handle_messages(
         let cooldown = retry_after_hint
             .map(|hint| cooldown.max(hint.min(std::time::Duration::from_secs(60))))
             .unwrap_or(cooldown);
+        let cooldown = if all_admission_deferred {
+            // Full jitter avoids synchronizing all deferred requests onto the
+            // next admission window (AWS full-jitter pattern).
+            cooldown.mul_f64(rand::random::<f64>().clamp(0.0, 1.0))
+        } else {
+            cooldown
+        };
         let cooldown = match hold_deadline {
             Some(deadline) => {
                 cooldown.min(deadline.saturating_duration_since(std::time::Instant::now()))
@@ -618,6 +714,7 @@ pub async fn handle_messages(
         );
     }
 
+    record_hold_wait(start.elapsed().as_secs_f64());
     if saw_rate_limit && !saw_non_rate_limit_failure {
         info!(
             retry_after = ?retry_after_hint,

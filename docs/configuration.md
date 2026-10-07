@@ -136,6 +136,7 @@ Each provider entry configures an upstream API endpoint.
 | `model_pricing` | object | No | - | Model-keyed price overrides using the same rate fields. |
 | `transformer` | object | No | - | Request/response transformation configuration. |
 | `force_reasoning_effort` | string | No | - | Force `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` on every OpenAI-protocol request. |
+| `maxInflight` | number | No | 8 | Initial and maximum per-route in-flight attempts for AIMD admission control. Values must be from 1 through 64. A 429 halves the current route limit; a clean completion grows it by one. |
 
 `force_reasoning_effort` is valid only for the default `openai` provider
 protocol. Configuration validation rejects unsupported values and other
@@ -434,7 +435,24 @@ right trade for long-lived agent sessions.
 | `enabled` | bool | false | Enable held-request re-cascading. |
 | `maxSweeps` | number | 0 | Additional full-cascade sweeps after the first before giving up. 0 = unlimited. |
 | `sweepCooldownMs` | number | 2000 | Minimum cooldown between sweeps; must be > 0 when enabled (rejected at config load). Stretched to the strongest of: the sweep's Retry-After hints, or the rate-limit tracker's live backoff window for tiers skipped while still cooling down from a 429 (both capped at 60s, the backoff ceiling). The same value becomes the `Retry-After` header on the synthesized 429 when sweeps give up while tiers are still rate-limited. |
-| `maxHoldMs` | number | 0 | Wall-clock cap on holding one request open. 0 = unlimited. Enforced at sweep boundaries; the inter-sweep sleep is clamped to the remaining budget. A sweep already in flight when the deadline passes still completes. |
+| `maxHoldMs` | number | 60000 | Wall-clock cap on holding one request open. 0 is an explicit unlimited opt-in. Enforced at sweep boundaries; the inter-sweep sleep is clamped to the remaining budget. A sweep already in flight when the deadline passes still completes. |
+
+### Retry amplification budget
+
+`Router.retryBudgetPercent` (default 20, range 0..100) bounds global retry
+attempts to a percentage of active client requests, with a floor of three.
+Zero disables retries after each request's first upstream attempt. Rejected
+retries increment `ccr_retry_budget_overflow_total`.
+
+### Conversation stickiness
+
+`Router.stickySessions` is disabled by default while live behavior is
+qualified. When enabled, the successful provider family for a conversation
+key is remembered for `ttlMs` (default 3600000). On later turns CCR performs
+a stable partition: the direct-routing/web-search pinned prefix stays in
+place, remembered-family tiers come next in their configured order, and all
+other eligible tiers follow in their configured order. Cross-family movement
+still occurs after the remembered family is exhausted.
 
 ```json
 {
@@ -443,7 +461,7 @@ right trade for long-lived agent sessions.
       "enabled": true,
       "maxSweeps": 0,
       "sweepCooldownMs": 2000,
-      "maxHoldMs": 0
+      "maxHoldMs": 60000
     }
   }
 }

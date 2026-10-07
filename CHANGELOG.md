@@ -13,6 +13,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed 429 backoff marking so a rate-limit response without a server
+  `Retry-After` only paces the tier for one second instead of escalating
+  exponentially into a 60-second cross-request skip. Server-directed
+  `Retry-After` values are still honored verbatim, capped at 60 seconds.
+  Coding-plan endpoints that reject some requests under concurrency while
+  admitting others now stay eligible for dispatch instead of being
+  blanket-skipped.
+- Added failover-v2 admission control. Upstream attempts now acquire per-route
+  in-flight permits with AIMD limits (`Provider.maxInflight`, default 8,
+  bounds 1..64); capacity-deferred requests move behind same-sweep eligible
+  tiers, and all-deferred sweeps use full jitter. Streaming slots release when
+  the upstream stream completes cleanly.
+- Added the global `Router.retryBudgetPercent` budget, default 20 percent with
+  a floor of three retries. A zero value disables retries. Overflow is counted
+  by `ccr_retry_budget_overflow_total`.
+- Changed deterministic failure handling for 400 and 422 responses: they are
+  now rejected after one attempt on a tier unless the body is a
+  context-window rejection. Context-window errors remain retryable so the
+  cascade can move to a larger-context tier. Added
+  `ccr_deterministic_rejections_total`.
+- Changed the enabled retry-sweep hold default from unlimited to 60 seconds;
+  `maxHoldMs: 0` remains an explicit unlimited opt-in. EWMA success durations
+  and failure penalties are clamped to the effective upstream timeout, and
+  held-request time is now reported by `ccr_hold_wait_seconds`.
+- Added optional conversation-provider stickiness under
+  `Router.stickySessions`. It is disabled by default, honors the pinned route
+  prefix, preserves configured order within each family, and only reorders
+  the fallback portion when a remembered provider family is available.
 - Changed client-key activation to a dedicated `AUTH_HOST`/`AUTH_PORT` listener.
   The existing `HOST`/`PORT` listener remains unauthenticated for local
   clients, while Cloudflare or another reverse proxy targets only the separate

@@ -357,6 +357,9 @@ pub async fn stream_response_translated(
             // Clear rate limit backoff and update rate limit state on successful stream completion.
             // A mid-stream upstream error or client disconnect is not a success signal for the route.
             if upstream_completed_cleanly {
+                if let Some(permit) = ctx.admission_permit.as_ref() {
+                    permit.record_success();
+                }
                 if let Some(ref tracker) = ctx.ratelimit_tracker {
                     if let Some((remaining, reset_at)) = &ctx.rate_limit_info {
                         tracker.record_success_if_current(
@@ -641,6 +644,9 @@ pub async fn stream_anthropic_response_with_tracking(
         // Update rate limit state; a mid-stream upstream error or client
         // disconnect is not a success signal for the route.
         if upstream_completed_cleanly {
+            if let Some(permit) = verify_ctx.admission_permit.as_ref() {
+                permit.record_success();
+            }
             if let Some(ref tracker) = verify_ctx.ratelimit_tracker {
                 if let Some((remaining, reset_at)) = &verify_ctx.rate_limit_info {
                     tracker.record_success_if_current(
