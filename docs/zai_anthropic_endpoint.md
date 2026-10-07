@@ -94,9 +94,9 @@ transport dropped it.
 
 ## Operations: restart with credentials (do not bypass)
 
-The local configs reference `api_key: "${CCR_ZAI_API_KEY}"` /
-`${CCR_AZURE_API_KEY}`. Those variables are injected only by
-`~/.claude-code-router/serve.py`, which reads `runtime-credentials.json`
+The local configs reference `api_key: "${CCR_ZAI_API_KEY}"` and the other
+provider references approved by the shared fallback policy. Those variables are
+injected only by the governed `serve*.py` launchers, which read `runtime-credentials.json`
 (mode 0600) and `execve`s the router. **Starting `ccr-rust` directly from a
 shell without those variables makes both providers 401** with the literal
 placeholder string as the key; the failure looks exactly like an expired
@@ -104,8 +104,8 @@ credential. This happened on 2026-09-23 after a manual restart and was
 misdiagnosed as key expiry before the env loss was found.
 
 Canonical restarts on this workstation are **launchd**, not manual shells:
-`com.kearm.ccr-rust` (port 3456, config.json) and `com.kearm.ccr-glm-workers`
-(port 3457, glm-workers.json via `CCR_CONFIG_FILE`) both run `serve.py` with
+the main, worker, OCR, and authenticated LaunchAgents all run the governed
+`serve*.py` launchers with
 `KeepAlive`, so a manually started listener fights the agent (recurring
 "Address already in use") and the agent reclaims the port within seconds of
 any manual process exiting.
@@ -113,12 +113,15 @@ any manual process exiting.
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.kearm.ccr-rust
 launchctl kickstart -k gui/$(id -u)/com.kearm.ccr-glm-workers
+launchctl kickstart -k gui/$(id -u)/com.kearm.ccr-ocr
+launchctl kickstart -k gui/$(id -u)/com.kearm.ccr-rust-auth
 ```
 
-Service logs land in `~/.claude-code-router/logs/service.stdout.log` and
-`service.stderr.log`, not the manual `ccr-34xx.log` files. `serve.py` reads
-`runtime-credentials.json` (mode 0600; entries limited to `CCR_ZAI_API_KEY`,
-`CCR_AZURE_API_KEY`, `CCR_MINIMAX_API_KEY`) and injects them before exec, so
+Service logs land under `~/.claude-code-router/logs/`, not the manual
+`ccr-34xx.log` files. The launchers read
+`runtime-credentials.json` (mode 0600; entries limited to the references in the
+governed configs, such as `CCR_ZAI_API_KEY`, `CCR_DEEPSEEK_API_KEY`, and
+`CCR_MINIMAX_API_KEY`) and injects them before exec, so
 launchd-spawned processes always carry credentials. If you must start
 manually, use `serve.py` the same way — never raw `ccr-rust start`.
 

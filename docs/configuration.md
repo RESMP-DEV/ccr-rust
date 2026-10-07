@@ -292,9 +292,9 @@ The `Router` section configures how incoming requests are routed to providers.
 | `modelAliases` | object | No | `{}` | Map exact bare client model IDs to configured `provider,model` routes. Ignored for routing when `ignoreDirect` is true. |
 | `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
 
-For example, `"modelAliases": {"gpt-6-astra": "azure,gpt-6-astra"}`
-preserves an existing client's Astra selection while `default` and `tiers`
-select `zai,glm-5.3` for other unqualified requests. Aliases are exact and do
+For example, `"modelAliases": {"glm-5.3": "zai,glm-5.3"}`
+preserves an existing client's bare model selection while `default` and `tiers`
+govern fallback. Aliases are exact and do
 not chain. Targets must name a configured provider and model. Comma-qualified
 requests are never remapped. The resolved route follows normal direct-routing
 and fallback rules; this is not an account-isolation mechanism.
@@ -304,7 +304,7 @@ An alias value may instead be an object with a `route` plus optional
 
 ```json
 "modelAliases": {
-  "gpt-6-astra": "azure,gpt-6-astra",
+  "glm-5.3": "zai,glm-5.3",
   "claude-glm-5.3": {
     "route": "zai,glm-5.3",
     "display_name": "GLM 5.3 (Z.ai via CCR)",
