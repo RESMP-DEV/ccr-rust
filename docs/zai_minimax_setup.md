@@ -118,17 +118,46 @@ is the same. The official Anthropic-compatible base for CCR is
   "api_base_url": "https://api.minimax.io/anthropic/v1",
   "api_key": "${MINIMAX_API_KEY}",
   "protocol": "anthropic",
-  "models": ["MiniMax-M3"]
+  "models": ["MiniMax-M3.1-Flash-Preview"]
 }
 ```
 
 This is a provider fragment; add a matching `Router.default`/`Router.tiers`
-entry such as `minimax,MiniMax-M3` to a complete config. Native Anthropic content
-blocks do not need a format-conversion transformer solely because of the name.
+entry such as `minimax,MiniMax-M3.1-Flash-Preview` to a complete config.
+Native Anthropic content blocks do not need a format-conversion transformer
+solely because of the name.
 
 MiniMax's current reference lists M3 and M2.x models with different context,
 multimodal, and thinking behavior. Check that reference for the chosen model;
 do not copy one model's settings to another.
+
+### M3 and M3.1 model IDs (2026-10-08)
+
+Every `MiniMax-M3.*` model ID, including `MiniMax-M3.1-Flash-Preview`, is
+treated as the native Anthropic reasoning family: CCR injects
+`thinking: {type: "adaptive"}` and does not add the OpenAI-only
+`reasoning_split: true`. For the `minimax` provider, CCR also rewrites the
+requested model to `MiniMax-M3.1-Flash-Preview` before building the
+transformer chain, so a config or route naming `MiniMax-M3` or
+`MiniMax-M3.1-Flash` is served by the exact preview ID. This is deliberate:
+a direct upstream request for `MiniMax-M3.1-Flash` returned HTTP 200 while
+actually serving `MiniMax-M3`, while the explicit preview ID returned HTTP 200
+and served the requested model. M2.x models keep the `reasoning_split` path.
+
+MiniMax can also emit malformed visible output: quote-only assistant text, or
+text containing transport control markers such as `<tool_call>` or
+`]<]minimax[>[`. CCR removes those text blocks from assistant history before
+replaying it upstream, keeping `tool_use` blocks and tool-result pairing
+intact, and cleans the same artifacts from complete responses and streaming
+deltas. User messages are never rewritten. When a turn's only text was
+malformed, CCR substitutes `[MALFORMED_MINIMAX_OUTPUT_REMOVED]` so the turn
+stays structurally valid instead of replaying an empty assistant message.
+
+These repairs are transformer-local, so they apply to the governed fallback
+chain without changing the source-pinned route policy in
+`scripts/ccr_fallback_policy.py`. Sanitized output is transport hygiene, not a
+model-quality claim: unit and mocked coverage cannot prove the live endpoint
+is clean.
 
 ### Live verification (2026-09-23, coding-plan key)
 

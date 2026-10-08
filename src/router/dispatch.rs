@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{trace, warn};
@@ -21,6 +22,7 @@ use crate::metrics::{
 };
 use crate::ratelimit::RateLimitTracker;
 use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
+use crate::transform::minimax::{is_m3_model, MINIMAX_M3_1_FLASH_PREVIEW};
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
 use futures::StreamExt;
@@ -314,6 +316,17 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) render_refusal_as_anthropic_text: bool,
 }
 
+fn canonical_model_name<'a>(
+    provider: &crate::config::Provider,
+    model_name: &'a str,
+) -> Cow<'a, str> {
+    if provider.name.eq_ignore_ascii_case("minimax") && is_m3_model(model_name) {
+        Cow::Borrowed(MINIMAX_M3_1_FLASH_PREVIEW)
+    } else {
+        Cow::Borrowed(model_name)
+    }
+}
+
 pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, TryRequestError> {
     let TryRequestArgs {
         config,
@@ -334,8 +347,14 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
         TryRequestError::Other(anyhow::anyhow!("Provider not found for tier: {}", tier))
     })?;
 
+    // Extract the actual model name from the tier (format: "provider,model"),
+    // then pin the historical MiniMax M3 family to the qualified M3.1 preview
+    // ID. The shorter aliases have served different MiniMax generations.
+    let requested_model_name = tier.split(',').nth(1).unwrap_or(tier);
+    let model_name = canonical_model_name(provider, requested_model_name);
+
     // Build transformer chain from provider config
-    let chain = build_transformer_chain(registry, provider, tier.split(',').nth(1).unwrap_or(tier));
+    let chain = build_transformer_chain(registry, provider, &model_name);
 
     // Native Responses payloads intentionally retain fields that have no
     // lossless Anthropic or Chat Completions representation. Existing request
@@ -355,9 +374,6 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
             provider.name
         )));
     }
-
-    // Extract the actual model name from the tier (format: "provider,model")
-    let model_name = tier.split(',').nth(1).unwrap_or(tier);
 
     // Apply request transformers if chain is not empty
     let transformed_request = if chain.is_empty() {
@@ -385,7 +401,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                 provider,
                 TryRequestProtocolArgs {
                     transformed_request,
-                    model_name,
+                    model_name: model_name.as_ref(),
                     tier_name,
                     ratelimit_key: tier,
                     local_estimate,
@@ -407,7 +423,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                 provider,
                 TryRequestProtocolArgs {
                     transformed_request,
-                    model_name,
+                    model_name: model_name.as_ref(),
                     tier_name,
                     ratelimit_key: tier,
                     local_estimate,
@@ -1573,6 +1589,38 @@ mod tests {
         apply_provider_request_overrides(&provider, &mut request).unwrap();
 
         assert_eq!(request["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn minimax_m3_family_is_canonicalized_before_dispatch() {
+        let minimax: Provider = serde_json::from_value(serde_json::json!({
+            "name": "Minimax",
+            "api_base_url": "https://api.minimax.example/v1",
+            "api_key": "test",
+            "models": ["MiniMax-M3"]
+        }))
+        .unwrap();
+        let other: Provider = serde_json::from_value(serde_json::json!({
+            "name": "other",
+            "api_base_url": "https://api.other.example/v1",
+            "api_key": "test",
+            "models": ["MiniMax-M3"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            canonical_model_name(&minimax, "MiniMax-M3"),
+            "MiniMax-M3.1-Flash-Preview"
+        );
+        assert_eq!(
+            canonical_model_name(&minimax, "minimax-m3.1-flash"),
+            "MiniMax-M3.1-Flash-Preview"
+        );
+        assert_eq!(canonical_model_name(&other, "MiniMax-M3"), "MiniMax-M3");
+        assert_eq!(
+            canonical_model_name(&minimax, "MiniMax-M2.7"),
+            "MiniMax-M2.7"
+        );
     }
 
     #[test]

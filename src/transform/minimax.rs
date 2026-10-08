@@ -22,6 +22,9 @@ use anyhow::Result;
 use serde_json::Value;
 use tracing::{trace, warn};
 
+pub(crate) const MINIMAX_M3_1_FLASH_PREVIEW: &str = "MiniMax-M3.1-Flash-Preview";
+const MALFORMED_MINIMAX_PLACEHOLDER: &str = "[MALFORMED_MINIMAX_OUTPUT_REMOVED]";
+
 /// Models that support native Anthropic-style thinking blocks (M3)
 const M3_MODELS: &[&str] = &["MiniMax-M3", "minimax-m3"];
 
@@ -38,15 +41,177 @@ const M2_MODELS: &[&str] = &[
 ];
 
 /// Check if a model is an M3 model (native Anthropic-style thinking)
-fn is_m3_model(model: &str) -> bool {
-    M3_MODELS
-        .iter()
-        .any(|m| model.eq_ignore_ascii_case(m) || model.eq_ignore_ascii_case(&m.to_lowercase()))
+pub(crate) fn is_m3_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    M3_MODELS.iter().any(|m| model == *m) || model.starts_with("minimax-m3.")
 }
 
 /// Check if a model is an M2.x model (reasoning_split format)
 fn is_m2_model(model: &str) -> bool {
     M2_MODELS.iter().any(|m| model.eq_ignore_ascii_case(m))
+}
+
+fn has_minimax_control_marker(text: &str) -> bool {
+    text.contains("<tool_call>")
+        || text.contains("]<]minimax[>[")
+        || text.contains('\u{0}')
+        || text.contains("<invoke")
+}
+
+fn is_malformed_minimax_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let has_quote = trimmed
+        .chars()
+        .any(|ch| matches!(ch, '"' | '“' | '”' | '\'' | '‘' | '’'));
+    let quote_only = has_quote
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_whitespace() || matches!(ch, '"' | '“' | '”' | '\'' | '‘' | '’'));
+    quote_only || has_minimax_control_marker(trimmed)
+}
+
+fn strip_trailing_quote_artifact(text: &str) -> String {
+    let core = text.trim_end_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '"' | '“' | '”' | '\'' | '‘' | '’')
+    });
+    let removed_quotes = text[core.len()..]
+        .chars()
+        .filter(|ch| matches!(ch, '"' | '“' | '”' | '\'' | '‘' | '’'))
+        .count();
+    if removed_quotes >= 2 {
+        core.to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn sanitize_assistant_history(request: &mut Value) {
+    let Some(messages) = request.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for message in messages {
+        if message
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| !role.eq_ignore_ascii_case("assistant"))
+        {
+            continue;
+        }
+
+        match message.get_mut("content") {
+            Some(Value::Array(blocks)) => {
+                let mut sanitized = Vec::with_capacity(blocks.len());
+                let mut removed = false;
+                for block in blocks.iter() {
+                    let text = block.get("text").and_then(Value::as_str);
+                    if block.get("type").and_then(Value::as_str) == Some("text") {
+                        if let Some(text) = text {
+                            if is_malformed_minimax_text(text) {
+                                removed = true;
+                                continue;
+                            }
+                            let clean = strip_trailing_quote_artifact(text);
+                            if clean != text {
+                                let mut clean_block = block.clone();
+                                clean_block["text"] = Value::String(clean);
+                                sanitized.push(clean_block);
+                                continue;
+                            }
+                        }
+                    }
+                    sanitized.push(block.clone());
+                }
+                if removed && sanitized.is_empty() {
+                    sanitized.push(serde_json::json!({
+                        "type": "text",
+                        "text": MALFORMED_MINIMAX_PLACEHOLDER
+                    }));
+                }
+                *blocks = sanitized;
+            }
+            Some(content @ Value::String(_)) => {
+                let text = content.as_str().unwrap_or_default();
+                if is_malformed_minimax_text(text) {
+                    *content = Value::String(MALFORMED_MINIMAX_PLACEHOLDER.to_string());
+                } else {
+                    let clean = strip_trailing_quote_artifact(text);
+                    if clean != text {
+                        *content = Value::String(clean);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn sanitize_stream_delta(response: &mut Value) {
+    if response.get("type").and_then(Value::as_str) != Some("content_block_delta") {
+        return;
+    }
+    let Some(delta) = response.get_mut("delta") else {
+        return;
+    };
+    if delta.get("type").and_then(Value::as_str) != Some("text_delta") {
+        return;
+    }
+    let Some(text) = delta.get("text").and_then(Value::as_str) else {
+        return;
+    };
+    let clean = if is_malformed_minimax_text(text) {
+        String::new()
+    } else {
+        strip_trailing_quote_artifact(text)
+    };
+    if clean != text {
+        delta["text"] = Value::String(clean);
+    }
+}
+
+fn sanitize_response_content(response: &mut Value) {
+    let Some(content) = response.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut sanitized = Vec::with_capacity(content.len());
+    let mut removed = false;
+    for block in content.iter() {
+        if block.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                if is_malformed_minimax_text(text) {
+                    removed = true;
+                    continue;
+                }
+                let clean = strip_trailing_quote_artifact(text);
+                if clean != text {
+                    let mut clean_block = block.clone();
+                    clean_block["text"] = Value::String(clean);
+                    sanitized.push(clean_block);
+                    continue;
+                }
+            }
+        }
+        sanitized.push(block.clone());
+    }
+    if removed && sanitized.is_empty() {
+        sanitized.push(serde_json::json!({
+            "type": "text",
+            "text": MALFORMED_MINIMAX_PLACEHOLDER
+        }));
+    }
+    *content = sanitized;
+}
+
+fn sanitize_response_text(response: &mut Value) {
+    // Anthropic SSE applies the transformer to each frame, so text deltas need
+    // the same artifact treatment as complete content arrays. Handle deltas
+    // before checking for `content`, which delta frames intentionally do not
+    // carry.
+    sanitize_stream_delta(response);
+    sanitize_response_content(response);
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +233,12 @@ impl Transformer for MinimaxTransformer {
             .and_then(|m| m.as_str())
             .unwrap_or("")
             .to_string();
+        if is_m3_model(&model) {
+            obj.insert(
+                "model".to_string(),
+                Value::String(MINIMAX_M3_1_FLASH_PREVIEW.to_string()),
+            );
+        }
 
         if is_m3_model(&model) {
             // M3 uses native Anthropic-style thinking
@@ -105,11 +276,15 @@ impl Transformer for MinimaxTransformer {
         obj.remove("anthropic-version");
         obj.remove("anthropic_version");
 
+        sanitize_assistant_history(&mut request);
+
         trace!("MiniMax request transformed for model {}", model);
         Ok(request)
     }
 
     fn transform_response(&self, mut response: Value) -> Result<Value> {
+        sanitize_response_text(&mut response);
+
         // Handle Anthropic-format responses (from /anthropic/v1 endpoint)
         // If response has content array with only thinking blocks and no text,
         // convert the thinking to a text block to avoid empty responses
@@ -246,6 +421,83 @@ mod tests {
         let transformed = transformer.transform_request(request).unwrap();
         assert_eq!(transformed["thinking"]["type"], "adaptive");
         assert!(transformed.get("reasoning_split").is_none()); // M3 doesn't need reasoning_split
+    }
+
+    #[test]
+    fn test_transform_request_m31_uses_native_thinking_and_canonical_model() {
+        let transformer = MinimaxTransformer;
+        let request = json!({
+            "model": "MiniMax-M3.1-Flash",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 4096
+        });
+
+        let transformed = transformer.transform_request(request).unwrap();
+        assert_eq!(transformed["model"], MINIMAX_M3_1_FLASH_PREVIEW);
+        assert_eq!(transformed["thinking"]["type"], "adaptive");
+        assert!(transformed.get("reasoning_split").is_none());
+    }
+
+    #[test]
+    fn test_transform_request_sanitizes_malformed_assistant_history() {
+        let transformer = MinimaxTransformer;
+        let user_content = r#"Keep this literal <tool_call> example and quotes: ""."#;
+        let request = json!({
+            "model": MINIMAX_M3_1_FLASH_PREVIEW,
+            "messages": [
+                {"role": "user", "content": user_content},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "\"\"<tool_call>\n<invoke name=\"write\">"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_123",
+                            "name": "write",
+                            "input": {"path": "test.txt"}
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_123", "content": "ok"}
+                    ]
+                }
+            ]
+        });
+
+        let transformed = transformer.transform_request(request).unwrap();
+        let assistant_content = transformed["messages"][1]["content"].as_array().unwrap();
+
+        assert_eq!(assistant_content.len(), 1);
+        assert_eq!(assistant_content[0]["type"], "tool_use");
+        assert_eq!(assistant_content[0]["id"], "toolu_123");
+        assert_eq!(transformed["messages"][0]["content"], json!(user_content));
+    }
+
+    #[test]
+    fn test_transform_request_replaces_malformed_string_assistant_history() {
+        let transformer = MinimaxTransformer;
+        let request = json!({
+            "model": "MiniMax-M3",
+            "messages": [
+                {"role": "user", "content": "Use the tool."},
+                {"role": "assistant", "content": "\"\""},
+                {"role": "user", "content": "Try again."}
+            ]
+        });
+
+        let transformed = transformer.transform_request(request).unwrap();
+
+        assert_eq!(
+            transformed["messages"][1]["content"],
+            json!(MALFORMED_MINIMAX_PLACEHOLDER)
+        );
+        assert_eq!(
+            transformed["messages"][0]["content"],
+            json!("Use the tool.")
+        );
     }
 
     #[test]
@@ -401,6 +653,77 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_response_removes_malformed_text_and_preserves_tool_use() {
+        let transformer = MinimaxTransformer;
+        let response = json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "\"\"<tool_call>"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_123",
+                    "name": "write",
+                    "input": {"path": "test.txt"}
+                }
+            ]
+        });
+
+        let transformed = transformer.transform_response(response).unwrap();
+        let content = transformed["content"].as_array().unwrap();
+
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "tool_use");
+        assert_eq!(content[0]["id"], "toolu_123");
+    }
+
+    #[test]
+    fn test_transform_response_replaces_text_only_malformed_output() {
+        let transformer = MinimaxTransformer;
+        let response = json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "\"\""}  ]
+        });
+
+        let transformed = transformer.transform_response(response).unwrap();
+        let content = transformed["content"].as_array().unwrap();
+
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], json!(MALFORMED_MINIMAX_PLACEHOLDER));
+    }
+
+    #[test]
+    fn test_transform_stream_delta_sanitizes_minimax_artifacts() {
+        let transformer = MinimaxTransformer;
+        let quote_only = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        let control_marker = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "<tool_call>"}
+        });
+
+        let transformed_quote = transformer.transform_response(quote_only).unwrap();
+        let transformed_marker = transformer.transform_response(control_marker).unwrap();
+
+        assert_eq!(transformed_quote["delta"]["text"], json!(""));
+        assert_eq!(transformed_marker["delta"]["text"], json!(""));
+    }
+
+    #[test]
+    fn test_trailing_quote_artifact_ignores_interleaved_whitespace() {
+        assert_eq!(strip_trailing_quote_artifact("answer \" \""), "answer");
+        assert_eq!(strip_trailing_quote_artifact("answer \""), "answer \"");
+        assert_eq!(strip_trailing_quote_artifact("answer"), "answer");
+    }
+
+    #[test]
     fn test_transform_usage_preserves_cache_fields_unfolded() {
         let transformer = MinimaxTransformer;
         // MiniMax reports cache tokens separately in canonical Anthropic
@@ -481,6 +804,9 @@ mod tests {
     fn test_is_m3_model() {
         assert!(is_m3_model("MiniMax-M3"));
         assert!(is_m3_model("minimax-m3"));
+        assert!(is_m3_model("MiniMax-M3.1-Flash"));
+        assert!(is_m3_model("minimax-m3.1-flash-preview"));
+        assert!(is_m3_model(" MiniMax-M3.1-Flash-Preview "));
         assert!(!is_m3_model("MiniMax-M2.7"));
         assert!(!is_m3_model("MiniMax-M2.5"));
     }

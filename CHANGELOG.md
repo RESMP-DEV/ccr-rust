@@ -13,6 +13,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed MiniMax M3/M3.1 handling in the `minimax` transformer. Any model ID
+  matching the M3 family (exact `MiniMax-M3`/`minimax-m3`, or any
+  `MiniMax-M3.*` variant including `MiniMax-M3.1-Flash-Preview`) now takes the
+  native Anthropic reasoning path: CCR injects `thinking: {type: "adaptive"}`
+  and no longer adds the OpenAI-only `reasoning_split: true` that the
+  unknown-model branch used to inject for M3.1.
+- Changed MiniMax M3-family dispatch to canonicalize the requested model to
+  `MiniMax-M3.1-Flash-Preview` before the transformer chain is built, because
+  the protocol dispatch path overwrites the transformer's model field after
+  transformation. Only the `minimax` provider is affected; other providers
+  and M2.x models are untouched. This pins the exact preview ID that upstream
+  alias probing proved serves the requested model, instead of the ambiguous
+  `MiniMax-M3.1-Flash` alias that silently serves `MiniMax-M3`.
+- Added MiniMax malformed-output sanitization. Assistant history is cleaned
+  before replay: text blocks that are quote-only or contain MiniMax transport
+  control markers such as the provider's tool-call/invoke markers or an
+  embedded NUL are removed
+  while `tool_use` blocks and their tool-result pairing are preserved, and
+  text-only malformed assistant turns are replaced with a visible
+  `[MALFORMED_MINIMAX_OUTPUT_REMOVED]` placeholder. User content is never
+  rewritten, so pasted examples survive. Complete Anthropic responses and
+  `content_block_delta` streaming frames are cleaned by the same rules, and
+  trailing double-quote artifacts at the end of otherwise valid text are
+  stripped. Regression coverage reproduces quote-only text, marker text, the
+  `MiniMax-M3.1-Flash` alias, and interleaved-whitespace quote suffixes.
+  Validation: `cargo fmt`, `cargo test --lib --all-features --locked minimax`
+  (25 passed), `cargo clippy --all-targets --all-features --locked -- -D
+  warnings`, and `cargo test --all-features --locked` pass on branch
+  `work/minimax-m3-compat`. Non-claims: unit and mocked integration coverage
+  do not prove the live MiniMax endpoint is free of malformed output, and no
+  billable provider call was made to verify this change.
 - Changed shared fallback policy operation on the main workstation: the route
   order, registered listener files, consumer primaries, and shared provider
   definitions are pinned in source, so editing the derived JSON policy cannot
