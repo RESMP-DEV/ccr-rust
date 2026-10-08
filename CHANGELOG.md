@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added an operator-oriented MiniMax guide. It separates standalone provider
+  setup, custom provider names, and the governed fallback-policy runbook; makes
+  the exact preview model ID and explicit `minimax` transformer entry
+  unavoidable; explains validation and idle restarts; and documents that
+  service launchers import an installed copy of `ccr_fallback_policy.py`, not
+  the Git worktree.
 - Fixed MiniMax M3/M3.1 handling in the `minimax` transformer. Any model ID
   matching the M3 family (exact `MiniMax-M3`/`minimax-m3`, or any
   `MiniMax-M3.*` variant including `MiniMax-M3.1-Flash-Preview`) now takes the
@@ -22,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed MiniMax M3-family dispatch to canonicalize the requested model to
   `MiniMax-M3.1-Flash-Preview` before the transformer chain is built, because
   the protocol dispatch path overwrites the transformer's model field after
-  transformation. Only the `minimax` provider is affected; other providers
+  transformation. Only MiniMax providers are affected; other providers
   and M2.x models are untouched. This pins the exact preview ID that upstream
   alias probing proved serves the requested model, instead of the ambiguous
   `MiniMax-M3.1-Flash` alias that silently serves `MiniMax-M3`.
