@@ -380,7 +380,7 @@ impl Provider {
     /// actually serves, so pricing keyed by the canonical ID still applies when
     /// a route names an alias such as `MiniMax-M3`.
     fn canonical_model_alias<'a>(&self, model: &'a str) -> &'a str {
-        if self.name.eq_ignore_ascii_case("minimax")
+        if crate::transform::minimax::is_minimax_provider_name(&self.name, &self.api_base_url)
             && crate::transform::minimax::is_m3_model(model)
         {
             crate::transform::minimax::MINIMAX_M3_1_FLASH_PREVIEW

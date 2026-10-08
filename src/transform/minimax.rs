@@ -47,6 +47,18 @@ pub(crate) fn is_m3_model(model: &str) -> bool {
     M3_MODELS.iter().any(|m| model == *m) || model.starts_with("minimax-m3.")
 }
 
+/// True when this provider talks to MiniMax, regardless of how the operator
+/// named it. Multi-credential setups use names such as `minimax-anthropic`,
+/// `minimax-primary`, or `minimax-work`, and `config.example.json` ships
+/// `minimax-anthropic`, so an exact-name match would silently skip MiniMax
+/// handling. Callers that resolve configuration or dispatch by provider must
+/// share this predicate so they cannot disagree about which providers are
+/// MiniMax.
+pub(crate) fn is_minimax_provider_name(provider_name: &str, api_base_url: &str) -> bool {
+    provider_name.to_ascii_lowercase().contains("minimax")
+        || api_base_url.to_ascii_lowercase().contains("minimax")
+}
+
 /// Check if a model is an M2.x model (reasoning_split format)
 fn is_m2_model(model: &str) -> bool {
     M2_MODELS.iter().any(|m| model.eq_ignore_ascii_case(m))

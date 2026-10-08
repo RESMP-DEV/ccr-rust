@@ -22,7 +22,9 @@ use crate::metrics::{
 };
 use crate::ratelimit::RateLimitTracker;
 use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
-use crate::transform::minimax::{is_m3_model, MINIMAX_M3_1_FLASH_PREVIEW};
+use crate::transform::minimax::{
+    is_m3_model, is_minimax_provider_name, MINIMAX_M3_1_FLASH_PREVIEW,
+};
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
 use futures::StreamExt;
@@ -316,19 +318,6 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) render_refusal_as_anthropic_text: bool,
 }
 
-/// True when this provider talks to MiniMax, regardless of how the operator
-/// named it. Multi-credential setups use names such as `minimax-anthropic`,
-/// `minimax-primary`, or `minimax-work`, and `config.example.json` ships
-/// `minimax-anthropic`, so matching the name exactly would silently skip
-/// canonicalization and dispatch an ambiguous alias upstream.
-fn is_minimax_provider(provider: &crate::config::Provider) -> bool {
-    provider.name.to_ascii_lowercase().contains("minimax")
-        || provider
-            .api_base_url
-            .to_ascii_lowercase()
-            .contains("minimax")
-}
-
 /// Pin every MiniMax M3-family request to the exact preview model ID.
 ///
 /// The shorter `MiniMax-M3.1-Flash` alias is accepted upstream but serves
@@ -337,7 +326,7 @@ fn canonical_model_name<'a>(
     provider: &crate::config::Provider,
     model_name: &'a str,
 ) -> Cow<'a, str> {
-    if is_minimax_provider(provider) && is_m3_model(model_name) {
+    if is_minimax_provider_name(&provider.name, &provider.api_base_url) && is_m3_model(model_name) {
         Cow::Borrowed(MINIMAX_M3_1_FLASH_PREVIEW)
     } else {
         Cow::Borrowed(model_name)
@@ -1714,6 +1703,45 @@ mod tests {
                 .pricing_for_model("MiniMax-M3")
                 .map(|p| p.input_per_million_tokens),
             Some(1.0)
+        );
+
+        // Pricing resolution must use the same MiniMax provider predicate as
+        // dispatch canonicalization, so the shipped `minimax-anthropic` name
+        // resolves identically instead of falling back to provider defaults.
+        let aliased: Provider = serde_json::from_value(serde_json::json!({
+            "name": "minimax-anthropic",
+            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_key": "test",
+            "models": ["MiniMax-M3"],
+            "model_pricing": {
+                "MiniMax-M3.1-Flash-Preview": {
+                    "input_per_million_tokens": 3.0,
+                    "output_per_million_tokens": 6.0
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            aliased
+                .pricing_for_model("MiniMax-M3")
+                .map(|p| p.input_per_million_tokens),
+            Some(3.0)
+        );
+
+        // A non-MiniMax provider must not pick up MiniMax canonical pricing.
+        let unrelated: Provider = serde_json::from_value(serde_json::json!({
+            "name": "other",
+            "api_base_url": "https://api.other.example/v1",
+            "api_key": "test",
+            "models": ["MiniMax-M3"],
+            "pricing": {"input_per_million_tokens": 9.0, "output_per_million_tokens": 9.0}
+        }))
+        .unwrap();
+        assert_eq!(
+            unrelated
+                .pricing_for_model("MiniMax-M3")
+                .map(|p| p.input_per_million_tokens),
+            Some(9.0)
         );
     }
 

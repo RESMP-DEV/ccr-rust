@@ -62,7 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or leak `thinking` content as visible text. Canonicalization also matches a
   MiniMax provider by name substring or MiniMax API host, so multi-credential
   setups such as the shipped `minimax-anthropic` example are pinned too instead
-  of forwarding an ambiguous alias upstream.
+  of forwarding an ambiguous alias upstream. Dispatch canonicalization and pricing
+  resolution now share one `is_minimax_provider_name` predicate so they cannot
+  disagree about which providers are MiniMax.
 - Changed shared fallback policy operation on the main workstation: the route
   order, registered listener files, consumer primaries, and shared provider
   definitions are pinned in source, so editing the derived JSON policy cannot
