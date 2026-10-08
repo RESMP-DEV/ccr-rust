@@ -455,3 +455,17 @@ implemented.
   permits, cancels the loser, and exposes launch/win counters. The operator
   explicitly accepted hedged duplicate spend for these quota-backed tiers;
   default-off remains conservative until production TTFT is measured.
+- 2026-10-08: Repaired MiniMax M3/M3.1 routing and malformed-output replay on
+  branch `work/minimax-m3-compat`, from clean `origin/main` revision `c3bf76c`.
+  The `minimax` transformer now recognizes every `MiniMax-M3.*` ID, emits
+  native Anthropic adaptive thinking without the OpenAI-only
+  `reasoning_split`, and cleans quote-only or MiniMax-control-marker text from
+  assistant history, complete Anthropic responses, and text streaming deltas
+  while preserving `tool_use` and tool-result pairing. User content remains
+  untouched. Router dispatch canonicalizes MiniMax M3-family requests to the
+  contractual `MiniMax-M3.1-Flash-Preview` ID before chain construction and
+  protocol overwrite, without changing the source-pinned fallback policy.
+  Evidence: 25 focused `minimax` tests, strict Clippy, and the full locked
+  all-features suite all passed. Non-claims: mocked tests do not prove the
+  live MiniMax endpoint is artifact-free, no billable provider request was
+  made, and no listener was restarted or installed.

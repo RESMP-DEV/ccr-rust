@@ -54,6 +54,10 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "protocol": "anthropic",
         "auth_header": "authorization",
         "models": ["MiniMax-M3.1-Flash-Preview"],
+        # Required for MiniMax M3/M3.1 compatibility: adaptive thinking
+        # injection and malformed-output sanitization live in the transformer.
+        # Without this the registry builds an empty chain and neither runs.
+        "transformer": {"use": ["minimax"]},
     },
 }
 # os.umask is process-global and not atomic, so a set/restore dance inside each
