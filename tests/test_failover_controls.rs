@@ -291,14 +291,17 @@ async fn sticky_sessions_prefer_the_conversation_provider_family() {
     }
     let (first_url, first_hits) = spawn_fixed_upstream(200, json!({})).await;
     let (second_url, second_hits) = spawn_fixed_upstream(200, json!({})).await;
+    // Configure the chain so a non-sticky request prefers beta; the sticky
+    // reorder is the only thing that can keep the remembered conversation on
+    // alpha.
     let config = load_config(&json!({
         "Providers": [
             {"name": "alpha", "api_base_url": first_url, "api_key": "k", "models": ["m"]},
             {"name": "beta", "api_base_url": second_url, "api_key": "k", "models": ["m"]}
         ],
         "Router": {
-            "default": "alpha,m",
-            "tiers": ["alpha,m", "beta,m"],
+            "default": "beta,m",
+            "tiers": ["beta,m", "alpha,m"],
             "strictTierOrder": true,
             "stickySessions": {"enabled": true, "ttlMs": 60000},
             "tierRetries": {"alpha": {"max_retries": 0}, "beta": {"max_retries": 0}}
@@ -307,21 +310,26 @@ async fn sticky_sessions_prefer_the_conversation_provider_family() {
     }));
     let app = build_app(config);
 
-    let body = json!({
+    let pinned_body = json!({
         "model": "alpha,m",
         "system": "conversation-stable-system-prompt",
         "messages": [user_message()],
         "max_tokens": 16
     });
 
-    // First turn serves on alpha and records the family.
-    assert_eq!(send(&app, body.clone()).await.0, StatusCode::OK);
+    // First turn direct-pins alpha, serves it, and records the family even
+    // though beta leads the configured chain.
+    assert_eq!(send(&app, pinned_body).await.0, StatusCode::OK);
 
-    // Flip the chain so a non-sticky request would now prefer beta; the
-    // remembered conversation must keep serving on alpha.
-    let state = app.clone();
-    let _ = &state;
-    let second = send(&app, body).await;
+    // The next turn sends the unpinned model so stable_partition owns the
+    // candidate order: without the remembered preference, beta would serve.
+    let unpinned_body = json!({
+        "model": "m",
+        "system": "conversation-stable-system-prompt",
+        "messages": [user_message()],
+        "max_tokens": 16
+    });
+    let second = send(&app, unpinned_body).await;
     assert_eq!(second.0, StatusCode::OK);
     assert_eq!(
         first_hits.load(Ordering::SeqCst),

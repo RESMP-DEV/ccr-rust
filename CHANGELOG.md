@@ -42,16 +42,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed the enabled retry-sweep hold default from unlimited to 60 seconds;
   `maxHoldMs: 0` remains an explicit unlimited opt-in. EWMA success durations
   and failure penalties are clamped to the effective upstream timeout, and
-  held-request time is now reported by `ccr_hold_wait_seconds`.
+  held-request time is now reported by `ccr_hold_wait_seconds`. Negative
+  success duration bounds are ignored in favor of the measured elapsed time
+  so a malformed limit cannot synthesize a zero-latency sample.
 - Added optional conversation-provider stickiness under
   `Router.stickySessions`. It is disabled by default, honors the pinned route
   prefix, preserves configured order within each family, and only reorders
   the fallback portion when a remembered provider family is available.
+  Integration coverage now pins this reorder: a remembered alpha conversation
+  stays on alpha over a beta-first configured chain via an unpinned request.
+  In the absence of conversation metadata, the hashed fallback key combines
+  the system prompt with the complete first user message, and overflow evicts
+  oldest entries in a loop so the local map shrinks back to its 10,000-entry
+  cap.
 - Added optional tail-latency hedging under `Router.hedging`. When enabled, a
   primary attempt that exceeds `ttftThresholdMs` races one next-tier attempt;
   the first usable result wins and the loser is cancelled. Hedges draw from
   the global retry budget and fallback admission permits. Hedging is disabled
   by default and exposes launch, hedge-win, and primary-win counters.
+  Review fix: only a successful result wins the hedge race. When the first
+  attempt completes with a transport or deterministic failure, the router now
+  awaits the competing attempt before reporting, so a fast failed hedge can no
+  longer cancel a healthy in-flight primary (or the reverse).
+- Changed retry-budget exhaustion to stop the cascade without overriding the
+  sweep's failure mix: a sweep that exhausted the budget while only seeing
+  rate limits now surfaces the synthesized 429 (with `Retry-After`) instead of
+  a terminal 503. Budget exhaustion no longer counts as a tier failure.
 - Changed client-key activation to a dedicated `AUTH_HOST`/`AUTH_PORT` listener.
   The existing `HOST`/`PORT` listener remains unauthenticated for local
   clients, while Cloudflare or another reverse proxy targets only the separate
@@ -98,7 +114,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `serve` resolves the binary via `CCR_TEST_BINARY`/`CARGO_HOME`/PATH, reads
   the consumer file once, preflights the credentials file before rewriting
   anything, and injects runtime credentials only for registered consumers, and
-  `restart_required` is documented as empty under `check` because no files were
+  preflight credential probes attach provider `extra_headers` alongside the
+  auth header on every probe request (extra values override the auth header on
+  a key collision, matching CCR dispatch) instead of sending each extra header
+  as a standalone unauthenticated request, and `restart_required` is
+  documented as empty under `check` because no files were
   rewritten. Follow-up review fixes: duplicate provider names in a consumer or
   the shared provider list are rejected instead of silently keeping the last
   entry, consumer names containing glob metacharacters are rejected so the

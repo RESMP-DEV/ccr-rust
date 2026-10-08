@@ -232,28 +232,91 @@ async fn execute_attempt<'a>(
 
             tokio::select! {
                 biased;
-                result = &mut primary_future => {
-                    record_primary_hedge_win(tier);
-                    Some(SelectedAttempt {
-                        result,
-                        tier: tier.to_string(),
-                        tier_name: tier_name.to_string(),
-                        forced_non_streaming: forced_non_streaming(config, tier),
-                        timer,
-                        hedge_launched: true,
-                    })
-                }
-                result = hedge_future => {
-                    record_hedge_win(hedge_tier);
-                    Some(SelectedAttempt {
-                        result,
-                        tier: hedge_tier.to_string(),
-                        tier_name: hedge_tier_name.to_string(),
-                        forced_non_streaming: forced_non_streaming(config, hedge_tier),
-                        timer: hedge_timer,
-                        hedge_launched: true,
-                    })
-                }
+                result = &mut primary_future => match result {
+                    Ok(response) => {
+                        record_primary_hedge_win(tier);
+                        Some(SelectedAttempt {
+                            result: Ok(response),
+                            tier: tier.to_string(),
+                            tier_name: tier_name.to_string(),
+                            forced_non_streaming: forced_non_streaming(config, tier),
+                            timer,
+                            hedge_launched: true,
+                        })
+                    }
+                    Err(primary_err) => {
+                        // A failed primary is not a race win: the hedge may
+                        // already be mid-flight on a healthy tier, so await it
+                        // instead of cancelling usable fallback work.
+                        let hedge_result = hedge_future.await;
+                        if hedge_result.is_ok() {
+                            record_hedge_win(hedge_tier);
+                            Some(SelectedAttempt {
+                                result: hedge_result,
+                                tier: hedge_tier.to_string(),
+                                tier_name: hedge_tier_name.to_string(),
+                                forced_non_streaming: forced_non_streaming(config, hedge_tier),
+                                timer: hedge_timer,
+                                hedge_launched: true,
+                            })
+                        } else {
+                            // Both attempts failed. Report the first failure
+                            // (the primary) so its classification drives the
+                            // tier handling; the hedge timer's Drop still
+                            // records the fallback failure for EWMA.
+                            Some(SelectedAttempt {
+                                result: Err(primary_err),
+                                tier: tier.to_string(),
+                                tier_name: tier_name.to_string(),
+                                forced_non_streaming: forced_non_streaming(config, tier),
+                                timer,
+                                hedge_launched: true,
+                            })
+                        }
+                    }
+                },
+                result = &mut hedge_future => match result {
+                    Ok(response) => {
+                        record_hedge_win(hedge_tier);
+                        Some(SelectedAttempt {
+                            result: Ok(response),
+                            tier: hedge_tier.to_string(),
+                            tier_name: hedge_tier_name.to_string(),
+                            forced_non_streaming: forced_non_streaming(config, hedge_tier),
+                            timer: hedge_timer,
+                            hedge_launched: true,
+                        })
+                    }
+                    Err(hedge_err) => {
+                        // A hedge failure must not kill a still-running
+                        // primary either; await it and prefer a usable result.
+                        let primary_result = primary_future.await;
+                        if primary_result.is_ok() {
+                            record_primary_hedge_win(tier);
+                            Some(SelectedAttempt {
+                                result: primary_result,
+                                tier: tier.to_string(),
+                                tier_name: tier_name.to_string(),
+                                forced_non_streaming: forced_non_streaming(config, tier),
+                                timer,
+                                hedge_launched: true,
+                            })
+                        } else {
+                            // Both failed. The hedge finished first, so its
+                            // error is the chronological failure to report;
+                            // the dropped primary timer records its own
+                            // failure for EWMA.
+                            Some(SelectedAttempt {
+                                result: Err(hedge_err),
+                                tier: hedge_tier.to_string(),
+                                tier_name: hedge_tier_name.to_string(),
+                                forced_non_streaming: forced_non_streaming(config, hedge_tier),
+                                timer: hedge_timer,
+                                hedge_launched: true,
+                            })
+                        }
+                    }
+                },
             }
         }
     }
@@ -591,7 +654,12 @@ pub async fn handle_messages(
                     {
                         Some(permit) => Some(permit),
                         None => {
-                            saw_non_rate_limit_failure = true;
+                            // Budget exhaustion is a cascade-level stop, not a
+                            // tier failure. Recording it as a non-rate-limit
+                            // failure would turn a purely 429 sweep into a
+                            // synthesized 503 below, so only the terminal
+                            // synthesis decides between 429 and 503 from the
+                            // sweep's actual failure mix.
                             retry_budget_exhausted = true;
                             break 'tier_pass;
                         }
@@ -831,8 +899,10 @@ pub async fn handle_messages(
         // hold the request open and cascade again (retrySweeps) or fall
         // through to the synthesized terminal response below.
         if !sweeps.enabled || retry_budget_exhausted || !(saw_rate_limit || saw_retryable_failure) {
-            // Either disabled, or every tier failed deterministically
-            // (401/402/403/404): another sweep cannot change that outcome.
+            // Sweeps disabled, the retry budget is spent, or every tier
+            // failed deterministically (401/402/403/404): another sweep
+            // cannot change that outcome. The terminal response still
+            // reflects this sweep's own failure mix (429 vs 503).
             break;
         }
         if sweeps.max_sweeps > 0 && sweep >= sweeps.max_sweeps {
