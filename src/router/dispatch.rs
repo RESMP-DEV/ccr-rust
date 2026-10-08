@@ -353,8 +353,11 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
     let requested_model_name = tier.split(',').nth(1).unwrap_or(tier);
     let model_name = canonical_model_name(provider, requested_model_name);
 
-    // Build transformer chain from provider config
-    let chain = build_transformer_chain(registry, provider, &model_name);
+    // Build the transformer chain against the *requested* model name so
+    // model-keyed configuration (per-model transformer overrides and pricing
+    // entries) still resolves for routes that use a MiniMax alias. The
+    // canonical name is only what goes on the wire.
+    let chain = build_transformer_chain(registry, provider, requested_model_name);
 
     // Native Responses payloads intentionally retain fields that have no
     // lossless Anthropic or Chat Completions representation. Existing request
@@ -1620,6 +1623,55 @@ mod tests {
         assert_eq!(
             canonical_model_name(&minimax, "MiniMax-M2.7"),
             "MiniMax-M2.7"
+        );
+    }
+
+    #[test]
+    fn minimax_alias_route_still_resolves_model_keyed_transformers() {
+        // Canonicalization must not break configuration lookups: an alias route
+        // must still find per-model transformers keyed by the requested name.
+        let provider: Provider = serde_json::from_value(serde_json::json!({
+            "name": "minimax",
+            "api_base_url": "https://api.minimax.example/anthropic/v1",
+            "api_key": "test",
+            "models": ["MiniMax-M3"],
+            "transformer": {
+                "use": [],
+                "MiniMax-M3": {"use": ["minimax"]}
+            }
+        }))
+        .unwrap();
+
+        assert!(provider
+            .model_transformers("MiniMax-M3")
+            .is_some_and(|entries| !entries.is_empty()));
+        assert!(provider
+            .model_transformers("MiniMax-M3.1-Flash-Preview")
+            .is_none());
+    }
+
+    #[test]
+    fn minimax_alias_route_still_resolves_model_pricing() {
+        // Pricing keyed by the canonical ID must still apply to an alias route.
+        let provider: Provider = serde_json::from_value(serde_json::json!({
+            "name": "minimax",
+            "api_base_url": "https://api.minimax.example/anthropic/v1",
+            "api_key": "test",
+            "models": ["MiniMax-M3.1-Flash-Preview"],
+            "model_pricing": {
+                "MiniMax-M3.1-Flash-Preview": {
+                    "input_per_million_tokens": 1.0,
+                    "output_per_million_tokens": 2.0
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            provider
+                .pricing_for_model("MiniMax-M3")
+                .map(|p| p.input_per_million_tokens),
+            Some(1.0)
         );
     }
 

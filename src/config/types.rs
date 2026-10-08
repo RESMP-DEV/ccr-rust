@@ -370,7 +370,23 @@ fn default_honor_ratelimit_headers() -> bool {
 impl Provider {
     /// Resolve model-specific pricing, falling back to the provider default.
     pub fn pricing_for_model(&self, model: &str) -> Option<&ModelPricing> {
-        self.model_pricing.get(model).or(self.pricing.as_ref())
+        self.model_pricing
+            .get(model)
+            .or_else(|| self.model_pricing.get(self.canonical_model_alias(model)))
+            .or(self.pricing.as_ref())
+    }
+
+    /// Resolve a provider-neutral model alias to the model ID this provider
+    /// actually serves, so pricing keyed by the canonical ID still applies when
+    /// a route names an alias such as `MiniMax-M3`.
+    fn canonical_model_alias<'a>(&self, model: &'a str) -> &'a str {
+        if self.name.eq_ignore_ascii_case("minimax")
+            && crate::transform::minimax::is_m3_model(model)
+        {
+            crate::transform::minimax::MINIMAX_M3_1_FLASH_PREVIEW
+        } else {
+            model
+        }
     }
 
     /// Get the provider-level transformer chain, or an empty slice if none.

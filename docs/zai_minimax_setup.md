@@ -118,7 +118,8 @@ is the same. The official Anthropic-compatible base for CCR is
   "api_base_url": "https://api.minimax.io/anthropic/v1",
   "api_key": "${MINIMAX_API_KEY}",
   "protocol": "anthropic",
-  "models": ["MiniMax-M3.1-Flash-Preview"]
+  "models": ["MiniMax-M3.1-Flash-Preview"],
+  "transformer": {"use": ["minimax"]}
 }
 ```
 
@@ -145,13 +146,21 @@ actually serving `MiniMax-M3`, while the explicit preview ID returned HTTP 200
 and served the requested model. M2.x models keep the `reasoning_split` path.
 
 MiniMax can also emit malformed visible output: quote-only assistant text, or
-text containing transport control markers such as `<tool_call>` or
-`]<]minimax[>[`. CCR removes those text blocks from assistant history before
+text containing MiniMax transport artifacts such as its zero-width tool-call
+marker, the `]<]minimax[>[` provider delimiter, or an embedded
+NUL. CCR removes those text blocks from assistant history before
 replaying it upstream, keeping `tool_use` blocks and tool-result pairing
 intact, and cleans the same artifacts from complete responses and streaming
 deltas. User messages are never rewritten. When a turn's only text was
 malformed, CCR substitutes `[MALFORMED_MINIMAX_OUTPUT_REMOVED]` so the turn
 stays structurally valid instead of replaying an empty assistant message.
+
+The `transformer` entry is required. The transformer registry is not selected
+by provider name, so a MiniMax provider without `transformer: {use:
+["minimax"]}` builds an empty chain and none of the behavior above runs. The
+shared fallback policy in `scripts/ccr_fallback_policy.py` pins that entry for
+the MiniMax provider, and `ccr-fallback-policy sync` propagates it to every
+governed consumer.
 
 These repairs are transformer-local, so they apply to the governed fallback
 chain without changing the source-pinned route policy in

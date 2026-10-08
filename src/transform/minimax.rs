@@ -25,8 +25,9 @@ use tracing::{trace, warn};
 pub(crate) const MINIMAX_M3_1_FLASH_PREVIEW: &str = "MiniMax-M3.1-Flash-Preview";
 const MALFORMED_MINIMAX_PLACEHOLDER: &str = "[MALFORMED_MINIMAX_OUTPUT_REMOVED]";
 
-/// Models that support native Anthropic-style thinking blocks (M3)
-const M3_MODELS: &[&str] = &["MiniMax-M3", "minimax-m3"];
+/// Models that support native Anthropic-style thinking blocks (M3).
+/// Entries are stored lowercase because `is_m3_model` lowercases its input first.
+const M3_MODELS: &[&str] = &["minimax-m3"];
 
 /// Models that use the reasoning_split format (M2.x)
 const M2_MODELS: &[&str] = &[
@@ -51,18 +52,35 @@ fn is_m2_model(model: &str) -> bool {
     M2_MODELS.iter().any(|m| model.eq_ignore_ascii_case(m))
 }
 
+/// Detect MiniMax transport corruption in visible text.
+///
+/// The observed corruption is a *transport* signature, not ordinary prose: a
+/// quote-only fragment, an embedded NUL, the provider delimiter
+/// `]<]\u{200b}minimax[>[`, and tool tags that MiniMax leaks into visible text
+/// with its zero-width marker (`<\u{200b}tool_call>`) or with injected
+/// attributes (`<invoke name="write">`). Detection deliberately requires one of
+/// those exact shapes so a legitimate answer that merely documents
+/// `<invoke name="write">` or shows a plain `<tool_call>` example is not
+/// discarded; an exact-string match alone cannot express that, so each pattern
+/// below is checked for the zero-width marker or attribute form.
 fn has_minimax_control_marker(text: &str) -> bool {
-    text.contains("<tool_call>")
-        || text.contains("]<]minimax[>[")
-        || text.contains('\u{0}')
-        || text.contains("<invoke")
+    // Provider delimiter and binary artifacts are unambiguous.
+    if text.contains('\u{0}') || text.contains("]<]\u{200b}minimax[>[") {
+        return true;
+    }
+    // Tool tags only count when they carry the zero-width transport marker.
+    // MiniMax inserts U+200B directly after the opening angle bracket.
+    if text.contains("<\u{200b}tool_call") || text.contains("<\u{200b}invoke") {
+        return true;
+    }
+    false
 }
 
 fn is_malformed_minimax_text(text: &str) -> bool {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return true;
-    }
+    // Empty text is not itself corruption. Empty blocks are only removed
+    // because they carry nothing; an empty assistant turn never reaches here
+    // as a replacement candidate.
     let has_quote = trimmed
         .chars()
         .any(|ch| matches!(ch, '"' | '“' | '”' | '\'' | '‘' | '’'));
@@ -77,6 +95,8 @@ fn strip_trailing_quote_artifact(text: &str) -> String {
     let core = text.trim_end_matches(|ch: char| {
         ch.is_whitespace() || matches!(ch, '"' | '“' | '”' | '\'' | '‘' | '’')
     });
+    // `core` is produced by trimming a suffix off `text`, so it is always a
+    // prefix of `text` and `core.len()` is a valid char boundary.
     let removed_quotes = text[core.len()..]
         .chars()
         .filter(|ch| matches!(ch, '"' | '“' | '”' | '\'' | '‘' | '’'))
@@ -86,6 +106,22 @@ fn strip_trailing_quote_artifact(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn has_text_block(blocks: &[Value]) -> bool {
+    blocks
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+}
+
+/// A surviving `tool_use` block already gives the turn a valid shape, so the
+/// malformed-text placeholder is only needed when nothing usable remains.
+fn needs_placeholder(blocks: &[Value], removed: bool) -> bool {
+    removed
+        && !has_text_block(blocks)
+        && !blocks
+            .iter()
+            .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
 }
 
 fn sanitize_assistant_history(request: &mut Value) {
@@ -125,11 +161,14 @@ fn sanitize_assistant_history(request: &mut Value) {
                     }
                     sanitized.push(block.clone());
                 }
-                if removed && sanitized.is_empty() {
-                    sanitized.push(serde_json::json!({
-                        "type": "text",
-                        "text": MALFORMED_MINIMAX_PLACEHOLDER
-                    }));
+                if needs_placeholder(&sanitized, removed) {
+                    sanitized.insert(
+                        0,
+                        serde_json::json!({
+                            "type": "text",
+                            "text": MALFORMED_MINIMAX_PLACEHOLDER
+                        }),
+                    );
                 }
                 *blocks = sanitized;
             }
@@ -162,10 +201,15 @@ fn sanitize_stream_delta(response: &mut Value) {
     let Some(text) = delta.get("text").and_then(Value::as_str) else {
         return;
     };
-    let clean = if is_malformed_minimax_text(text) {
+    // Individual deltas are fragments of a longer stream, so a whitespace-only
+    // or quote-only delta is legitimate. Only strip confirmed transport
+    // corruption here; a truncated artifact span such as `"]<]minimax[>[` still
+    // contains its marker and is cleared, while ordinary spaces and quotation
+    // marks survive untouched.
+    let clean = if has_minimax_control_marker(text) {
         String::new()
     } else {
-        strip_trailing_quote_artifact(text)
+        text.to_string()
     };
     if clean != text {
         delta["text"] = Value::String(clean);
@@ -196,11 +240,14 @@ fn sanitize_response_content(response: &mut Value) {
         }
         sanitized.push(block.clone());
     }
-    if removed && sanitized.is_empty() {
-        sanitized.push(serde_json::json!({
-            "type": "text",
-            "text": MALFORMED_MINIMAX_PLACEHOLDER
-        }));
+    if needs_placeholder(&sanitized, removed) {
+        sanitized.insert(
+            0,
+            serde_json::json!({
+                "type": "text",
+                "text": MALFORMED_MINIMAX_PLACEHOLDER
+            }),
+        );
     }
     *content = sanitized;
 }
@@ -449,7 +496,7 @@ mod tests {
                 {
                     "role": "assistant",
                     "content": [
-                        {"type": "text", "text": "\"\"<tool_call>\n<invoke name=\"write\">"},
+                        {"type": "text", "text": "\"\"<\u{200b}tool_call>\n<invoke name=\"write\">"},
                         {
                             "type": "tool_use",
                             "id": "toolu_123",
@@ -498,6 +545,107 @@ mod tests {
             transformed["messages"][0]["content"],
             json!("Use the tool.")
         );
+    }
+
+    #[test]
+    fn test_valid_text_mentioning_markers_is_preserved() {
+        let transformer = MinimaxTransformer;
+        // An answer that legitimately discusses provider markup must survive.
+        let answer = "The <invoke> tag is documented; see the <tool_call> example.";
+        let response = json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": answer}]
+        });
+
+        let transformed = transformer.transform_response(response).unwrap();
+        let content = transformed["content"].as_array().unwrap();
+
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["text"], json!(answer));
+    }
+
+    #[test]
+    fn test_transport_marker_attributes_are_still_detected() {
+        let transformer = MinimaxTransformer;
+        let response = json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "\"\"<\u{200b}invoke name=\"write\">"}]
+        });
+
+        let transformed = transformer.transform_response(response).unwrap();
+        let content = transformed["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["text"], json!(MALFORMED_MINIMAX_PLACEHOLDER));
+    }
+
+    #[test]
+    fn test_stream_delta_preserves_ordinary_whitespace_and_quotes() {
+        let transformer = MinimaxTransformer;
+        for fragment in [" ", "\"", "\"\"", "\n", "  \" "] {
+            let frame = json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": fragment}
+            });
+            let transformed = transformer.transform_response(frame).unwrap();
+            assert_eq!(
+                transformed["delta"]["text"],
+                json!(fragment),
+                "delta {fragment:?} must pass through unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stream_delta_still_clears_transport_corruption() {
+        let transformer = MinimaxTransformer;
+        let frame = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\"]<]\u{200b}minimax[>["}
+        });
+
+        let transformed = transformer.transform_response(frame).unwrap();
+        assert_eq!(transformed["delta"]["text"], json!(""));
+    }
+
+    #[test]
+    fn test_empty_text_block_is_not_replaced_with_placeholder() {
+        let transformer = MinimaxTransformer;
+        let request = json!({
+            "model": "MiniMax-M3.1-Flash-Preview",
+            "messages": [{"role": "assistant", "content": [{"type": "text", "text": ""}]}]
+        });
+
+        let transformed = transformer.transform_request(request).unwrap();
+        let content = transformed["messages"][0]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["text"], json!(""));
+        assert_ne!(content[0]["text"], json!(MALFORMED_MINIMAX_PLACEHOLDER));
+    }
+
+    #[test]
+    fn test_placeholder_inserted_when_only_thinking_block_remains() {
+        let transformer = MinimaxTransformer;
+        // Malformed text removed, thinking block kept: the placeholder must
+        // still be present so thinking is never rendered as visible text.
+        let response = json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "\"\""},
+                {"type": "thinking", "thinking": "internal", "signature": "sig"}
+            ]
+        });
+
+        let transformed = transformer.transform_response(response).unwrap();
+        let content = transformed["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], json!(MALFORMED_MINIMAX_PLACEHOLDER));
+        assert!(content.iter().any(|b| b["type"] == json!("thinking")));
     }
 
     #[test]
@@ -659,7 +807,7 @@ mod tests {
             "type": "message",
             "role": "assistant",
             "content": [
-                {"type": "text", "text": "\"\"<tool_call>"},
+                {"type": "text", "text": "\"\"<\u{200b}tool_call>"},
                 {
                     "type": "tool_use",
                     "id": "toolu_123",
@@ -706,13 +854,15 @@ mod tests {
         let control_marker = json!({
             "type": "content_block_delta",
             "index": 0,
-            "delta": {"type": "text_delta", "text": "<tool_call>"}
+            "delta": {"type": "text_delta", "text": "<\u{200b}tool_call>"}
         });
 
         let transformed_quote = transformer.transform_response(quote_only).unwrap();
         let transformed_marker = transformer.transform_response(control_marker).unwrap();
 
-        assert_eq!(transformed_quote["delta"]["text"], json!(""));
+        // A quote-only fragment is legitimate stream content mid-answer.
+        assert_eq!(transformed_quote["delta"]["text"], json!("\"\""));
+        // The transport marker is corruption and is cleared.
         assert_eq!(transformed_marker["delta"]["text"], json!(""));
     }
 
@@ -804,6 +954,12 @@ mod tests {
     fn test_is_m3_model() {
         assert!(is_m3_model("MiniMax-M3"));
         assert!(is_m3_model("minimax-m3"));
+        assert!(is_m3_model("MINIMAX-M3"));
+        // Every entry in M3_MODELS must be lowercase, because is_m3_model
+        // lowercases its input before comparing.
+        for entry in M3_MODELS {
+            assert_eq!(*entry, entry.to_ascii_lowercase());
+        }
         assert!(is_m3_model("MiniMax-M3.1-Flash"));
         assert!(is_m3_model("minimax-m3.1-flash-preview"));
         assert!(is_m3_model(" MiniMax-M3.1-Flash-Preview "));

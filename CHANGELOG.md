@@ -44,6 +44,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `work/minimax-m3-compat`. Non-claims: unit and mocked integration coverage
   do not prove the live MiniMax endpoint is free of malformed output, and no
   billable provider call was made to verify this change.
+- Fixed MiniMax M3 compatibility defects found in pull request #49 review. The
+  MiniMax transformer was registered but never enabled, so adaptive thinking
+  and malformed-output sanitization never ran in production; the shared
+  fallback policy now pins `transformer: {use: [minimax]}` for the MiniMax
+  provider and all four governed consumers carry it. Model-keyed configuration
+  is now resolved against the requested route model instead of the canonical
+  preview ID, so alias routes keep their per-model transformer overrides, and
+  pricing falls back to the canonical ID. Malformed detection now matches the
+  observed transport shapes (an embedded NUL, the provider delimiter, and
+  tool tags carrying MiniMax's zero-width marker) so a legitimate answer that
+  documents `<invoke name="write">` is no longer discarded. Streaming deltas
+  keep ordinary whitespace and punctuation, since a quote-only fragment is
+  legitimate mid-stream content; only confirmed transport corruption is
+  cleared. The malformed-text placeholder is inserted when no visible text
+  remains and no `tool_use` survives, so it can no longer displace a tool call
+  or leak `thinking` content as visible text.
 - Changed shared fallback policy operation on the main workstation: the route
   order, registered listener files, consumer primaries, and shared provider
   definitions are pinned in source, so editing the derived JSON policy cannot
