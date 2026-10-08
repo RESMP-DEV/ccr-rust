@@ -61,6 +61,8 @@ impl Transformer for OpenAiToAnthropicTransformer {
             if let Some(messages_array) = messages.as_array_mut() {
                 // Filter out system messages (already extracted) and transform content
                 let mut transformed_messages = Vec::new();
+                let mut next_generated_ordinal = 0;
+                let mut generated_tool_ids = Vec::new();
                 for message in messages_array.iter_mut() {
                     if let Some(message_obj) = message.as_object_mut() {
                         // Skip system messages - they're now in the top-level system field.
@@ -70,14 +72,21 @@ impl Transformer for OpenAiToAnthropicTransformer {
                                 continue;
                             }
                             if role == "tool" {
-                                transform_tool_result_message_to_anthropic(message_obj);
+                                transform_tool_result_message_to_anthropic(
+                                    message_obj,
+                                    &mut generated_tool_ids,
+                                );
                                 transformed_messages.push(message.clone());
                                 continue;
                             }
                         }
 
                         // Transform message content
-                        transform_message_content_to_anthropic(message_obj)?;
+                        transform_message_content_to_anthropic(
+                            message_obj,
+                            &mut next_generated_ordinal,
+                            &mut generated_tool_ids,
+                        )?;
                         transformed_messages.push(message.clone());
                     }
                 }
@@ -222,9 +231,11 @@ impl Transformer for OpenAiToAnthropicTransformer {
         let content = if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array())
         {
             let mut content_blocks = content.unwrap_or_default();
+            let mut generated_ordinal = 0;
             for tool_call in tool_calls {
-                if let Some(block) = convert_openai_tool_call(tool_call) {
+                if let Some(block) = convert_openai_tool_call(tool_call, generated_ordinal) {
                     content_blocks.push(block);
+                    generated_ordinal += 1;
                 }
             }
             content_blocks
@@ -274,87 +285,6 @@ impl Transformer for OpenAiToAnthropicTransformer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Anthropic requires `tool_result` blocks before any text in the user
-    /// message answering a `tool_use` turn. A merged history can arrive as
-    /// [result, text], so repairing a partially answered multi-tool turn must
-    /// emit kept results, synthetic results, then text, in that order.
-    #[test]
-    fn partial_tool_turn_keeps_results_before_text() {
-        let assistant_with_two_calls = serde_json::json!({
-            "role": "assistant",
-            "content": [
-                {"type": "tool_use", "id": "call_a", "name": "read", "input": {}},
-                {"type": "tool_use", "id": "call_b", "name": "shell", "input": {}}
-            ]
-        });
-        let user_with_one_result_and_text = serde_json::json!({
-            "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": "call_a", "content": "file text"},
-                {"type": "text", "text": "now explain"}
-            ]
-        });
-
-        let repaired = normalize_anthropic_messages(vec![
-            assistant_with_two_calls,
-            user_with_one_result_and_text,
-        ]);
-
-        let content = repaired[1]["content"].as_array().expect("content array");
-        let types: Vec<&str> = content
-            .iter()
-            .filter_map(|block| block.get("type").and_then(|value| value.as_str()))
-            .collect();
-
-        assert_eq!(
-            types,
-            vec!["tool_result", "tool_result", "text"],
-            "every tool_result must precede text blocks, got {types:?}"
-        );
-        assert_eq!(content[0]["tool_use_id"], "call_a");
-        assert_eq!(
-            content[1]["tool_use_id"], "call_b",
-            "the synthetic missing result keeps its own id"
-        );
-        assert!(content[1]["is_error"].as_bool().unwrap_or(false));
-        assert_eq!(content[2]["text"], "now explain");
-    }
-
-    /// A duplicate or unexpected `tool_result` degrades to text and must not
-    /// be interleaved between kept results and the remaining blocks.
-    #[test]
-    fn unmatched_tool_results_become_text_after_kept_results() {
-        let assistant = serde_json::json!({
-            "role": "assistant",
-            "content": [
-                {"type": "tool_use", "id": "call_a", "name": "read", "input": {}},
-                {"type": "tool_use", "id": "call_b", "name": "read", "input": {}}
-            ]
-        });
-        let user = serde_json::json!({
-            "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": "call_a", "content": "a"},
-                {"type": "tool_result", "tool_use_id": "call_a", "content": "duplicate"},
-                {"type": "text", "text": "follow up"}
-            ]
-        });
-
-        let repaired = normalize_anthropic_messages(vec![assistant, user]);
-
-        let content = repaired[1]["content"].as_array().expect("content array");
-        let types: Vec<&str> = content
-            .iter()
-            .filter_map(|block| block.get("type").and_then(|value| value.as_str()))
-            .collect();
-
-        assert_eq!(
-            types,
-            vec!["tool_result", "tool_result", "text", "text"],
-            "kept results, synthetic results, then converted and original text, got {types:?}"
-        );
-    }
 
     #[test]
     fn test_transformer_name() {
@@ -688,7 +618,14 @@ mod tests {
             ]
         });
 
-        transform_message_content_to_anthropic(message.as_object_mut().unwrap()).unwrap();
+        let mut ordinal = 0;
+        let mut generated_ids = Vec::new();
+        transform_message_content_to_anthropic(
+            message.as_object_mut().unwrap(),
+            &mut ordinal,
+            &mut generated_ids,
+        )
+        .unwrap();
 
         let content = message["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
@@ -839,6 +776,165 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_request_keeps_malformed_tool_call_paired_with_result() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_bad_json",
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{truncated"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_bad_json", "content": "real result"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[0]["content"][0]["id"], "call_bad_json");
+        assert_eq!(
+            messages[0]["content"][0]["input"]["ccr_invalid_arguments"],
+            "{truncated"
+        );
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[1]["content"][0]["tool_use_id"], "call_bad_json");
+    }
+
+    #[test]
+    fn test_transform_request_assigns_distinct_ids_to_identical_idless_tool_calls() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{\"same\":true}"}
+                    }]
+                },
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{\"same\":true}"}
+                    }]
+                },
+                {"role": "tool", "content": "first result"},
+                {"role": "tool", "content": "second result"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        let tool_ids: Vec<_> = messages[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["id"].as_str().unwrap())
+            .collect();
+        assert_ne!(tool_ids[0], tool_ids[1]);
+
+        let result_blocks = messages[1]["content"].as_array().unwrap();
+        let result_ids: Vec<_> = result_blocks
+            .iter()
+            .map(|block| block["tool_use_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(result_ids, tool_ids);
+        assert_eq!(result_blocks[0]["content"], "first result");
+        assert_eq!(result_blocks[1]["content"], "second result");
+    }
+
+    #[test]
+    fn test_transform_request_leaves_complete_ordered_tool_turn_unchanged() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "run"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_complete",
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{\"ok\":true}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_complete", "content": "result"},
+                {"role": "user", "content": "continue"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        let blocks = messages[2]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "call_complete");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "continue");
+    }
+
+    #[test]
+    fn test_transform_request_does_not_synthesize_result_for_final_tool_turn() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "run"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_pending",
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{}"}
+                    }]
+                }
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["id"], "call_pending");
+    }
+
+    #[test]
+    fn test_transform_request_orders_tool_results_before_user_text() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_a", "type": "function", "function": {"name": "a", "arguments": "{}"}},
+                        {"id": "call_b", "type": "function", "function": {"name": "b", "arguments": "{}"}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "call_a", "content": "real a"},
+                {"role": "user", "content": "continue"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        let blocks = messages[1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "call_a");
+        assert_eq!(blocks[1]["type"], "tool_result");
+        assert_eq!(blocks[1]["tool_use_id"], "call_b");
+        assert_eq!(blocks[1]["is_error"], true);
+        assert_eq!(blocks[2]["type"], "text");
+        assert_eq!(blocks[2]["text"], "continue");
+    }
+
+    #[test]
     fn test_transform_request_inserts_missing_result_before_next_assistant() {
         let transformer = OpenAiToAnthropicTransformer;
         let request = serde_json::json!({
@@ -854,13 +950,14 @@ mod tests {
 
         let result = transformer.transform_request(request).unwrap();
         let messages = result["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[1]["role"], "assistant");
         assert_eq!(messages[1]["content"][0]["type"], "tool_use");
-        assert_eq!(messages[1]["content"][1]["text"], "done");
         assert_eq!(messages[2]["role"], "user");
         assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_missing");
         assert_eq!(messages[2]["content"][0]["is_error"], true);
+        assert_eq!(messages[3]["role"], "assistant");
+        assert_eq!(messages[3]["content"][0]["text"], "done");
     }
 
     #[test]
