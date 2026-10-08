@@ -462,9 +462,8 @@ impl ResponsesStreamConverter {
     }
 
     fn push_message_text_delta(&mut self, text: &str, output: &mut String) {
-        let leading_message_item = !self.message_text_part_added
-            && !self.reasoning_item_added
-            && self.tools.values().all(|tool| !tool.added);
+        let leading_message_item =
+            !self.message_text_part_added && self.tools.values().all(|tool| !tool.added);
         let can_hold_prefix = self.preserved_response.is_none()
             && leading_message_item
             && is_quote_prefix_candidate(text);

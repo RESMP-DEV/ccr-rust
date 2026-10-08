@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+use crate::admission::AdmissionPermit;
 use crate::ratelimit::RateLimitTracker;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ pub struct StreamVerifyCtx {
     pub ratelimit_generation: u64,
     pub local_estimate: u64,
     pub ratelimit_tracker: Option<Arc<RateLimitTracker>>,
+    pub admission_permit: Option<AdmissionPermit>,
     pub rate_limit_info: Option<(Option<u32>, Option<Instant>)>,
     /// Instant when the upstream HTTP response headers were received.
     /// Used to measure TTFT (time from response start to first content token).

@@ -46,6 +46,8 @@ pub(super) fn extract_system_messages(
 /// Anthropic: content is always an array of content blocks
 pub(super) fn transform_message_content_to_anthropic(
     message_obj: &mut serde_json::Map<String, Value>,
+    next_generated_ordinal: &mut usize,
+    generated_tool_ids: &mut Vec<String>,
 ) -> Result<()> {
     let tool_calls = message_obj.remove("tool_calls");
 
@@ -173,8 +175,25 @@ pub(super) fn transform_message_content_to_anthropic(
 
             if let Some(content_array) = content.as_array_mut() {
                 for tool_call in tool_calls_array {
-                    if let Some(tool_use_block) = convert_openai_tool_call(&tool_call) {
+                    let source_id = tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string);
+                    if let Some(tool_use_block) =
+                        convert_openai_tool_call(&tool_call, *next_generated_ordinal)
+                    {
+                        if source_id.is_none() {
+                            generated_tool_ids.push(
+                                tool_use_block
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            );
+                        }
                         content_array.push(tool_use_block);
+                        *next_generated_ordinal += 1;
                     }
                 }
             }
@@ -187,11 +206,28 @@ pub(super) fn transform_message_content_to_anthropic(
 /// Convert an OpenAI `role: "tool"` message into Anthropic `tool_result` format.
 pub(super) fn transform_tool_result_message_to_anthropic(
     message_obj: &mut serde_json::Map<String, Value>,
+    generated_tool_ids: &mut Vec<String>,
 ) {
+    let source_id = message_obj
+        .get("tool_call_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
     let tool_use_id = message_obj
         .remove("tool_call_id")
         .and_then(|v| v.as_str().map(str::to_owned))
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            if generated_tool_ids.is_empty() {
+                None
+            } else {
+                generated_tool_ids.first().cloned()
+            }
+        })
         .unwrap_or_else(|| "toolu_unknown".to_string());
+    if source_id.is_none() && !generated_tool_ids.is_empty() {
+        generated_tool_ids.remove(0);
+    }
 
     let content = message_obj
         .remove("content")
@@ -276,7 +312,7 @@ fn repair_anthropic_tool_turns(messages: Vec<Value>) -> Vec<Value> {
         let expected_ids = assistant_tool_use_ids(&message);
         if expected_ids.is_empty() {
             if !previous_had_tool_turn {
-                neutralize_unmatched_tool_results(&mut message, &[]);
+                neutralize_unmatched_tool_results(&mut message);
             }
             repaired.push(message);
             previous_had_tool_turn = false;
@@ -424,14 +460,10 @@ fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
     *blocks = results;
 }
 
-fn neutralize_unmatched_tool_results(message: &mut Value, expected_ids: &[String]) {
+fn neutralize_unmatched_tool_results(message: &mut Value) {
     if message.get("role").and_then(Value::as_str) != Some("user") {
         return;
     }
-    let expected = expected_ids
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
     let Some(message_obj) = message.as_object_mut() else {
         return;
     };
@@ -445,13 +477,7 @@ fn neutralize_unmatched_tool_results(message: &mut Value, expected_ids: &[String
         if block.get("type").and_then(Value::as_str) != Some("tool_result") {
             continue;
         }
-        let matched = block
-            .get("tool_use_id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| expected.contains(id));
-        if !matched {
-            *block = unmatched_tool_result_text(block);
-        }
+        *block = unmatched_tool_result_text(block);
     }
 }
 
@@ -698,7 +724,7 @@ pub(super) fn convert_openai_content_block(block: &Value) -> Result<Value> {
 ///   "input": {"key": "value"}
 /// }
 /// ```
-pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
+pub(super) fn convert_openai_tool_call(tool_call: &Value, ordinal: usize) -> Option<Value> {
     let function = tool_call.get("function")?;
     let name = function
         .get("name")
@@ -723,7 +749,7 @@ pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
         .and_then(|v| v.as_str())
         .filter(|id| !id.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| generated_tool_id(name, &input.to_string()));
+        .unwrap_or_else(|| generated_tool_id(name, &input.to_string(), ordinal));
 
     Some(serde_json::json!({
         "type": "tool_use",
@@ -733,9 +759,9 @@ pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
     }))
 }
 
-fn generated_tool_id(name: &str, arguments: &str) -> String {
+fn generated_tool_id(name: &str, arguments: &str, ordinal: usize) -> String {
     let mut hasher = DefaultHasher::new();
-    (name, arguments).hash(&mut hasher);
+    (name, arguments, ordinal).hash(&mut hasher);
     format!("toolu_{:016x}", hasher.finish())
 }
 
@@ -776,7 +802,7 @@ mod tests {
             "id": "call_object_args",
             "function": {"name": "probe", "arguments": {"ok": true}}
         });
-        let converted = convert_openai_tool_call(&tool_call).expect("named call must convert");
+        let converted = convert_openai_tool_call(&tool_call, 0).expect("named call must convert");
         assert_eq!(converted["input"], serde_json::json!({"ok": true}));
     }
 
@@ -786,7 +812,8 @@ mod tests {
             "id": "call_bad_json",
             "function": {"name": "probe", "arguments": "{truncated"}
         });
-        let converted = convert_openai_tool_call(&tool_call).expect("tool call must remain paired");
+        let converted =
+            convert_openai_tool_call(&tool_call, 0).expect("tool call must remain paired");
         assert_eq!(converted["type"], "tool_use");
         assert_eq!(converted["id"], "call_bad_json");
         assert_eq!(converted["input"]["ccr_invalid_arguments"], "{truncated");

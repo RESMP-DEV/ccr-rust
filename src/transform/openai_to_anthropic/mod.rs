@@ -61,6 +61,8 @@ impl Transformer for OpenAiToAnthropicTransformer {
             if let Some(messages_array) = messages.as_array_mut() {
                 // Filter out system messages (already extracted) and transform content
                 let mut transformed_messages = Vec::new();
+                let mut next_generated_ordinal = 0;
+                let mut generated_tool_ids = Vec::new();
                 for message in messages_array.iter_mut() {
                     if let Some(message_obj) = message.as_object_mut() {
                         // Skip system messages - they're now in the top-level system field.
@@ -70,14 +72,21 @@ impl Transformer for OpenAiToAnthropicTransformer {
                                 continue;
                             }
                             if role == "tool" {
-                                transform_tool_result_message_to_anthropic(message_obj);
+                                transform_tool_result_message_to_anthropic(
+                                    message_obj,
+                                    &mut generated_tool_ids,
+                                );
                                 transformed_messages.push(message.clone());
                                 continue;
                             }
                         }
 
                         // Transform message content
-                        transform_message_content_to_anthropic(message_obj)?;
+                        transform_message_content_to_anthropic(
+                            message_obj,
+                            &mut next_generated_ordinal,
+                            &mut generated_tool_ids,
+                        )?;
                         transformed_messages.push(message.clone());
                     }
                 }
@@ -222,9 +231,11 @@ impl Transformer for OpenAiToAnthropicTransformer {
         let content = if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array())
         {
             let mut content_blocks = content.unwrap_or_default();
+            let mut generated_ordinal = 0;
             for tool_call in tool_calls {
-                if let Some(block) = convert_openai_tool_call(tool_call) {
+                if let Some(block) = convert_openai_tool_call(tool_call, generated_ordinal) {
                     content_blocks.push(block);
+                    generated_ordinal += 1;
                 }
             }
             content_blocks
@@ -607,7 +618,14 @@ mod tests {
             ]
         });
 
-        transform_message_content_to_anthropic(message.as_object_mut().unwrap()).unwrap();
+        let mut ordinal = 0;
+        let mut generated_ids = Vec::new();
+        transform_message_content_to_anthropic(
+            message.as_object_mut().unwrap(),
+            &mut ordinal,
+            &mut generated_ids,
+        )
+        .unwrap();
 
         let content = message["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
@@ -785,6 +803,53 @@ mod tests {
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[1]["content"][0]["type"], "tool_result");
         assert_eq!(messages[1]["content"][0]["tool_use_id"], "call_bad_json");
+    }
+
+    #[test]
+    fn test_transform_request_assigns_distinct_ids_to_identical_idless_tool_calls() {
+        let transformer = OpenAiToAnthropicTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{\"same\":true}"}
+                    }]
+                },
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{\"same\":true}"}
+                    }]
+                },
+                {"role": "tool", "content": "first result"},
+                {"role": "tool", "content": "second result"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        let tool_ids: Vec<_> = messages[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["id"].as_str().unwrap())
+            .collect();
+        assert_ne!(tool_ids[0], tool_ids[1]);
+
+        let result_blocks = messages[1]["content"].as_array().unwrap();
+        let result_ids: Vec<_> = result_blocks
+            .iter()
+            .map(|block| block["tool_use_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(result_ids, tool_ids);
+        assert_eq!(result_blocks[0]["content"], "first result");
+        assert_eq!(result_blocks[1]["content"], "second result");
     }
 
     #[test]

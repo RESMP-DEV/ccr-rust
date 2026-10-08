@@ -84,6 +84,34 @@ in private runtime storage, never in the policy. Shared providers require an
 environment-variable reference. The catalog and config only establish route
 availability in configuration; verify account access with a live request.
 
+On the main workstation, `scripts/ccr_fallback_policy.py` additionally pins the
+route order, registered listener files and consumer primaries in source. The
+JSON policy remains derived operator state, not the approval authority. This is
+deliberate: an agent may repair credentials or resynchronize consumers, but
+cannot expand routing by editing `fallback-policy.json`. A route expansion
+requires a reviewed source-policy change, tests and a live credential preflight.
+Derived consumers also remove providers and model aliases whose routes are not
+active, preventing a dormant provider from becoming an accidental future tier.
+The approved main-machine shared chain ends with DeepSeek followed by
+MiniMax-M3.1-Flash-Preview. The explicit preview model ID is required: the
+shorter `MiniMax-M3.1-Flash` alias was observed upstream returning
+`MiniMax-M3`, so status-code-only validation cannot distinguish it.
+
+Before changing or restarting a shared provider route, run:
+
+```bash
+uv run --no-project python scripts/ccr_fallback_policy.py preflight --json
+```
+
+`preflight` resolves the same private credential material used by service
+launch and sends one read-only model-list request directly to each shared
+provider using CCR's protocol-specific authorization header. It generates no
+completion and never prints credentials or response bodies. A non-2xx/3xx
+response, transport failure or unresolved credential is a failed preflight;
+the route change or restart must stop there and report the exact provider.
+Useful model listing is only an authorization check, not a model-quality or
+throughput claim.
+
 ## Reuse at startup
 
 Install a single copy of the module and import it from each service launcher.

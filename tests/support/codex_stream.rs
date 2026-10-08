@@ -49,6 +49,11 @@ pub(crate) fn build_app(config: ccr_rust::config::Config) -> Router {
         active_streams,
         max_streams: 0,
         ratelimit_tracker,
+        admission_tracker: std::sync::Arc::new(ccr_rust::admission::AdmissionTracker::new()),
+        retry_budget: std::sync::Arc::new(ccr_rust::retry_budget::RetryBudget::new()),
+        sticky_sessions: std::sync::Arc::new(ccr_rust::stickiness::StickySessionTracker::new(
+            std::time::Duration::from_secs(3600),
+        )),
         shutdown_timeout: 30,
         debug_capture: None,
     };

@@ -1548,6 +1548,55 @@ mod tests {
     }
 
     #[test]
+    fn incremental_stream_drops_quote_preamble_after_reasoning_before_tool_use() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_reasoning_quote_tool", "model": "test-model"}
+        });
+        let reasoning = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "select the tool"}
+        });
+        let quote_preamble = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        let tool_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_reasoning_quote",
+                "name": "probe",
+                "input": {}
+            }
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let reasoning_events =
+            converter.push_frame(Some("content_block_delta"), &reasoning.to_string());
+        let preamble_events =
+            converter.push_frame(Some("content_block_delta"), &quote_preamble.to_string());
+        let tool_events =
+            converter.push_frame(Some("content_block_start"), &tool_start.to_string());
+        let terminal = converter.finish();
+        let combined = format!("{reasoning_events}{preamble_events}{tool_events}{terminal}");
+        let event_types = parse_sse_frames(&combined)
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .filter_map(|event| event["type"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+
+        assert!(event_types.contains(&"response.reasoning_text.delta".to_string()));
+        assert!(!event_types.contains(&"response.output_text.delta".to_string()));
+        assert!(!event_types.contains(&"response.output_text.done".to_string()));
+        assert!(combined.contains("\"name\":\"probe\""));
+    }
+
+    #[test]
     fn incremental_stream_holds_split_quote_prefix_until_nonquote_text() {
         let mut converter = ResponsesStreamConverter::new(None);
         let message_start = serde_json::json!({

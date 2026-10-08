@@ -13,6 +13,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed shared fallback policy operation on the main workstation: the route
+  order, registered listener files, consumer primaries, and shared provider
+  definitions are pinned in source, so editing the derived JSON policy cannot
+  expand routing. Before changing or restarting a shared route, operators run
+  `ccr-fallback-policy preflight --json`; unresolved credentials, transport
+  failures, and non-2xx/3xx authorization responses block the operation.
+- Changed 429 backoff marking so a rate-limit response without a server
+  `Retry-After` only paces the tier for one second instead of escalating
+  exponentially into a 60-second cross-request skip. Server-directed
+  `Retry-After` values are still honored verbatim, capped at 60 seconds.
+  Coding-plan endpoints that reject some requests under concurrency while
+  admitting others now stay eligible for dispatch instead of being
+  blanket-skipped.
+- Added failover-v2 admission control. Upstream attempts now acquire per-route
+  in-flight permits with AIMD limits (`Provider.maxInflight`, default 8,
+  bounds 1..64); capacity-deferred requests move behind same-sweep eligible
+  tiers, and all-deferred sweeps use full jitter. Streaming slots release when
+  the upstream stream completes cleanly.
+- Added the global `Router.retryBudgetPercent` budget, default 20 percent with
+  a floor of three retries. A zero value disables retries. Overflow is counted
+  by `ccr_retry_budget_overflow_total`.
+- Changed deterministic failure handling for 400 and 422 responses: they are
+  now rejected after one attempt on a tier unless the body is a
+  context-window rejection. Context-window errors remain retryable so the
+  cascade can move to a larger-context tier. Added
+  `ccr_deterministic_rejections_total`.
+- Changed the enabled retry-sweep hold default from unlimited to 60 seconds;
+  `maxHoldMs: 0` remains an explicit unlimited opt-in. EWMA success durations
+  and failure penalties are clamped to the effective upstream timeout, and
+  held-request time is now reported by `ccr_hold_wait_seconds`. Negative
+  success duration bounds are ignored in favor of the measured elapsed time
+  so a malformed limit cannot synthesize a zero-latency sample.
+- Added optional conversation-provider stickiness under
+  `Router.stickySessions`. It is disabled by default, honors the pinned route
+  prefix, preserves configured order within each family, and only reorders
+  the fallback portion when a remembered provider family is available.
+  Integration coverage now pins this reorder: a remembered alpha conversation
+  stays on alpha over a beta-first configured chain via an unpinned request.
+  In the absence of conversation metadata, the hashed fallback key combines
+  the system prompt with the complete first user message, and overflow evicts
+  oldest entries in a loop so the local map shrinks back to its 10,000-entry
+  cap.
+- Added optional tail-latency hedging under `Router.hedging`. When enabled, a
+  primary attempt that exceeds `ttftThresholdMs` races one next-tier attempt;
+  the first usable result wins and the loser is cancelled. Hedges draw from
+  the global retry budget and fallback admission permits. Hedging is disabled
+  by default and exposes launch, hedge-win, and primary-win counters.
+  Review fix: only a successful result wins the hedge race. When the first
+  attempt completes with a transport or deterministic failure, the router now
+  awaits the competing attempt before reporting, so a fast failed hedge can no
+  longer cancel a healthy in-flight primary (or the reverse).
+- Changed retry-budget exhaustion to stop the cascade without overriding the
+  sweep's failure mix: a sweep that exhausted the budget while only seeing
+  rate limits now surfaces the synthesized 429 (with `Retry-After`) instead of
+  a terminal 503. Budget exhaustion no longer counts as a tier failure.
+- Changed client-key activation to a dedicated `AUTH_HOST`/`AUTH_PORT` listener.
+  The existing `HOST`/`PORT` listener remains unauthenticated for local
+  clients, while Cloudflare or another reverse proxy targets only the separate
+  authenticated listener. Configuration rejects a key without an auth port and
+  rejects using the same port for both contracts.
+- Added optional client-facing authentication through `CLIENT_API_KEY`. When
+  configured, callers must present the same key as standard
+  `Authorization: Bearer` or Anthropic-style `x-api-key`; all API, preset,
+  metrics, and observability routes are gated while `/health` remains a
+  content-free liveness probe. The key is stored as a constant-time digest and
+  can be exposed through a path-scoped Cloudflare Tunnel without sharing
+  upstream provider credentials. New remote-API documentation covers client
+  base URLs and ingress rules.
 - Hardened Responses-to-Anthropic continuation normalization for Codex tool
   turns: blank assistant messages are dropped, parallel tool calls are merged
   into one assistant turn, and their results are merged into the immediately
@@ -32,7 +100,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   detected, so complete tool histories pass through unchanged.
 - Review hardening preserves pairing when OpenAI tool arguments are truncated or
   invalid by carrying the raw arguments in a typed marker, deduplicates repeated
-  tool IDs, drops blank user/assistant fragments, moves tool results ahead of text,
+  tool IDs, drops blank assistant fragments, moves tool results ahead of text,
   and moves continuation repair inputs instead of deep-cloning whole histories.
 - Added an optional shared fallback-policy helper for multiple local listeners.
   One policy derives registered configurations while retaining their primary
@@ -50,7 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `serve` resolves the binary via `CCR_TEST_BINARY`/`CARGO_HOME`/PATH, reads
   the consumer file once, preflights the credentials file before rewriting
   anything, and injects runtime credentials only for registered consumers, and
-  `restart_required` is documented as empty under `check` because no files were
+  preflight credential probes attach provider `extra_headers` alongside the
+  auth header on every probe request (extra values override the auth header on
+  a key collision, matching CCR dispatch) instead of sending each extra header
+  as a standalone unauthenticated request, and `restart_required` is
+  documented as empty under `check` because no files were
   rewritten. Follow-up review fixes: duplicate provider names in a consumer or
   the shared provider list are rejected instead of silently keeping the last
   entry, consumer names containing glob metacharacters are rejected so the

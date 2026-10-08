@@ -448,6 +448,10 @@ async fn run_server(
     // Capture the effective request-body limit before `config` moves into
     // the router state so every endpoint shares one configured bound.
     let max_request_body_bytes = config.max_request_body_bytes();
+    let auth_host = config.auth_host().to_string();
+    let auth_port = config.auth_port();
+    // Read the TTL before `config` moves into `AppState`.
+    let sticky_ttl = std::time::Duration::from_millis(config.router().sticky_sessions.ttl_ms);
 
     let state = AppState {
         config,
@@ -457,10 +461,66 @@ async fn run_server(
         active_streams: Arc::new(AtomicUsize::new(0)),
         max_streams,
         ratelimit_tracker,
+        admission_tracker: Arc::new(ccr_rust::admission::AdmissionTracker::new()),
+        retry_budget: Arc::new(ccr_rust::retry_budget::RetryBudget::new()),
+        sticky_sessions: Arc::new(ccr_rust::stickiness::StickySessionTracker::new(sticky_ttl)),
         shutdown_timeout,
         debug_capture,
     };
 
+    let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
+    if auth_port == Some(port) {
+        anyhow::bail!("AUTH_PORT must differ from the local PORT {port}");
+    }
+    let auth_addr = auth_port.map(|auth_port| {
+        SocketAddr::from((
+            auth_host
+                .parse::<std::net::IpAddr>()
+                .expect("validated AUTH_HOST"),
+            auth_port,
+        ))
+    });
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let auth_listener = match auth_addr {
+        Some(addr) => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            tracing::info!(
+                "CCR-Rust authenticated API listener on {addr}; present CLIENT_API_KEY as a \
+                 Bearer token or x-api-key"
+            );
+            Some(listener)
+        }
+        None => None,
+    };
+    tracing::info!("CCR-Rust local listener on {addr}; client API key is not required here");
+
+    let local_app = build_router(
+        state.clone(),
+        false,
+        max_request_body_bytes,
+        telemetry_enabled,
+    );
+    let local_server =
+        axum::serve(listener, local_app).with_graceful_shutdown(shutdown_signal(shutdown_timeout));
+    if let Some(auth_listener) = auth_listener {
+        let auth_app = build_router(state, true, max_request_body_bytes, telemetry_enabled);
+        let auth_server = axum::serve(auth_listener, auth_app)
+            .with_graceful_shutdown(shutdown_signal(shutdown_timeout));
+        tokio::try_join!(local_server, auth_server)?;
+    } else {
+        local_server.await?;
+    }
+
+    Ok(())
+}
+
+fn build_router(
+    state: AppState,
+    authenticated: bool,
+    max_request_body_bytes: usize,
+    telemetry_enabled: bool,
+) -> Router {
     let app = Router::new()
         .route("/v1/messages", post(router::handle_messages))
         .route(
@@ -484,25 +544,27 @@ async fn run_server(
             get(metrics::frontend_metrics_handler),
         )
         .route("/health", get(health))
-        .route("/metrics", get(metrics::metrics_handler))
+        .route("/metrics", get(metrics::metrics_handler));
+    let app = if authenticated {
+        app.route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            router::require_client_auth,
+        ))
+    } else {
+        app
+    };
+    let app = app
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .with_state(state);
     #[cfg(feature = "telemetry")]
-    let app = telemetry::instrument(app, telemetry_enabled);
+    return telemetry::instrument(app, telemetry_enabled);
     #[cfg(not(feature = "telemetry"))]
-    let _ = telemetry_enabled;
-
-    let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
-    tracing::info!("CCR-Rust listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown_timeout))
-        .await?;
-
-    Ok(())
+    {
+        let _ = telemetry_enabled;
+        app
+    }
 }
 
 fn validate_config(config_path: &str) -> anyhow::Result<()> {
@@ -518,6 +580,9 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     }
 
     let tiers = config.backend_tiers();
+    if config.client_api_key().is_some() {
+        println!("✓ Client API key authentication enabled");
+    }
     println!("✓ {} tier(s)", tiers.len());
     for tier in &tiers {
         println!("  - {}", tier);
@@ -735,6 +800,64 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "telemetry"))]
     {
         dispatch_result
+    }
+}
+
+#[cfg(test)]
+mod client_listener_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn app(authenticated: bool) -> Router {
+        let config_json = serde_json::json!({
+            "CLIENT_API_KEY": "test-client-key",
+            "AUTH_HOST": "127.0.0.1",
+            "AUTH_PORT": 3459,
+            "Providers": [{
+                "name": "mock",
+                "api_base_url": "http://127.0.0.1:9",
+                "api_key": "upstream-key",
+                "models": ["test-model"]
+            }],
+            "Router": {"default": "mock,test-model"}
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        std::fs::write(&path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+        let config = Config::from_file(path.to_str().unwrap()).unwrap();
+        let sticky_ttl = std::time::Duration::from_millis(config.router().sticky_sessions.ttl_ms);
+        let state = AppState {
+            config,
+            ewma_tracker: Arc::new(EwmaTracker::new()),
+            gp_router: None,
+            transformer_registry: Arc::new(TransformerRegistry::new()),
+            active_streams: Arc::new(AtomicUsize::new(0)),
+            max_streams: 0,
+            ratelimit_tracker: Arc::new(RateLimitTracker::new()),
+            admission_tracker: Arc::new(ccr_rust::admission::AdmissionTracker::new()),
+            retry_budget: Arc::new(ccr_rust::retry_budget::RetryBudget::new()),
+            sticky_sessions: Arc::new(ccr_rust::stickiness::StickySessionTracker::new(sticky_ttl)),
+            shutdown_timeout: 30,
+            debug_capture: None,
+        };
+        build_router(state, authenticated, 1024 * 1024, false)
+    }
+
+    #[tokio::test]
+    async fn local_listener_remains_unauthenticated_and_auth_listener_gates_api() {
+        let local = app(false)
+            .oneshot(Request::get("/v1/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(local.status(), StatusCode::OK);
+
+        let authenticated = app(true)
+            .oneshot(Request::get("/v1/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::UNAUTHORIZED);
     }
 }
 

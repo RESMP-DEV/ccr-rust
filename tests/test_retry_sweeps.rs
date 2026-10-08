@@ -110,6 +110,11 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
         active_streams,
         max_streams: 0,
         ratelimit_tracker,
+        admission_tracker: std::sync::Arc::new(ccr_rust::admission::AdmissionTracker::new()),
+        retry_budget: std::sync::Arc::new(ccr_rust::retry_budget::RetryBudget::new()),
+        sticky_sessions: std::sync::Arc::new(ccr_rust::stickiness::StickySessionTracker::new(
+            std::time::Duration::from_secs(3600),
+        )),
         shutdown_timeout: 30,
         debug_capture: None,
     };
@@ -400,8 +405,12 @@ async fn rate_limited_tier_holds_then_synthesizes_429() {
         (1..=2).contains(&hits),
         "expected 1-2 upstream hits (one per recovery window), got {hits}"
     );
+    // A 429 without Retry-After paces the tier for 1s (no local escalation),
+    // so two sweeps must take at least that long: at the configured 25ms
+    // cooldown, finishing in under a second proves the sleep stretched to
+    // the tracker's backoff window.
     assert!(
-        elapsed >= std::time::Duration::from_millis(1500),
+        elapsed >= std::time::Duration::from_millis(750),
         "cooldown must stretch to the tracker's backoff window; surfaced after {elapsed:?}"
     );
 }
