@@ -316,11 +316,28 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) render_refusal_as_anthropic_text: bool,
 }
 
+/// True when this provider talks to MiniMax, regardless of how the operator
+/// named it. Multi-credential setups use names such as `minimax-anthropic`,
+/// `minimax-primary`, or `minimax-work`, and `config.example.json` ships
+/// `minimax-anthropic`, so matching the name exactly would silently skip
+/// canonicalization and dispatch an ambiguous alias upstream.
+fn is_minimax_provider(provider: &crate::config::Provider) -> bool {
+    provider.name.to_ascii_lowercase().contains("minimax")
+        || provider
+            .api_base_url
+            .to_ascii_lowercase()
+            .contains("minimax")
+}
+
+/// Pin every MiniMax M3-family request to the exact preview model ID.
+///
+/// The shorter `MiniMax-M3.1-Flash` alias is accepted upstream but serves
+/// `MiniMax-M3`, so the alias cannot be forwarded as-is.
 fn canonical_model_name<'a>(
     provider: &crate::config::Provider,
     model_name: &'a str,
 ) -> Cow<'a, str> {
-    if provider.name.eq_ignore_ascii_case("minimax") && is_m3_model(model_name) {
+    if is_minimax_provider(provider) && is_m3_model(model_name) {
         Cow::Borrowed(MINIMAX_M3_1_FLASH_PREVIEW)
     } else {
         Cow::Borrowed(model_name)
@@ -1610,6 +1627,23 @@ mod tests {
             "models": ["MiniMax-M3"]
         }))
         .unwrap();
+        // config.example.json ships this provider name for the MiniMax
+        // Anthropic endpoint; it must canonicalize too.
+        let aliased: Provider = serde_json::from_value(serde_json::json!({
+            "name": "minimax-anthropic",
+            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_key": "test",
+            "models": ["MiniMax-M3.1-Flash"]
+        }))
+        .unwrap();
+        // An unrelated name that points at a MiniMax host also canonicalizes.
+        let by_url: Provider = serde_json::from_value(serde_json::json!({
+            "name": "personal-coding",
+            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_key": "test",
+            "models": ["MiniMax-M3"]
+        }))
+        .unwrap();
 
         assert_eq!(
             canonical_model_name(&minimax, "MiniMax-M3"),
@@ -1620,6 +1654,14 @@ mod tests {
             "MiniMax-M3.1-Flash-Preview"
         );
         assert_eq!(canonical_model_name(&other, "MiniMax-M3"), "MiniMax-M3");
+        assert_eq!(
+            canonical_model_name(&aliased, "MiniMax-M3.1-Flash"),
+            "MiniMax-M3.1-Flash-Preview"
+        );
+        assert_eq!(
+            canonical_model_name(&by_url, "MiniMax-M3"),
+            "MiniMax-M3.1-Flash-Preview"
+        );
         assert_eq!(
             canonical_model_name(&minimax, "MiniMax-M2.7"),
             "MiniMax-M2.7"
