@@ -141,6 +141,19 @@ instead of maintaining their own allowed-model list. A requested model in a
 worker receipt is not proof of the upstream used; inspect actual router logs or
 per-tier counters.
 
+The module is validated against `MACHINE_SHARED_PROVIDERS` on every load, so an
+installed copy of `ccr_fallback_policy.py` that predates a source change will
+refuse to start its listeners. After editing this script, copy it to the
+launcher's import directory and clear its stale bytecode before restarting.
+A launcher that fails with `Machine shared provider definitions do not match
+the approved source policy` has a provider-definition mismatch. Check both the
+installed module and policy configuration. Update the module and clear stale
+bytecode when the installed module is outdated.
+
+For the MiniMax-specific model ID, transformer, validation, and idle-restart
+sequence, see
+[MiniMax setup and operations](minimax.md#governed-fallback-runbook).
+
 Sync edits files only. CCR loads configuration at startup, so inspect
 `ccr_active_requests` and coordinate an idle restart for each affected listener.
 Do not interrupt active work to make an updated file appear live. The result's
