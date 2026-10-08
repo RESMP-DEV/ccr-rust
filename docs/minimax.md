@@ -201,6 +201,6 @@ is an account-funding condition, not a MiniMax routing result.
 | --- | --- |
 | HTTP 200 but the served model is `MiniMax-M3` | Request the exact preview ID; inspect a non-streaming model echo rather than trusting status. |
 | No adaptive thinking or malformed-output cleanup | Confirm `transformer: {use: ["minimax"]}` in the active config and that the listener restarted after the change. |
-| Worker startup fails with a shared-provider mismatch | Compare the installed `~/.claude-code-router/ccr_fallback_policy.py` with the reviewed source; deploy the module and clear stale bytecode. |
+| Worker startup fails with a shared-provider mismatch | Compare both the installed `~/.claude-code-router/ccr_fallback_policy.py` and derived provider definitions with reviewed source. Deploy the module and clear stale bytecode only if it is outdated. |
 | Config edit has no effect | CCR loads config at startup. Restart the listener when it is idle. |
 | Tools are unreliable after malformed visible text | Confirm the current binary and transformer are active, then inspect router logs and a fresh client rollout. A self-reported model is not route proof. |

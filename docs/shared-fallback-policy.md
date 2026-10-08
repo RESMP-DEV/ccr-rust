@@ -146,7 +146,9 @@ installed copy of `ccr_fallback_policy.py` that predates a source change will
 refuse to start its listeners. After editing this script, copy it to the
 launcher's import directory and clear its stale bytecode before restarting.
 A launcher that fails with `Machine shared provider definitions do not match
-the approved source policy` is running the old module, not a broken config.
+the approved source policy` has a provider-definition mismatch. Check both the
+installed module and policy configuration. Update the module and clear stale
+bytecode when the installed module is outdated.
 
 For the MiniMax-specific model ID, transformer, validation, and idle-restart
 sequence, see
