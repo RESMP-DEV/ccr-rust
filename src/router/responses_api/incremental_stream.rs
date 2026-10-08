@@ -41,6 +41,7 @@ pub(super) struct ResponsesStreamConverter {
     next_message_content_index: usize,
     next_output_index: usize,
     message_text: String,
+    message_quote_prefix_held: bool,
     refusal_text: String,
     reasoning_text: String,
     response_status: String,
@@ -50,6 +51,18 @@ pub(super) struct ResponsesStreamConverter {
     tools: BTreeMap<usize, ToolAccum>,
     usage: serde_json::Value,
     finished: bool,
+}
+
+fn is_quote_only(text: &str) -> bool {
+    let mut quotes = false;
+    text.chars().all(|ch| {
+        if matches!(ch, '"' | '\'' | '“' | '”' | '‘' | '’') {
+            quotes = true;
+            true
+        } else {
+            ch.is_whitespace()
+        }
+    }) && quotes
 }
 
 impl ResponsesStreamConverter {
@@ -79,6 +92,7 @@ impl ResponsesStreamConverter {
             next_message_content_index: 0,
             next_output_index: 0,
             message_text: String::new(),
+            message_quote_prefix_held: false,
             refusal_text: String::new(),
             reasoning_text: String::new(),
             response_status,
@@ -389,14 +403,7 @@ impl ResponsesStreamConverter {
             .and_then(|value| value.as_str())
             .filter(|text| !text.is_empty())
         {
-            self.ensure_message_content_part("output_text", output);
-            self.message_text.push_str(text);
-            append_response_delta(
-                output,
-                "response.output_text.delta",
-                text,
-                self.message_identity("output_text"),
-            );
+            self.push_message_text_delta(text, output);
         }
 
         if let Some(reasoning) = delta
@@ -425,6 +432,9 @@ impl ResponsesStreamConverter {
         let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array()) else {
             return;
         };
+        if !tool_calls.is_empty() {
+            self.discard_quote_prefix_before_tool();
+        }
         for tool_call in tool_calls {
             let index = tool_call
                 .get("index")
@@ -455,6 +465,61 @@ impl ResponsesStreamConverter {
                 self.ensure_tool_item(index, output);
             }
             self.emit_pending_tool_arguments(index, output);
+        }
+    }
+
+    fn push_message_text_delta(&mut self, text: &str, output: &mut String) {
+        if self.preserved_response.is_none() && self.message_text.is_empty() && is_quote_only(text)
+        {
+            self.message_text.push_str(text);
+            self.message_quote_prefix_held = true;
+            return;
+        }
+
+        if self.message_quote_prefix_held {
+            if is_quote_only(text) {
+                self.message_text.push_str(text);
+                return;
+            }
+            self.message_quote_prefix_held = false;
+            self.ensure_message_content_part("output_text", output);
+            self.message_text.push_str(text);
+            append_response_delta(
+                output,
+                "response.output_text.delta",
+                &self.message_text.clone(),
+                self.message_identity("output_text"),
+            );
+            return;
+        }
+
+        self.ensure_message_content_part("output_text", output);
+        self.message_text.push_str(text);
+        append_response_delta(
+            output,
+            "response.output_text.delta",
+            text,
+            self.message_identity("output_text"),
+        );
+    }
+
+    fn discard_quote_prefix_before_tool(&mut self) {
+        if self.message_quote_prefix_held {
+            self.message_text.clear();
+            self.message_quote_prefix_held = false;
+        }
+    }
+
+    fn flush_held_quote_prefix(&mut self, output: &mut String) {
+        if self.message_quote_prefix_held {
+            self.ensure_message_content_part("output_text", output);
+            append_response_delta(
+                output,
+                "response.output_text.delta",
+                &self.message_text.clone(),
+                self.message_identity("output_text"),
+            );
+            self.message_quote_prefix_held = false;
         }
     }
 
@@ -528,6 +593,7 @@ impl ResponsesStreamConverter {
         if block.get("type").and_then(|value| value.as_str()) != Some("tool_use") {
             return;
         }
+        self.discard_quote_prefix_before_tool();
         let index = chunk
             .get("index")
             .and_then(|value| value.as_u64())
@@ -594,14 +660,7 @@ impl ResponsesStreamConverter {
                     .and_then(|value| value.as_str())
                     .filter(|text| !text.is_empty())
                 {
-                    self.ensure_message_content_part("output_text", output);
-                    self.message_text.push_str(text);
-                    append_response_delta(
-                        output,
-                        "response.output_text.delta",
-                        text,
-                        self.message_identity("output_text"),
-                    );
+                    self.push_message_text_delta(text, output);
                 }
                 if let Some(thinking) = delta
                     .get("thinking")
@@ -637,6 +696,7 @@ impl ResponsesStreamConverter {
             append_output_item_done(&mut output, output_index, &reasoning_item);
         }
 
+        self.flush_held_quote_prefix(&mut output);
         self.finish_message_content_parts(&mut output);
 
         if self.preserved_response.is_none() && self.message_item_added {
@@ -863,6 +923,90 @@ fn append_output_item_done(output: &mut String, output_index: usize, item: &serd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A quote-only text block must be preserved when the *next* block is
+    /// text. Only a following `tool_use` block makes the held prefix a tool
+    /// preamble, which is the only case where it may be discarded.
+    #[test]
+    fn quote_prefix_survives_when_next_block_is_text() {
+        let mut converter = ResponsesStreamConverter::new(None);
+
+        let text_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""}
+        });
+        converter.push_frame(Some("content_block_start"), &text_start.to_string());
+
+        let quote = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        converter.push_frame(Some("content_block_delta"), &quote.to_string());
+
+        // A second text block, not a tool_use block.
+        let next_text = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""}
+        });
+        converter.push_frame(Some("content_block_start"), &next_text.to_string());
+
+        let real_text = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "answer"}
+        });
+        converter.push_frame(Some("content_block_delta"), &real_text.to_string());
+
+        let tail = converter.finish();
+        let combined = tail;
+
+        assert!(
+            combined.contains("answer"),
+            "real assistant text must survive the block transition, got: {combined}"
+        );
+    }
+
+    /// The discard path still applies: a `tool_use` block after a quote-only
+    /// prefix drops the held preamble.
+    #[test]
+    fn quote_prefix_is_discarded_before_a_tool_block() {
+        let mut converter = ResponsesStreamConverter::new(None);
+
+        let text_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""}
+        });
+        converter.push_frame(Some("content_block_start"), &text_start.to_string());
+
+        let quote = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        converter.push_frame(Some("content_block_delta"), &quote.to_string());
+
+        let tool = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "tool_use", "id": "call_1", "name": "shell", "input": {}}
+        });
+        converter.push_frame(Some("content_block_start"), &tool.to_string());
+
+        let tail = converter.finish();
+
+        assert!(
+            !tail.contains("output_text.delta"),
+            "a quote-only preamble before a tool block must not be emitted as text, got: {tail}"
+        );
+        assert!(
+            tail.contains("function_call"),
+            "the tool call itself must still be converted, got: {tail}"
+        );
+    }
 
     #[test]
     fn preserved_items_reserve_their_output_indices() {

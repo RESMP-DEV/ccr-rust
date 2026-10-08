@@ -47,7 +47,7 @@ impl RateLimitTracker {
         if let Some(state) = tiers.get(tier) {
             let now = Instant::now();
 
-            // Always skip when in exponential backoff from a real 429.
+            // Skip only while the tier's 429 backoff window is active.
             if let Some(until) = state.backoff_until {
                 if now < until {
                     tracing::debug!(
@@ -84,7 +84,7 @@ impl RateLimitTracker {
         false
     }
 
-    /// Returns true if the tier is in exponential backoff from a real 429.
+    /// Returns true if the tier is inside an active 429 backoff window.
     pub fn has_backoff(&self, tier: &str) -> bool {
         let tiers = self.tiers.read();
         tiers
@@ -119,12 +119,14 @@ impl RateLimitTracker {
         state.consecutive_429s += 1;
         state.generation += 1;
 
-        // Exponential backoff: 1s, 2s, 4s, 8s... capped at 60s
-        let base_backoff = retry_after.unwrap_or(Duration::from_secs(1));
-        let multiplier = 2u32.saturating_pow(state.consecutive_429s.min(6));
-        let backoff = base_backoff
-            .saturating_mul(multiplier)
-            .min(Duration::from_secs(60));
+        // A server-directed Retry-After is honored verbatim, capped at 60s.
+        // A 429 without server guidance only paces the tier for one second:
+        // plans that reject some requests under concurrency while still
+        // admitting others must not be blanket-skipped by escalating local
+        // backoff.
+        let backoff = retry_after
+            .map(|retry_after| retry_after.min(Duration::from_secs(60)))
+            .unwrap_or(Duration::from_secs(1));
 
         state.backoff_until = Some(Instant::now() + backoff);
 

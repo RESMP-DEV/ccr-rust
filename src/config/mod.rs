@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 
+use crate::client_auth::ClientApiKey;
 use crate::debug_capture::DebugCaptureConfig;
 
 const REASONING_EFFORT_VALUES: &[&str] =
@@ -136,9 +137,57 @@ fn validate_provider_credentials(
     );
 }
 
+fn validate_client_credentials(
+    config: &serde_json::Value,
+    expansion_failures: &[(String, String)],
+    allow_unexpanded: bool,
+) -> Result<()> {
+    if allow_unexpanded {
+        return Ok(());
+    }
+    if config.get("CLIENT_API_KEY").is_some()
+        && expansion_failures
+            .iter()
+            .any(|(pointer, _error)| pointer == "/CLIENT_API_KEY")
+    {
+        anyhow::bail!(
+            "unexpanded client API key reference: /CLIENT_API_KEY. Start via the credential \
+             launcher or export CCR_CLIENT_API_KEY before exposing the API. Set \
+             CCR_ALLOW_UNEXPANDED_CREDENTIALS=true to override for a loopback-only setup."
+        );
+    }
+    Ok(())
+}
+
+fn validate_client_listener(file: &ConfigFile) -> Result<()> {
+    anyhow::ensure!(
+        file.client_api_key.is_some() == file.auth_port.is_some(),
+        "CLIENT_API_KEY and AUTH_PORT must be configured together: the normal HOST/PORT \
+         listener stays unauthenticated for local clients, while AUTH_PORT requires the key"
+    );
+    anyhow::ensure!(
+        file.auth_port != Some(file.port),
+        "AUTH_PORT must differ from PORT so the authenticated endpoint cannot displace or gate \
+         the existing local listener"
+    );
+    anyhow::ensure!(
+        file.auth_host.parse::<std::net::IpAddr>().is_ok(),
+        "AUTH_HOST must be an IP address"
+    );
+    Ok(())
+}
+
 /// Validate cross-field provider requirements before the router accepts traffic.
 fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
     for provider in providers {
+        if let Some(max_inflight) = provider.max_inflight {
+            anyhow::ensure!(
+                (1..=64).contains(&max_inflight),
+                "provider '{}' maxInflight must be between 1 and 64, got {}",
+                provider.name,
+                max_inflight
+            );
+        }
         let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
             continue;
         };
@@ -170,6 +219,23 @@ fn validate_retry_sweeps(router: &RouterConfig) -> Result<()> {
         !(sweeps.enabled && sweeps.sweep_cooldown_ms == 0),
         "Router.retrySweeps.sweepCooldownMs must be > 0 when retrySweeps is enabled \
          (zero would re-cascade the tier list back-to-back in an unbounded hot loop)"
+    );
+    Ok(())
+}
+
+fn validate_retry_budget(router: &RouterConfig) -> Result<()> {
+    anyhow::ensure!(
+        router.retry_budget_percent <= 100,
+        "Router.retryBudgetPercent must be between 0 and 100, got {}",
+        router.retry_budget_percent
+    );
+    Ok(())
+}
+
+fn validate_hedging(router: &RouterConfig) -> Result<()> {
+    anyhow::ensure!(
+        !(router.hedging.enabled && router.hedging.ttft_threshold_ms == 0),
+        "Router.hedging.ttftThresholdMs must be > 0 when hedging is enabled"
     );
     Ok(())
 }
@@ -275,6 +341,18 @@ pub struct ConfigFile {
     #[serde(rename = "HOST")]
     pub host: String,
 
+    /// Dedicated authenticated listener host. The normal HOST/PORT listener
+    /// remains on the historical local contract and is never client-key gated.
+    #[serde(default = "default_auth_host")]
+    #[serde(rename = "AUTH_HOST")]
+    pub auth_host: String,
+
+    /// Dedicated authenticated listener port. Required when CLIENT_API_KEY is
+    /// configured; Cloudflare should point at this listener, not HOST/PORT.
+    #[serde(default)]
+    #[serde(rename = "AUTH_PORT")]
+    pub auth_port: Option<u16>,
+
     #[serde(default = "default_timeout")]
     #[serde(rename = "API_TIMEOUT_MS")]
     pub api_timeout_ms: u64,
@@ -328,6 +406,13 @@ pub struct ConfigFile {
     #[serde(default = "default_max_request_body_bytes")]
     #[serde(rename = "MAX_REQUEST_BODY_BYTES")]
     pub max_request_body_bytes: usize,
+
+    /// Client-facing API key. When set, standard `Authorization: Bearer` and
+    /// Anthropic-style `x-api-key` requests must present this key before any
+    /// API or metrics route is served.
+    #[serde(default)]
+    #[serde(rename = "CLIENT_API_KEY")]
+    pub client_api_key: Option<String>,
 }
 
 /// Runtime configuration shared across all handlers via Axum state.
@@ -345,6 +430,7 @@ struct ConfigInner {
     /// Effective request-body limit, computed (and warned about) once at
     /// load so the accessor stays side-effect free per request.
     effective_max_request_body_bytes: usize,
+    client_api_key: Option<ClientApiKey>,
 }
 
 impl Config {
@@ -392,6 +478,19 @@ impl Config {
         self.inner.effective_max_request_body_bytes
     }
 
+    pub fn auth_host(&self) -> &str {
+        &self.inner.file.auth_host
+    }
+
+    pub fn auth_port(&self) -> Option<u16> {
+        self.inner.file.auth_port
+    }
+
+    /// Configured client-facing authentication, if enabled.
+    pub fn client_api_key(&self) -> Option<&ClientApiKey> {
+        self.inner.client_api_key.as_ref()
+    }
+
     /// Resolve the broker socket path.
     ///
     /// Priority: config file `BROKER_SOCKET` field > `CCR_BROKER_SOCKET` env var.
@@ -437,11 +536,15 @@ impl Config {
         // expands to text containing `$word` must not block startup.
         let allow_unexpanded_credentials = allow_unexpanded_credentials_override();
         validate_provider_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
+        validate_client_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
         let file: ConfigFile =
             serde_json::from_value(value).context("Failed to parse config JSON")?;
+        validate_client_listener(&file)?;
         validate_provider_contracts(&file.providers)?;
         validate_model_aliases(&file.router, &file.providers)?;
         validate_retry_sweeps(&file.router)?;
+        validate_retry_budget(&file.router)?;
+        validate_hedging(&file.router)?;
         validate_tier_order_conflicts(&file.router)?;
 
         // Build a single shared reqwest::Client with a properly-sized connection pool.
@@ -460,12 +563,18 @@ impl Config {
         let presets = file.presets.clone();
         let effective_max_request_body_bytes =
             compute_max_request_body_bytes(file.max_request_body_bytes);
+        let client_api_key = file
+            .client_api_key
+            .as_ref()
+            .map(|token| ClientApiKey::new(token.clone()))
+            .transpose()?;
 
         Ok(Config {
             inner: Arc::new(ConfigInner {
                 file,
                 http_client,
                 effective_max_request_body_bytes,
+                client_api_key,
             }),
             presets,
         })
@@ -554,6 +663,10 @@ fn default_port() -> u16 {
 }
 
 fn default_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_auth_host() -> String {
     "127.0.0.1".to_string()
 }
 
@@ -1126,7 +1239,8 @@ mod credential_guard_tests {
         let mut value = config;
         let mut failures = Vec::new();
         expand_env_references(&mut value, &mut failures, "");
-        validate_provider_credentials(&value, &failures, allow_unexpanded)
+        validate_provider_credentials(&value, &failures, allow_unexpanded)?;
+        validate_client_credentials(&value, &failures, allow_unexpanded)
     }
 
     #[test]
@@ -1149,6 +1263,43 @@ mod credential_guard_tests {
         let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"api-key": "${CCR_AZURE_API_KEY}"}}], "Router": {"default": "p1,m"}}"#;
         let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
         assert!(error.to_string().contains("header 'api-key'"));
+    }
+
+    #[test]
+    fn unexpanded_client_api_key_is_rejected() {
+        let raw = r#"{"CLIENT_API_KEY": "${CCR_CLIENT_API_KEY}", "Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"]}], "Router": {"default": "p1,m"}}"#;
+        let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("client API key"), "{message}");
+        assert!(message.contains("CCR_CLIENT_API_KEY"), "{message}");
+    }
+
+    #[test]
+    fn client_api_key_requires_a_distinct_auth_listener() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let base = r#"{"CLIENT_API_KEY": "test-key", "Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"]}], "Router": {"default": "p1,m"}}"#;
+        std::fs::write(&path, base).unwrap();
+        let error = Config::from_file(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("CLIENT_API_KEY and AUTH_PORT must be configured together"),
+            "{error}"
+        );
+
+        std::fs::write(
+            &path,
+            format!("{},\"AUTH_PORT\":3456}}", &base[..base.len() - 1]),
+        )
+        .unwrap();
+        let error = Config::from_file(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("AUTH_PORT must differ from PORT"),
+            "{error}"
+        );
     }
 
     #[test]

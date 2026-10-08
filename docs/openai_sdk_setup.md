@@ -17,7 +17,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:3456/v1",
-    api_key="unused",  # ccr-rust uses its own configured keys
+    api_key="unused",  # the local listener remains unauthenticated
 )
 
 response = client.chat.completions.create(
@@ -34,7 +34,7 @@ import OpenAI from "openai";
 
 const client = new OpenAI({
   baseURL: "http://localhost:3456/v1",
-  apiKey: "unused", // ccr-rust uses its own configured keys
+  apiKey: "unused", // the local listener remains unauthenticated
 });
 
 const response = await client.chat.completions.create({

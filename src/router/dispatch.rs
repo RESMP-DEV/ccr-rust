@@ -306,6 +306,7 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) stream_first_event_timeout: Duration,
     pub(super) stream_idle_timeout: Duration,
     pub(super) ratelimit_tracker: Arc<RateLimitTracker>,
+    pub(super) admission_permit: crate::admission::AdmissionPermit,
     pub(super) debug_capture: Option<Arc<DebugCapture>>,
     /// Original OpenAI request body for passthrough to OpenAI-compatible backends.
     pub(super) openai_passthrough_body: Option<&'a serde_json::Value>,
@@ -324,6 +325,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
         stream_first_event_timeout,
         stream_idle_timeout,
         ratelimit_tracker,
+        admission_permit,
         debug_capture,
         openai_passthrough_body,
         render_refusal_as_anthropic_text,
@@ -390,6 +392,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     stream_first_event_timeout,
                     stream_idle_timeout,
                     ratelimit_tracker,
+                    admission_permit,
                     chain,
                     debug_capture,
                     openai_passthrough_body: effective_passthrough,
@@ -411,6 +414,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
                     stream_first_event_timeout,
                     stream_idle_timeout,
                     ratelimit_tracker,
+                    admission_permit,
                     chain,
                     debug_capture,
                     openai_passthrough_body: None,
@@ -435,6 +439,7 @@ pub(super) struct TryRequestProtocolArgs<'a> {
     pub(super) stream_first_event_timeout: Duration,
     pub(super) stream_idle_timeout: Duration,
     pub(super) ratelimit_tracker: Arc<RateLimitTracker>,
+    pub(super) admission_permit: crate::admission::AdmissionPermit,
     pub(super) chain: TransformerChain,
     pub(super) debug_capture: Option<Arc<DebugCapture>>,
     /// Original OpenAI body for direct passthrough (skips Anthropic round-trip).
@@ -654,6 +659,18 @@ fn should_preserve_responses_response(
 /// Build the upstream failure error, appending the credential-placeholder
 /// hint on 401s. Shared by both protocol paths so their messages stay in
 /// lockstep.
+fn is_context_window_rejection(body: &str) -> bool {
+    let normalized = body.to_ascii_lowercase();
+    [
+        "prompt is too long",
+        "context_length_exceeded",
+        "maximum context length",
+        "context window",
+    ]
+    .iter()
+    .any(|signature| normalized.contains(signature))
+}
+
 fn provider_upstream_error(
     status: reqwest::StatusCode,
     url: &str,
@@ -672,10 +689,14 @@ fn provider_upstream_error(
         body,
         credential_hint
     );
-    // Auth, billing, permission, and unknown-model failures are properties of
-    // the request itself; retrying them cannot change the outcome.
+    // Auth, billing, permission, unknown-model, and deterministic validation
+    // failures are properties of the request. Retrying the same tier cannot
+    // change them and can consume provider rate budget. Context-window errors
+    // are the deliberate exception: a larger-context later tier may serve.
     match status.as_u16() {
-        401..=404 => TryRequestError::Rejected(status.as_u16(), error),
+        400 | 401..=404 | 422 if !is_context_window_rejection(body) => {
+            TryRequestError::Rejected(status.as_u16(), error)
+        }
         _ => TryRequestError::Other(error),
     }
 }
@@ -709,6 +730,7 @@ pub(super) async fn try_request_via_openai_protocol(
         stream_first_event_timeout,
         stream_idle_timeout,
         ratelimit_tracker,
+        admission_permit,
         chain,
         debug_capture,
         openai_passthrough_body,
@@ -916,6 +938,7 @@ pub(super) async fn try_request_via_openai_protocol(
             ratelimit_generation,
             local_estimate,
             ratelimit_tracker: Some(ratelimit_tracker.clone()),
+            admission_permit: Some(admission_permit),
             rate_limit_info: Some(rate_limit_info),
             stream_start: std::time::Instant::now(),
             stream_idle_timeout,
@@ -1020,6 +1043,7 @@ pub(super) async fn try_request_via_openai_protocol(
             rate_limit_info.0,
             rate_limit_info.1,
         );
+        admission_permit.record_success();
 
         // Try to parse as OpenAI response and translate.
         if let Ok(openai_resp) = serde_json::from_slice::<OpenAIResponse>(&body) {
@@ -1119,6 +1143,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
         stream_first_event_timeout,
         stream_idle_timeout,
         ratelimit_tracker,
+        admission_permit,
         chain,
         debug_capture,
         openai_passthrough_body: _, // not used for Anthropic protocol
@@ -1318,6 +1343,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
             ratelimit_generation,
             local_estimate,
             ratelimit_tracker: Some(ratelimit_tracker.clone()),
+            admission_permit: Some(admission_permit),
             rate_limit_info: Some(rate_limit_info),
             stream_start: std::time::Instant::now(),
             stream_idle_timeout,
@@ -1368,6 +1394,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
             rate_limit_info.0,
             rate_limit_info.1,
         );
+        admission_permit.record_success();
 
         let body_str = String::from_utf8_lossy(&body);
 
@@ -1562,8 +1589,62 @@ mod tests {
         let mut request = serde_json::json!({});
 
         let error = apply_provider_request_overrides(&provider, &mut request).unwrap_err();
-
         assert!(error.to_string().contains("requires protocol 'openai'"));
+    }
+
+    fn upstream_test_provider() -> Provider {
+        serde_json::from_value(serde_json::json!({
+            "name": "upstream",
+            "api_base_url": "https://api.example.test/v1",
+            "api_key": "test",
+            "models": ["model"]
+        }))
+        .expect("provider config should parse")
+    }
+
+    fn assert_rejection(status: u16, body: &str) -> u16 {
+        let error = provider_upstream_error(
+            reqwest::StatusCode::from_u16(status).unwrap(),
+            "https://api.example.test/v1/messages",
+            body,
+            &upstream_test_provider(),
+        );
+        match error {
+            TryRequestError::Rejected(code, _) => code,
+            TryRequestError::Other(_) => panic!("expected deterministic rejection"),
+            TryRequestError::RateLimited(_) => panic!("expected deterministic rejection"),
+        }
+    }
+
+    fn assert_retryable(status: u16, body: &str) {
+        let error = provider_upstream_error(
+            reqwest::StatusCode::from_u16(status).unwrap(),
+            "https://api.example.test/v1/messages",
+            body,
+            &upstream_test_provider(),
+        );
+        assert!(matches!(error, TryRequestError::Other(_)));
+    }
+
+    #[test]
+    fn deterministic_validation_failures_are_rejected_once() {
+        assert_eq!(
+            assert_rejection(400, r#"{"error":"invalid tool result"}"#),
+            400
+        );
+        assert_eq!(
+            assert_rejection(422, r#"{"error":"thinking is invalid"}"#),
+            422
+        );
+    }
+
+    #[test]
+    fn context_window_rejections_remain_steerable() {
+        assert_retryable(400, r#"{"error":"prompt is too long"}"#);
+        assert_retryable(
+            422,
+            r#"{"error":"This model has a maximum context length of 100 tokens"}"#,
+        );
     }
 
     #[test]

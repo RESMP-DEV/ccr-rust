@@ -257,7 +257,7 @@ ccr-rust mcp-daemon --port 3457
 
 ## Configuration
 
-CCR-Rust reads `~/.claude-code-router/config.json` by default (override with `--config` or `CCR_CONFIG`). Values like `"${MY_API_KEY}"` are expanded from the environment, so secrets never need to live in the file.
+CCR-Rust reads `~/.claude-code-router/config.json` by default (override with `--config` or `CCR_CONFIG`). Values like `"${MY_API_KEY}"` are expanded from the environment, so secrets never need to live in the file. Set `CLIENT_API_KEY` with `AUTH_PORT` to add a separate key-protected listener for reverse-proxy exposure; the normal `HOST`/`PORT` listener remains on the existing unauthenticated local contract. See [Remote API](docs/remote-api.md).
 
 The three sections you'll touch most:
 

@@ -1,7 +1,10 @@
 {
     "PORT": 3456,
     "HOST": "127.0.0.1",
+    "AUTH_PORT": 3459,
+    "AUTH_HOST": "127.0.0.1",
     "API_TIMEOUT_MS": 600000,
+    "CLIENT_API_KEY": "${CCR_CLIENT_API_KEY}",
     "Persistence": {
         "_comment": "Optional metrics/dashboard persistence. Set mode=redis to survive server restarts.",
         "mode": "none",
@@ -30,6 +33,17 @@
                     "minimax"
                 ]
             }
+        },
+        {
+            "name": "minimax-anthropic",
+            "api_base_url": "https://api.minimax.io/anthropic/v1",
+            "api_key": "${MINIMAX_API_KEY}",
+            "protocol": "anthropic",
+            "auth_header": "authorization",
+            "models": [
+                "MiniMax-M3.1-Flash-Preview",
+                "MiniMax-M3"
+            ]
         },
         {
             "name": "openrouter",
@@ -85,7 +99,18 @@
             "enabled": false,
             "maxSweeps": 0,
             "sweepCooldownMs": 2000,
-            "maxHoldMs": 0
+            "maxHoldMs": 60000
+        },
+        "retryBudgetPercent": 20,
+        "stickySessions": {
+            "_comment": "Keep a conversation on the provider family that last served it, so failover does not switch protocol families mid-conversation. The pinned prefix (direct routing, web search) never moves.",
+            "enabled": false,
+            "ttlMs": 3600000
+        },
+        "hedging": {
+            "_comment": "Launch the next eligible tier after this threshold and return the first usable result. Hedges consume retry budget and admission permits.",
+            "enabled": false,
+            "ttftThresholdMs": 10000
         }
     },
     "Presets": {

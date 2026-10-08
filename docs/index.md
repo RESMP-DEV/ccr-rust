@@ -25,6 +25,7 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 - [Claude Code](claude_code_setup.md) — opt-in routing, provider credentials, and tool verification
 - [Codex](codex_setup.md) — Codex CLI routing
 - [OpenAI SDK](openai_sdk_setup.md) — Python/JavaScript OpenAI client setup
+- [Remote API](remote-api.md) — client API keys and Cloudflare Tunnel ingress
 - [Kimi](kimi_setup.md) — Kimi Code keys, current model IDs, and Claude/Codex requirements
 - [Gemini](gemini-integration.md) — Google Gemini routing
 - [Z.AI Anthropic endpoint](zai_anthropic_endpoint.md) — verified wire contract, image handling, vision caveats, and the credential-safe restart runbook
@@ -38,6 +39,7 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 - [Dependency security](dependency-security.md) — resolved advisories and temporary transitive-risk decisions
 - [Debug capture](debug_capture.md) — capture requests/responses for troubleshooting
 - [Streaming design](streaming_incremental_design.md) — how streaming responses are handled
+- [Failover architecture](failover_architecture.md) — failover v2 design and phased execution plan: failure classification, AIMD admission, retry budgets, stickiness
 - [Token optimization](token_optimization.md) — KimiTransformer, output_compress, semantic hints
 
 ## Reference

@@ -207,6 +207,272 @@ pub(super) fn transform_tool_result_message_to_anthropic(
     );
 }
 
+/// Normalize OpenAI-style message fragments into Anthropic conversational turns.
+///
+/// Codex continuation history can contain blank assistant messages and one
+/// assistant message per parallel tool call. Anthropic-compatible providers
+/// require one assistant turn containing every tool_use and the immediately
+/// following user turn containing every matching tool_result.
+pub(super) fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
+    let mut normalized: Vec<Value> = Vec::with_capacity(messages.len());
+
+    for message in messages {
+        let Some(message_obj) = message.as_object() else {
+            normalized.push(message);
+            continue;
+        };
+        let role = message_obj
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if role == "assistant" && is_blank_anthropic_message(message_obj) {
+            continue;
+        }
+
+        let merge_with_last = normalized
+            .last()
+            .and_then(Value::as_object)
+            .and_then(|last| last.get("role"))
+            .and_then(Value::as_str)
+            .is_some_and(|last_role| last_role == role);
+
+        if merge_with_last {
+            let last = normalized.last_mut().expect("last message was checked");
+            merge_anthropic_message_content(last, message_obj);
+        } else {
+            normalized.push(Value::Object(message_obj.clone()));
+        }
+    }
+
+    repair_anthropic_tool_turns(normalized)
+}
+
+/// Repair structurally incomplete tool turns without inventing success.
+///
+/// A missing result becomes an explicit error `tool_result` so the provider
+/// accepts the conversation and the model knows the client did not supply the
+/// output. An unmatched incoming `tool_result` is retained as quoted text
+/// rather than silently discarded.
+fn repair_anthropic_tool_turns(messages: Vec<Value>) -> Vec<Value> {
+    let mut repaired = Vec::with_capacity(messages.len() + 1);
+    let mut index = 0;
+
+    while index < messages.len() {
+        let message = messages[index].clone();
+        let expected_ids = assistant_tool_use_ids(&message);
+        if expected_ids.is_empty() {
+            let mut message = message;
+            neutralize_unmatched_tool_results(&mut message, &[]);
+            repaired.push(message);
+            index += 1;
+            continue;
+        }
+
+        repaired.push(message);
+        index += 1;
+
+        if index < messages.len()
+            && messages[index]
+                .get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|role| role == "user")
+        {
+            let mut result_message = messages[index].clone();
+            repair_user_tool_results(&mut result_message, &expected_ids);
+            repaired.push(result_message);
+            index += 1;
+        } else {
+            repaired.push(synthetic_tool_results(&expected_ids));
+        }
+    }
+
+    repaired
+}
+
+fn assistant_tool_use_ids(message: &Value) -> Vec<String> {
+    let role_is_assistant = message
+        .get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role == "assistant");
+    if !role_is_assistant {
+        return Vec::new();
+    }
+
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|block| block.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
+    let Some(message_obj) = message.as_object_mut() else {
+        return;
+    };
+    let content = message_obj
+        .entry("content".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !content.is_array() {
+        *content = Value::Array(vec![content.clone()]);
+    }
+
+    let Some(blocks) = content.as_array_mut() else {
+        return;
+    };
+    let expected = expected_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen = std::collections::HashSet::new();
+    let mut kept_results: Vec<Value> = Vec::new();
+    let mut others: Vec<Value> = Vec::new();
+    for block in blocks.drain(..) {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            others.push(block);
+            continue;
+        }
+        let matched = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| expected.contains(id) && seen.insert(id.to_string()));
+        if matched {
+            kept_results.push(block);
+        } else {
+            // A duplicate or unexpected result becomes inert text, and must
+            // not sit between the kept results the API requires first.
+            others.push(unmatched_tool_result_text(&block));
+        }
+    }
+
+    let missing = expected_ids
+        .iter()
+        .filter(|id| !seen.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    kept_results.extend(synthetic_tool_result_blocks(&missing));
+    // Anthropic requires every tool_result block to precede any text in the
+    // user message that answers a tool_use turn. Merged histories can produce
+    // [result, text] upstream, so the repaired order is: kept results,
+    // synthetic results, then text and other blocks in their original order.
+    kept_results.extend(others);
+    *blocks = kept_results;
+}
+
+fn neutralize_unmatched_tool_results(message: &mut Value, expected_ids: &[String]) {
+    if message.get("role").and_then(Value::as_str) != Some("user") {
+        return;
+    }
+    let expected = expected_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let Some(message_obj) = message.as_object_mut() else {
+        return;
+    };
+    let Some(content) = message_obj.get_mut("content") else {
+        return;
+    };
+    let Some(blocks) = content.as_array_mut() else {
+        return;
+    };
+    for block in blocks.iter_mut() {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let matched = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| expected.contains(id));
+        if !matched {
+            *block = unmatched_tool_result_text(block);
+        }
+    }
+}
+
+fn synthetic_tool_results(ids: &[String]) -> Value {
+    serde_json::json!({
+        "role": "user",
+        "content": synthetic_tool_result_blocks(ids),
+    })
+}
+
+fn synthetic_tool_result_blocks(ids: &[String]) -> Vec<Value> {
+    ids.iter()
+        .map(|id| {
+            serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": id,
+                "content": "CCR_TOOL_RESULT_MISSING: the client continuation omitted this tool output",
+                "is_error": true,
+            })
+        })
+        .collect()
+}
+
+fn unmatched_tool_result_text(block: &Value) -> Value {
+    let id = block
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    serde_json::json!({
+        "type": "text",
+        "text": format!("Unmatched tool result {id}: {}", extract_text_content(block.get("content").unwrap_or(&Value::Null))),
+    })
+}
+
+fn is_blank_anthropic_message(message: &serde_json::Map<String, Value>) -> bool {
+    match message.get("content") {
+        Some(Value::Array(blocks)) => blocks.iter().all(|block| {
+            block.as_object().is_some_and(|obj| {
+                obj.get("type").and_then(Value::as_str) == Some("text")
+                    && obj
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.trim().is_empty())
+            })
+        }),
+        Some(Value::String(text)) => text.trim().is_empty(),
+        Some(Value::Null) | None => true,
+        Some(_) => false,
+    }
+}
+
+fn merge_anthropic_message_content(
+    target: &mut Value,
+    additional: &serde_json::Map<String, Value>,
+) {
+    let target_obj = target
+        .as_object_mut()
+        .expect("target message must be an object");
+    let target_content = target_obj
+        .entry("content".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !target_content.is_array() {
+        *target_content = serde_json::json!([target_content.clone()]);
+    }
+
+    let Some(target_blocks) = target_content.as_array_mut() else {
+        return;
+    };
+    match additional.get("content") {
+        Some(Value::Array(blocks)) => target_blocks.extend(blocks.iter().cloned()),
+        Some(Value::String(text)) if !text.is_empty() => target_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": text
+        })),
+        Some(Value::Null) | None => {}
+        Some(other) => target_blocks.push(other.clone()),
+    }
+}
+
 /// Extract plain text from content that may be a string, block array, or object.
 pub(super) fn extract_text_content(content: &Value) -> String {
     match content {

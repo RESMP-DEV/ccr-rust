@@ -36,7 +36,7 @@ The locally tested build reads `~/.codex/ccr.config.toml` for `--profile ccr`:
 
 ```toml
 model_provider = "ccr_local"
-model = "gpt-6-astra"
+model = "zai,glm-5.3-flashx"
 
 [model_providers.ccr_local]
 name = "CCR-Rust local"
@@ -50,10 +50,10 @@ stream_max_retries = 0
 stream_idle_timeout_ms = 180000
 ```
 
-`gpt-6-astra` matches the model behind this workstation's CCR default route.
-Keeping the known native model name lets Codex retain its model metadata;
-CCR selects the backend using its routing config. Use `--model provider,model`
-for another configured route. Custom names may produce missing-metadata warnings.
+The comma-qualified `provider,model` ID selects CCR's worker primary
+explicitly and preserves exact routing provenance. Use `--model provider,model`
+for another configured route; bare aliases depend on the current model catalog
+and may be absent or remapped.
 
 Do not combine this fork's `--ignore-user-config` with a named profile: it skips
 the profile too. If testing without external MCPs, disable only those MCPs

@@ -111,7 +111,10 @@ See [Gemini Integration](gemini-integration.md) for detailed security guidance.
   },
   "PORT": 3456,
   "HOST": "127.0.0.1",
+  "AUTH_PORT": 3459,
+  "AUTH_HOST": "127.0.0.1",
   "API_TIMEOUT_MS": 600000,
+  "CLIENT_API_KEY": "${CCR_CLIENT_API_KEY}",
   "PROXY_URL": "http://proxy.example.com:8080",
   "POOL_MAX_IDLE_PER_HOST": 64,
   "POOL_IDLE_TIMEOUT_MS": 90000,
@@ -133,6 +136,7 @@ Each provider entry configures an upstream API endpoint.
 | `model_pricing` | object | No | - | Model-keyed price overrides using the same rate fields. |
 | `transformer` | object | No | - | Request/response transformation configuration. |
 | `force_reasoning_effort` | string | No | - | Force `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` on every OpenAI-protocol request. |
+| `maxInflight` | number | No | 8 | Initial and maximum per-route in-flight attempts for AIMD admission control. Values must be from 1 through 64. A 429 halves the current route limit; a clean completion grows it by one. |
 
 `force_reasoning_effort` is valid only for the default `openai` provider
 protocol. Configuration validation rejects unsupported values and other
@@ -289,9 +293,9 @@ The `Router` section configures how incoming requests are routed to providers.
 | `modelAliases` | object | No | `{}` | Map exact bare client model IDs to configured `provider,model` routes. Ignored for routing when `ignoreDirect` is true. |
 | `gpRouting` | object | No | disabled | GP-backed request-aware tier reranking. |
 
-For example, `"modelAliases": {"gpt-6-astra": "azure,gpt-6-astra"}`
-preserves an existing client's Astra selection while `default` and `tiers`
-select `zai,glm-5.3` for other unqualified requests. Aliases are exact and do
+For example, `"modelAliases": {"glm-5.3": "zai,glm-5.3"}`
+preserves an existing client's bare model selection while `default` and `tiers`
+govern fallback. Aliases are exact and do
 not chain. Targets must name a configured provider and model. Comma-qualified
 requests are never remapped. The resolved route follows normal direct-routing
 and fallback rules; this is not an account-isolation mechanism.
@@ -301,7 +305,7 @@ An alias value may instead be an object with a `route` plus optional
 
 ```json
 "modelAliases": {
-  "gpt-6-astra": "azure,gpt-6-astra",
+  "glm-5.3": "zai,glm-5.3",
   "claude-glm-5.3": {
     "route": "zai,glm-5.3",
     "display_name": "GLM 5.3 (Z.ai via CCR)",
@@ -431,7 +435,39 @@ right trade for long-lived agent sessions.
 | `enabled` | bool | false | Enable held-request re-cascading. |
 | `maxSweeps` | number | 0 | Additional full-cascade sweeps after the first before giving up. 0 = unlimited. |
 | `sweepCooldownMs` | number | 2000 | Minimum cooldown between sweeps; must be > 0 when enabled (rejected at config load). Stretched to the strongest of: the sweep's Retry-After hints, or the rate-limit tracker's live backoff window for tiers skipped while still cooling down from a 429 (both capped at 60s, the backoff ceiling). The same value becomes the `Retry-After` header on the synthesized 429 when sweeps give up while tiers are still rate-limited. |
-| `maxHoldMs` | number | 0 | Wall-clock cap on holding one request open. 0 = unlimited. Enforced at sweep boundaries; the inter-sweep sleep is clamped to the remaining budget. A sweep already in flight when the deadline passes still completes. |
+| `maxHoldMs` | number | 60000 | Wall-clock cap on holding one request open. 0 is an explicit unlimited opt-in. Enforced at sweep boundaries; the inter-sweep sleep is clamped to the remaining budget. A sweep already in flight when the deadline passes still completes. |
+
+### Retry amplification budget
+
+`Router.retryBudgetPercent` (default 20, range 0..100) bounds global retry
+attempts to a percentage of active client requests, with a floor of three.
+Zero disables retries after each request's first upstream attempt. Rejected
+retries increment `ccr_retry_budget_overflow_total`.
+
+### Conversation stickiness
+
+`Router.stickySessions` is disabled by default while live behavior is
+qualified. When enabled, the successful provider family for a conversation
+key is remembered for `ttlMs` (default 3600000). On later turns CCR performs
+a stable partition: the direct-routing/web-search pinned prefix stays in
+place, remembered-family tiers come next in their configured order, and all
+  other eligible tiers follow in their configured order. Cross-family movement
+  still occurs after the remembered family is exhausted.
+
+### Tail-latency hedging
+
+`Router.hedging` is disabled by default. When enabled,
+`ttftThresholdMs` must be greater than zero. If the primary attempt has not
+produced a usable upstream result before that threshold, CCR launches the next
+eligible tier once and races the two futures. The first usable result wins and
+the loser is cancelled. A hedge consumes retry-budget and admission permits,
+so a saturated fallback or exhausted budget does not amplify traffic.
+
+Metrics:
+
+- `ccr_hedges_launched_total`
+- `ccr_hedge_wins_total{tier}`
+- `ccr_primary_hedge_wins_total{tier}`
 
 ```json
 {
@@ -440,7 +476,7 @@ right trade for long-lived agent sessions.
       "enabled": true,
       "maxSweeps": 0,
       "sweepCooldownMs": 2000,
-      "maxHoldMs": 0
+      "maxHoldMs": 60000
     }
   }
 }
