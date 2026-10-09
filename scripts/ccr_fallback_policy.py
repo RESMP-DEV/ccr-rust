@@ -27,6 +27,11 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     "zai,glm-5.3-flashx",
     "zai,glm-5.3-flash",
     "zai,glm-5.3",
+    # User-approved 2026-10-09 GMI promotion tier. The exact promoted
+    # "Qwen/Qwen3.8-Max" id currently resolves across paid and free backends
+    # and returned 402 without credit; the dated 0902 deployment passed 5/5
+    # live completions with zero balance.
+    "gmi,Qwen/Qwen3.8-Max-0902",
     "deepseek,deepseek-flash",
     # User-approved 2026-10-07 final tier. Do not shorten this id: the alias
     # "MiniMax-M3.1-Flash" is accepted upstream but serves MiniMax-M3.
@@ -40,6 +45,16 @@ MACHINE_CONSUMERS: dict[str, str] = {
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
 }
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
+    "gmi": {
+        "name": "gmi",
+        "api_base_url": "https://api.gmi-serving.com/v1",
+        "api_key": "${CCR_GMI_API_KEY}",
+        "protocol": "openai",
+        # Cloudflare rejects Python-urllib with 403/1010. CCR uses reqwest,
+        # but pin a stable agent so provider identity does not vary.
+        "extra_headers": {"User-Agent": "ccr-rust/1 (+gmi)"},
+        "models": ["Qwen/Qwen3.8-Max-0902"],
+    },
     "deepseek": {
         "name": "deepseek",
         "api_base_url": "https://api.deepseek.com/anthropic/v1",

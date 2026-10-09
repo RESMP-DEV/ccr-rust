@@ -451,3 +451,15 @@ implemented.
   Phase 4 hedging remains optional and unimplemented because it duplicates
   spend on the hedged tail; it must stay out of default behavior until that
   tradeoff is explicitly selected with measured TTFT data.
+- 2026-10-09: Added the user-approved GMI Cloud OpenAI-compatible provider as
+  the shared tier after the three GLM routes and before DeepSeek. The exact
+  `Qwen/Qwen3.8-Max` catalog ID advertises both paid and free records but
+  returned HTTP 402 with zero balance (0/5 live completions), so the active
+  route uses the unambiguous free `Qwen/Qwen3.8-Max-0902` deployment (5/5
+  direct completions). Policy tests passed; GMI credential preflight returned
+  HTTP 200; a detached scratch listener derived from the synchronized worker
+  config passed all four chat/Responses stream matrix cases. All four consumer
+  files were synchronized, but the production listeners were not restarted
+  because `ccr_active_requests` remained 3–5 on main, 1–2 on worker, and 4–5
+  on OCR across a two-minute idle window. The new tier is disk-ready and not
+  yet active in those long-running processes.

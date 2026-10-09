@@ -92,7 +92,8 @@ cannot expand routing by editing `fallback-policy.json`. A route expansion
 requires a reviewed source-policy change, tests and a live credential preflight.
 Derived consumers also remove providers and model aliases whose routes are not
 active, preventing a dormant provider from becoming an accidental future tier.
-The approved main-machine shared chain ends with DeepSeek followed by
+The approved main-machine shared chain places GMI Qwen3.8-Max-0902 after the
+GLM tiers, then ends with DeepSeek followed by
 MiniMax-M3.1-Flash-Preview. The explicit preview model ID is required: the
 shorter `MiniMax-M3.1-Flash` alias was observed upstream returning
 `MiniMax-M3`, so status-code-only validation cannot distinguish it.

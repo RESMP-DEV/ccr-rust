@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added the source-pinned GMI Cloud OpenAI-compatible fallback provider. The
+  active route uses the unambiguous free `Qwen/Qwen3.8-Max-0902` deployment
+  after the GLM tiers and before DeepSeek; the duplicate paid/free base Max ID
+  is deliberately avoided because it returned account-balance 402 responses.
+- Changed the live fallback-policy operator state to include the GMI provider
+  and route. The new tier is synchronized to consumer files and live-qualified
+  through a scratch listener; production activation still requires an idle
+  listener restart.
 - Changed Responses streaming conversion to withhold a trailing run of at least
   two double quotes from an assistant message until the next item is known.
   The quote suffix is discarded when the same response contains a tool call

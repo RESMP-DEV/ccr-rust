@@ -227,6 +227,21 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(minimax["auth_header"], "authorization")
         self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash-Preview"])
 
+    def test_gmi_free_promotion_is_after_glm_and_before_deepseek(self) -> None:
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN[3],
+            "gmi,Qwen/Qwen3.8-Max-0902",
+        )
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN[4],
+            "deepseek,deepseek-flash",
+        )
+        gmi = policy.MACHINE_SHARED_PROVIDERS["gmi"]
+        self.assertEqual(gmi["protocol"], "openai")
+        self.assertEqual(gmi["api_base_url"], "https://api.gmi-serving.com/v1")
+        self.assertIn("Qwen/Qwen3.8-Max-0902", gmi["models"])
+        self.assertIn("User-Agent", gmi["extra_headers"])
+
     def test_governed_consumers_cannot_preserve_an_infinite_hold(self) -> None:
         config = copy.deepcopy(self.config)
         config["Router"]["retrySweeps"] = {
