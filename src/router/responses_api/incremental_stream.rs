@@ -509,6 +509,20 @@ impl ResponsesStreamConverter {
     }
 
     fn emit_message_text_delta(&mut self, text: &str, output: &mut String) {
+        // A quote-only fragment with no preceding message body is standalone
+        // mid-stream content (typically between tool calls), not a trailing
+        // artifact suffix: emit it verbatim.
+        if self.message_text.is_empty() {
+            self.ensure_message_content_part("output_text", output);
+            self.message_text.push_str(text);
+            append_response_delta(
+                output,
+                "response.output_text.delta",
+                text,
+                self.message_identity("output_text"),
+            );
+            return;
+        }
         // A held trailing-quote suffix keeps accumulating while the text still
         // ends in a quote artifact; any following body flushes the suffix first
         // because the quotes proved to be real content.

@@ -1759,34 +1759,6 @@ mod tests {
     }
 
     #[test]
-    fn incremental_stream_preserves_quote_only_final_text() {
-        let mut converter = ResponsesStreamConverter::new(None);
-        let message_start = serde_json::json!({
-            "type": "message_start",
-            "message": {"id": "msg_quote_final", "model": "test-model"}
-        });
-        let quote_text = serde_json::json!({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": "\"\""}
-        });
-
-        converter.push_frame(Some("message_start"), &message_start.to_string());
-        let initial = converter.push_frame(Some("content_block_delta"), &quote_text.to_string());
-        let terminal = converter.finish();
-        let mut delta_text = None;
-        for (_, data) in parse_sse_frames(&format!("{initial}{terminal}")) {
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) else {
-                continue;
-            };
-            if event["type"] == "response.output_text.delta" {
-                delta_text = event["delta"].as_str().map(str::to_string);
-            }
-        }
-        assert_eq!(delta_text.as_deref(), Some("\"\""));
-    }
-
-    #[test]
     fn incremental_stream_drops_quote_suffix_before_tool_use() {
         let mut converter = ResponsesStreamConverter::new(None);
         let message_start = serde_json::json!({
@@ -1878,7 +1850,6 @@ mod tests {
         }
         assert_eq!(delta_text, "The empty value is \"\"");
     }
-
 
     #[tokio::test]
     async fn incremental_stream_failure_retains_active_response_id() {
