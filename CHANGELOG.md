@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed the dependency lock: `async-trait` 0.1.89 → 0.1.92 (pulls in `syn`
+  3.0.6) so the `async_trait` expansion no longer trips the toolchain's
+  `double_must_use` lint under `clippy -D warnings`; the same refresh replaces
+  six deprecated `Atomic::fetch_update` calls with `try_update`, raising the
+  de facto compiler floor to Rust 1.95+.
 - Fixed the source-pinned shared policy script to match the live machine copy
   again after the GMI route change diverged from it. The MiniMax M3/M3.1
   compatibility transformer (`{"use": ["minimax"]}`) and the preflight

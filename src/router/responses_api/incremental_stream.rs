@@ -539,6 +539,19 @@ impl ResponsesStreamConverter {
     }
 
     fn emit_message_text_delta(&mut self, text: &str, output: &mut String) {
+        // Preserved-response replay emits deltas verbatim: the final content
+        // comes from the preserved response, so nothing may be withheld.
+        if self.preserved_response.is_some() {
+            self.ensure_message_content_part("output_text", output);
+            self.message_text.push_str(text);
+            append_response_delta(
+                output,
+                "response.output_text.delta",
+                text,
+                self.message_identity("output_text"),
+            );
+            return;
+        }
         // A sub-threshold trailing quote may be the first half of an artifact
         // split across fragments, so it stays buffered until the next text or
         // tool call resolves it.
