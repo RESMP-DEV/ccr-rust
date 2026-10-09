@@ -34,7 +34,7 @@ impl Drop for ActiveRequest {
         let _ = self
             .budget
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 let active = current >> ACTIVE_COUNT_SHIFT;
                 Some(current & COUNT_MASK | (active.saturating_sub(1) << ACTIVE_COUNT_SHIFT))
             });
@@ -52,7 +52,7 @@ impl Drop for RetryPermit {
         let _ = self
             .budget
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 let retries = current & COUNT_MASK;
                 Some(current & !COUNT_MASK | retries.saturating_sub(1))
             });
@@ -67,7 +67,7 @@ impl RetryBudget {
     pub fn request_started(self: &Arc<Self>) -> ActiveRequest {
         let _ = self
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 let active = current >> ACTIVE_COUNT_SHIFT;
                 Some(current & COUNT_MASK | (active.saturating_add(1) << ACTIVE_COUNT_SHIFT))
             });

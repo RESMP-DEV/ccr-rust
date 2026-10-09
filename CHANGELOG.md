@@ -13,6 +13,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed the dependency lock: `async-trait` 0.1.89 → 0.1.92 (pulls in `syn`
+  3.0.6) so the `async_trait` expansion no longer trips the toolchain's
+  `double_must_use` lint under `clippy -D warnings`; the same refresh replaces
+  six deprecated `Atomic::fetch_update` calls with `try_update`, raising the
+  de facto compiler floor to Rust 1.95+.
+- Fixed the source-pinned shared policy script to match the live machine copy
+  again after the GMI route change diverged from it. The MiniMax M3/M3.1
+  compatibility transformer (`{"use": ["minimax"]}`) and the preflight
+  probe-header merge (provider `extra_headers` ride on every probe with the
+  credential instead of becoming standalone unauthenticated attempts) were
+  applied to the installed policy script on 2026-10-08 without being committed;
+  the 2026-10-09 GMI commit then resynchronized consumers from the repo copy,
+  silently dropping the transformer and leaving the installed approval
+  template rejecting the GMI route chain, which crash-looped every governed
+  listener at restart. Both fixes are back in source with tests, the merged
+  script is reinstalled, and consumers are resynchronized.
+- Added the source-pinned GMI Cloud OpenAI-compatible fallback provider. The
+  active route uses the unambiguous free `Qwen/Qwen3.8-Max-0902` deployment
+  after the GLM tiers and before DeepSeek; the duplicate paid/free base Max ID
+  is deliberately avoided because it returned account-balance 402 responses.
+- Changed the live fallback-policy operator state to include the GMI provider
+  and route. The new tier is synchronized to consumer files and live-qualified
+  through a scratch listener; production activation still requires an idle
+  listener restart.
+- Changed Responses streaming conversion to also hold a trailing run of at
+  least two double quotes at the end of assistant text until the turn's next
+  item is known, complementing the quote-only prefix hold. The quote suffix is
+  discarded when the same response contains a tool call (the provider prelude
+  corruption observed from MiniMax) and emitted unchanged when text completes
+  without a tool call.
 - Added an operator-oriented MiniMax guide. It separates standalone provider
   setup, custom provider names, and the governed fallback-policy runbook; makes
   the exact preview model ID and explicit `minimax` transformer entry

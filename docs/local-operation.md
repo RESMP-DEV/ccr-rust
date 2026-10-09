@@ -34,7 +34,8 @@ The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
 Ordinary Claude and Codex sessions use Z.AI GLM routes through the shared
 fallback policy. Worker sessions start at GLM-5.3-FlashX and, after explicit
-qualification, can fall through DeepSeek to MiniMax-M3.1-Flash-Preview.
+qualification, can fall through GMI Qwen3.8-Max-0902, DeepSeek, and
+MiniMax-M3.1-Flash-Preview.
 Inspect the active config and live route counters before claiming which
 backend served a request.
 
