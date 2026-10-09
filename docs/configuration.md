@@ -451,8 +451,23 @@ qualified. When enabled, the successful provider family for a conversation
 key is remembered for `ttlMs` (default 3600000). On later turns CCR performs
 a stable partition: the direct-routing/web-search pinned prefix stays in
 place, remembered-family tiers come next in their configured order, and all
-other eligible tiers follow in their configured order. Cross-family movement
-still occurs after the remembered family is exhausted.
+  other eligible tiers follow in their configured order. Cross-family movement
+  still occurs after the remembered family is exhausted.
+
+### Tail-latency hedging
+
+`Router.hedging` is disabled by default. When enabled,
+`ttftThresholdMs` must be greater than zero. If the primary attempt has not
+produced a usable upstream result before that threshold, CCR launches the next
+eligible tier once and races the two futures. The first usable result wins and
+the loser is cancelled. A hedge consumes retry-budget and admission permits,
+so a saturated fallback or exhausted budget does not amplify traffic.
+
+Metrics:
+
+- `ccr_hedges_launched_total`
+- `ccr_hedge_wins_total{tier}`
+- `ccr_primary_hedge_wins_total{tier}`
 
 ```json
 {

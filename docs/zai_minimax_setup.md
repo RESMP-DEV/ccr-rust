@@ -107,10 +107,12 @@ normal client defaults and the managed service were not changed by the tests.
 
 ## MiniMax
 
-Use a key and model available to the intended MiniMax plan. A subscription key
-and a pay-as-you-go key need not spend the same quota even when the endpoint
-is the same. The official Anthropic-compatible base for CCR is
-`https://api.minimax.io/anthropic/v1`:
+Use the dedicated [MiniMax setup and operations](minimax.md) guide. It covers
+the exact preview model ID, mandatory transformer entry, custom provider
+names, malformed-output behavior, standalone validation, and the governed
+fallback-policy runbook.
+
+The short version is:
 
 ```json
 {
@@ -118,17 +120,11 @@ is the same. The official Anthropic-compatible base for CCR is
   "api_base_url": "https://api.minimax.io/anthropic/v1",
   "api_key": "${MINIMAX_API_KEY}",
   "protocol": "anthropic",
-  "models": ["MiniMax-M3"]
+  "auth_header": "authorization",
+  "models": ["MiniMax-M3.1-Flash-Preview"],
+  "transformer": {"use": ["minimax"]}
 }
 ```
-
-This is a provider fragment; add a matching `Router.default`/`Router.tiers`
-entry such as `minimax,MiniMax-M3` to a complete config. Native Anthropic content
-blocks do not need a format-conversion transformer solely because of the name.
-
-MiniMax's current reference lists M3 and M2.x models with different context,
-multimodal, and thinking behavior. Check that reference for the chosen model;
-do not copy one model's settings to another.
 
 ### Live verification (2026-09-23, coding-plan key)
 

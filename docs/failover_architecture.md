@@ -1,7 +1,7 @@
 # Failover Architecture — Design and Execution Plan
 
-Status: Phases 0 through 3 implemented and locally verified on 2026-10-07;
-Phase 4 hedging remains intentionally unimplemented and disabled. All
+Status: Phases 0 through 4 implemented and locally verified on 2026-10-07.
+Phases 3 and 4 are disabled by default pending production qualification. All
 `file:line` references in the original design were checked against the
 pre-implementation tree and may drift as the repository changes; the tests
 and contracts below are authoritative.
@@ -17,7 +17,7 @@ incident-driven fixes of 2026-10-07.
 | 1. AIMD admission | Implemented | `src/admission.rs` and two-upstream integration test |
 | 2. Bounded amplification | Implemented | `src/retry_budget.rs`, retry-sweep/failover tests |
 | 3. Conversation stickiness | Implemented, disabled by default | `src/stickiness.rs` and conversation integration test |
-| 4. Hedging | Not implemented; intentionally deferred | Requires measured TTFT and explicit spend authorization |
+| 4. Hedging | Implemented, disabled by default | `test_failover_controls.rs` and hedge Prometheus counters |
 
 ## How to execute this document
 
@@ -337,13 +337,15 @@ enabled shows conversations staying on-family through intermittent primary
 
 ### Phase 4 — hedging (optional, last)
 
-If enabled (`Router.hedging {enabled: false, ttftThresholdMs}`), duplicate
-a request to the next eligible tier when no first token has arrived after
-`ttftThresholdMs` (or that tier's p95 TTFT); first token wins, the loser is
-cancelled. Hedges draw from the retry budget; disabled by default because
-it doubles token spend on the hedged tail. Requires the pre-first-token
-peek path (dispatch.rs:147-238). Implement only after phases 0-2 are
-verified in production traffic.
+When enabled (`Router.hedging {enabled: false, ttftThresholdMs}`), CCR
+launches the next eligible tier when the primary attempt has not produced a
+usable result after `ttftThresholdMs`; the first usable result wins and the
+loser is cancelled. Hedges draw from both the global retry budget and the
+fallback tier's admission permits. Hedging remains disabled by default so
+production TTFT and spend behavior can be reviewed before activation. For
+streaming providers the existing pre-first-token peek bounds the primary;
+for non-streaming providers the usable completed response is the race
+boundary.
 
 ## Configuration surface summary
 
@@ -448,9 +450,25 @@ implemented.
   retry budgets, bounded default hold, EWMA clamps, hold-wait telemetry, and
   optional conversation-provider stickiness are implemented. Full
   `cargo test --all-features --locked`, strict Clippy, and formatting passed.
-  Phase 4 hedging remains optional and unimplemented because it duplicates
-  spend on the hedged tail; it must stay out of default behavior until that
-  tradeoff is explicitly selected with measured TTFT data.
+  Follow-up in the same review round: Phase 4 hedging is implemented but
+  disabled by default. It draws from the retry budget and fallback admission
+  permits, cancels the loser, and exposes launch/win counters. The operator
+  explicitly accepted hedged duplicate spend for these quota-backed tiers;
+  default-off remains conservative until production TTFT is measured.
+- 2026-10-08: Repaired MiniMax M3/M3.1 routing and malformed-output replay on
+  branch `work/minimax-m3-compat`, from clean `origin/main` revision `c3bf76c`.
+  The `minimax` transformer now recognizes every `MiniMax-M3.*` ID, emits
+  native Anthropic adaptive thinking without the OpenAI-only
+  `reasoning_split`, and cleans quote-only or MiniMax-control-marker text from
+  assistant history, complete Anthropic responses, and text streaming deltas
+  while preserving `tool_use` and tool-result pairing. User content remains
+  untouched. Router dispatch canonicalizes MiniMax M3-family requests to the
+  contractual `MiniMax-M3.1-Flash-Preview` ID before chain construction and
+  protocol overwrite, without changing the source-pinned fallback policy.
+  Evidence: 25 focused `minimax` tests, strict Clippy, and the full locked
+  all-features suite all passed. Non-claims: mocked tests do not prove the
+  live MiniMax endpoint is artifact-free, no billable provider request was
+  made, and no listener was restarted or installed.
 - 2026-10-09: Added the user-approved GMI Cloud OpenAI-compatible provider as
   the shared tier after the three GLM routes and before DeepSeek. The exact
   `Qwen/Qwen3.8-Max` catalog ID advertises both paid and free records but
@@ -462,4 +480,8 @@ implemented.
   files were synchronized, but the production listeners were not restarted
   because `ccr_active_requests` remained 3–5 on main, 1–2 on worker, and 4–5
   on OCR across a two-minute idle window. The new tier is disk-ready and not
-  yet active in those long-running processes.
+  yet active in those long-running processes. Follow-up the same day: the
+  source-policy script had diverged from the installed launcher module (the
+  MiniMax transformer and preflight probe-header merge were live-only), which
+  crash-looped every governed listener at restart; reconciled in source with
+  tests, reinstalled, and resynchronized (see CHANGELOG).

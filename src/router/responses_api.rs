@@ -1505,6 +1505,260 @@ mod tests {
     }
 
     #[test]
+    fn incremental_stream_holds_leading_whitespace_before_quote_preamble() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_quote_leading_space", "model": "test-model"}
+        });
+        let leading_space = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": " "}
+        });
+        let quote_preamble = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        let tool_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_leading_space",
+                "name": "probe",
+                "input": {}
+            }
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let space = converter.push_frame(Some("content_block_delta"), &leading_space.to_string());
+        let preamble =
+            converter.push_frame(Some("content_block_delta"), &quote_preamble.to_string());
+        let tool = converter.push_frame(Some("content_block_start"), &tool_start.to_string());
+        let terminal = converter.finish();
+        let event_types = parse_sse_frames(&format!("{space}{preamble}{tool}{terminal}"))
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .filter_map(|event| event["type"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(!event_types.contains(&"response.output_text.delta".to_string()));
+        assert!(!event_types.contains(&"response.output_text.done".to_string()));
+    }
+
+    #[test]
+    fn incremental_stream_drops_quote_preamble_after_reasoning_before_tool_use() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_reasoning_quote_tool", "model": "test-model"}
+        });
+        let reasoning = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "select the tool"}
+        });
+        let quote_preamble = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        let tool_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_reasoning_quote",
+                "name": "probe",
+                "input": {}
+            }
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let reasoning_events =
+            converter.push_frame(Some("content_block_delta"), &reasoning.to_string());
+        let preamble_events =
+            converter.push_frame(Some("content_block_delta"), &quote_preamble.to_string());
+        let tool_events =
+            converter.push_frame(Some("content_block_start"), &tool_start.to_string());
+        let terminal = converter.finish();
+        let combined = format!("{reasoning_events}{preamble_events}{tool_events}{terminal}");
+        let event_types = parse_sse_frames(&combined)
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .filter_map(|event| event["type"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+
+        assert!(event_types.contains(&"response.reasoning_text.delta".to_string()));
+        assert!(!event_types.contains(&"response.output_text.delta".to_string()));
+        assert!(!event_types.contains(&"response.output_text.done".to_string()));
+        assert!(combined.contains("\"name\":\"probe\""));
+    }
+
+    #[test]
+    fn incremental_stream_holds_split_quote_prefix_until_nonquote_text() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_quote_split", "model": "test-model"}
+        });
+        let first_quote = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\""}
+        });
+        let whitespace = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": " "}
+        });
+        let second_quote = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\""}
+        });
+        let tool_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_split_quote",
+                "name": "probe",
+                "input": {}
+            }
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let first = converter.push_frame(Some("content_block_delta"), &first_quote.to_string());
+        let space = converter.push_frame(Some("content_block_delta"), &whitespace.to_string());
+        let second = converter.push_frame(Some("content_block_delta"), &second_quote.to_string());
+        let tool = converter.push_frame(Some("content_block_start"), &tool_start.to_string());
+        let terminal = converter.finish();
+        let event_types = parse_sse_frames(&format!("{first}{space}{second}{tool}{terminal}"))
+            .into_iter()
+            .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .filter_map(|event| event["type"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(!event_types.contains(&"response.output_text.delta".to_string()));
+        assert!(!event_types.contains(&"response.output_text.done".to_string()));
+    }
+
+    #[test]
+    fn incremental_stream_preserves_quote_prefix_across_non_tool_block_start() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_quote_block", "model": "test-model"}
+        });
+        let quote_preamble = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        let text_block_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""}
+        });
+        let continuation = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "hello"}
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let preamble_events =
+            converter.push_frame(Some("content_block_delta"), &quote_preamble.to_string());
+        let block_events =
+            converter.push_frame(Some("content_block_start"), &text_block_start.to_string());
+        let continuation_events =
+            converter.push_frame(Some("content_block_delta"), &continuation.to_string());
+        let terminal = converter.finish();
+
+        assert!(preamble_events.is_empty());
+        let delta_text = parse_sse_frames(&format!(
+            "{preamble_events}{block_events}{continuation_events}{terminal}"
+        ))
+        .into_iter()
+        .filter_map(|(_, data)| serde_json::from_str::<serde_json::Value>(&data).ok())
+        .find(|event| event["type"] == "response.output_text.delta")
+        .and_then(|event| event["delta"].as_str().map(str::to_string));
+        assert_eq!(delta_text.as_deref(), Some("\"\"hello"));
+    }
+
+    #[test]
+    fn incremental_stream_does_not_suppress_post_tool_quote_text() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_post_tool_quote", "model": "test-model"}
+        });
+        let first_tool = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_before_quote",
+                "name": "probe",
+                "input": {}
+            }
+        });
+        let quote_text = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+        let second_tool = serde_json::json!({
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_after_quote",
+                "name": "probe",
+                "input": {}
+            }
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let first = converter.push_frame(Some("content_block_start"), &first_tool.to_string());
+        let quote = converter.push_frame(Some("content_block_delta"), &quote_text.to_string());
+        let second = converter.push_frame(Some("content_block_start"), &second_tool.to_string());
+        let terminal = converter.finish();
+        let combined = format!("{first}{quote}{second}{terminal}");
+        assert!(combined.contains("response.output_text.delta"));
+        assert!(combined.contains("response.output_text.done"));
+    }
+
+    #[test]
+    fn incremental_stream_preserves_quote_only_final_text() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_quote_final", "model": "test-model"}
+        });
+        let quote_text = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "\"\""}
+        });
+
+        converter.push_frame(Some("message_start"), &message_start.to_string());
+        let initial = converter.push_frame(Some("content_block_delta"), &quote_text.to_string());
+        let terminal = converter.finish();
+        let mut delta_text = None;
+        for (_, data) in parse_sse_frames(&format!("{initial}{terminal}")) {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
+            if event["type"] == "response.output_text.delta" {
+                delta_text = event["delta"].as_str().map(str::to_string);
+            }
+        }
+        assert_eq!(delta_text.as_deref(), Some("\"\""));
+    }
+
+    #[test]
     fn incremental_stream_preserves_quote_only_final_text() {
         let mut converter = ResponsesStreamConverter::new(None);
         let message_start = serde_json::json!({
@@ -1624,6 +1878,7 @@ mod tests {
         }
         assert_eq!(delta_text, "The empty value is \"\"");
     }
+
 
     #[tokio::test]
     async fn incremental_stream_failure_retains_active_response_id() {

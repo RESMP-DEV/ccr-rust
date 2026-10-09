@@ -173,6 +173,26 @@ lazy_static! {
     )
     .unwrap();
 
+    static ref HEDGES_LAUNCHED: Counter = register_counter!(
+        "ccr_hedges_launched_total",
+        "Fallback attempts launched because the primary crossed its hedge threshold"
+    )
+    .unwrap();
+
+    static ref HEDGE_WINS: CounterVec = register_counter_vec!(
+        "ccr_hedge_wins_total",
+        "Hedged fallback attempts that won the race",
+        &["tier"]
+    )
+    .unwrap();
+
+    static ref PRIMARY_HEDGE_WINS: CounterVec = register_counter_vec!(
+        "ccr_primary_hedge_wins_total",
+        "Primary attempts that won after a fallback hedge was launched",
+        &["tier"]
+    )
+    .unwrap();
+
     static ref HOLD_WAIT_SECONDS: HistogramVec = register_histogram_vec!(
         "ccr_hold_wait_seconds",
         "Wall-clock time exhausted requests were held before terminal response",
@@ -270,6 +290,9 @@ const METRIC_TIER_INFLIGHT: &str = "ccr_tier_inflight";
 const METRIC_TIER_LIMIT: &str = "ccr_tier_limit";
 const METRIC_ADMISSION_DEFERS_TOTAL: &str = "ccr_admission_defers_total";
 const METRIC_RETRY_BUDGET_OVERFLOW_TOTAL: &str = "ccr_retry_budget_overflow_total";
+const METRIC_HEDGES_LAUNCHED_TOTAL: &str = "ccr_hedges_launched_total";
+const METRIC_HEDGE_WINS_TOTAL: &str = "ccr_hedge_wins_total";
+const METRIC_PRIMARY_HEDGE_WINS_TOTAL: &str = "ccr_primary_hedge_wins_total";
 const METRIC_HOLD_WAIT_SECONDS: &str = "ccr_hold_wait_seconds";
 const METRIC_TIER_EWMA_LATENCY_SECONDS: &str = "ccr_tier_ewma_latency_seconds";
 const METRIC_TOKEN_DRIFT_ABSOLUTE: &str = "ccr_token_drift_absolute";
@@ -465,6 +488,21 @@ pub fn record_admission_defer(tier: &str) {
 pub fn record_retry_budget_overflow() {
     RETRY_BUDGET_OVERFLOW.inc();
     persist_counter_inc(METRIC_RETRY_BUDGET_OVERFLOW_TOTAL, &[], 1.0);
+}
+
+pub fn record_hedge_launched() {
+    HEDGES_LAUNCHED.inc();
+    persist_counter_inc(METRIC_HEDGES_LAUNCHED_TOTAL, &[], 1.0);
+}
+
+pub fn record_hedge_win(tier: &str) {
+    HEDGE_WINS.with_label_values(&[tier]).inc();
+    persist_counter_inc(METRIC_HEDGE_WINS_TOTAL, &[("tier", tier)], 1.0);
+}
+
+pub fn record_primary_hedge_win(tier: &str) {
+    PRIMARY_HEDGE_WINS.with_label_values(&[tier]).inc();
+    persist_counter_inc(METRIC_PRIMARY_HEDGE_WINS_TOTAL, &[("tier", tier)], 1.0);
 }
 
 pub fn record_hold_wait(seconds: f64) {

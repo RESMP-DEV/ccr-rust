@@ -21,7 +21,8 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 
 ## Client Integrations
 
-- [Z.AI and MiniMax Setup](zai_minimax_setup.md) — coding-plan endpoints, GLM-5.3, and protocol choices
+- [Z.AI Setup](zai_minimax_setup.md) — coding-plan endpoints, GLM-5.3, and protocol choices
+- [MiniMax Setup and Operations](minimax.md) — exact M3.1 model ID, mandatory transformer, custom provider names, validation, and fallback-policy runbook
 - [Claude Code](claude_code_setup.md) — opt-in routing, provider credentials, and tool verification
 - [Codex](codex_setup.md) — Codex CLI routing
 - [OpenAI SDK](openai_sdk_setup.md) — Python/JavaScript OpenAI client setup

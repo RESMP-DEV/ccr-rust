@@ -63,7 +63,7 @@ ingress:
 ```
 
 After `cloudflared tunnel route dns m4-ccr-api ccr-rust.example.com`, verify all
-three failure paths before sharing the hostname:
+three cases before sharing the hostname:
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' https://ccr-rust.example.com/v1/models

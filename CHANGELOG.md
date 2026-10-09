@@ -21,9 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied to the installed policy script on 2026-10-08 without being committed;
   the 2026-10-09 GMI commit then resynchronized consumers from the repo copy,
   silently dropping the transformer and leaving the installed approval
-  template rejecting the GMI route chain. Both fixes are back in source with
-  tests, the merged script is reinstalled, and consumers are resynchronized.
-
+  template rejecting the GMI route chain, which crash-looped every governed
+  listener at restart. Both fixes are back in source with tests, the merged
+  script is reinstalled, and consumers are resynchronized.
 - Added the source-pinned GMI Cloud OpenAI-compatible fallback provider. The
   active route uses the unambiguous free `Qwen/Qwen3.8-Max-0902` deployment
   after the GLM tiers and before DeepSeek; the duplicate paid/free base Max ID
@@ -32,11 +32,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and route. The new tier is synchronized to consumer files and live-qualified
   through a scratch listener; production activation still requires an idle
   listener restart.
-- Changed Responses streaming conversion to withhold a trailing run of at least
-  two double quotes from an assistant message until the next item is known.
-  The quote suffix is discarded when the same response contains a tool call
-  (the provider prelude corruption observed from MiniMax) and preserved when
-  text completes without a tool call.
+- Changed Responses streaming conversion to also hold a trailing run of at
+  least two double quotes at the end of assistant text until the turn's next
+  item is known, complementing the quote-only prefix hold. The quote suffix is
+  discarded when the same response contains a tool call (the provider prelude
+  corruption observed from MiniMax) and emitted unchanged when text completes
+  without a tool call.
+- Added an operator-oriented MiniMax guide. It separates standalone provider
+  setup, custom provider names, and the governed fallback-policy runbook; makes
+  the exact preview model ID and explicit `minimax` transformer entry
+  unavoidable; explains validation and idle restarts; and documents that
+  service launchers import an installed copy of `ccr_fallback_policy.py`, not
+  the Git worktree.
+- Fixed MiniMax M3/M3.1 handling in the `minimax` transformer. Any model ID
+  matching the M3 family (exact `MiniMax-M3`/`minimax-m3`, or any
+  `MiniMax-M3.*` variant including `MiniMax-M3.1-Flash-Preview`) now takes the
+  native Anthropic reasoning path: CCR injects `thinking: {type: "adaptive"}`
+  and no longer adds the OpenAI-only `reasoning_split: true` that the
+  unknown-model branch used to inject for M3.1.
+- Changed MiniMax M3-family dispatch to canonicalize the requested model to
+  `MiniMax-M3.1-Flash-Preview` before the transformer chain is built, because
+  the protocol dispatch path overwrites the transformer's model field after
+  transformation. Only MiniMax providers are affected; other providers
+  and M2.x models are untouched. This pins the exact preview ID that upstream
+  alias probing proved serves the requested model, instead of the ambiguous
+  `MiniMax-M3.1-Flash` alias that silently serves `MiniMax-M3`.
+- Added MiniMax malformed-output sanitization. Assistant history is cleaned
+  before replay: text blocks that are quote-only or contain MiniMax transport
+  control markers such as the provider's tool-call/invoke markers or an
+  embedded NUL are removed
+  while `tool_use` blocks and their tool-result pairing are preserved, and
+  text-only malformed assistant turns are replaced with a visible
+  `[MALFORMED_MINIMAX_OUTPUT_REMOVED]` placeholder. User content is never
+  rewritten, so pasted examples survive. Complete Anthropic responses and
+  `content_block_delta` streaming frames are cleaned by the same rules, and
+  trailing double-quote artifacts at the end of otherwise valid text are
+  stripped. Regression coverage reproduces quote-only text, marker text, the
+  `MiniMax-M3.1-Flash` alias, and interleaved-whitespace quote suffixes.
+  Validation: `cargo fmt`, `cargo test --lib --all-features --locked minimax`
+  (25 passed), `cargo clippy --all-targets --all-features --locked -- -D
+  warnings`, and `cargo test --all-features --locked` pass on branch
+  `work/minimax-m3-compat`. Non-claims: unit and mocked integration coverage
+  do not prove the live MiniMax endpoint is free of malformed output, and no
+  billable provider call was made to verify this change.
+- Fixed MiniMax M3 compatibility defects found in pull request #49 review. The
+  MiniMax transformer was registered but never enabled, so adaptive thinking
+  and malformed-output sanitization never ran in production; the shared
+  fallback policy now pins `transformer: {use: [minimax]}` for the MiniMax
+  provider and all four governed consumers carry it. Model-keyed configuration
+  is now resolved against the requested route model instead of the canonical
+  preview ID, so alias routes keep their per-model transformer overrides, and
+  pricing falls back to the canonical ID. Malformed detection now matches the
+  observed transport shapes (an embedded NUL, the provider delimiter, and
+  tool tags carrying MiniMax's zero-width marker) so a legitimate answer that
+  documents `<invoke name="write">` is no longer discarded. Streaming deltas
+  keep ordinary whitespace and punctuation, since a quote-only fragment is
+  legitimate mid-stream content; only confirmed transport corruption is
+  cleared. The malformed-text placeholder is inserted when no visible text
+  remains and no `tool_use` survives, so it can no longer displace a tool call
+  or leak `thinking` content as visible text. Canonicalization also matches a
+  MiniMax provider by name substring or MiniMax API host, so multi-credential
+  setups such as the shipped `minimax-anthropic` example are pinned too instead
+  of forwarding an ambiguous alias upstream. Dispatch canonicalization and pricing
+  resolution now share one `is_minimax_provider_name` predicate so they cannot
+  disagree about which providers are MiniMax.
+- Changed shared fallback policy operation on the main workstation: the route
+  order, registered listener files, consumer primaries, and shared provider
+  definitions are pinned in source, so editing the derived JSON policy cannot
+  expand routing. Before changing or restarting a shared route, operators run
+  `ccr-fallback-policy preflight --json`; unresolved credentials, transport
+  failures, and non-2xx/3xx authorization responses block the operation.
 - Changed 429 backoff marking so a rate-limit response without a server
   `Retry-After` only paces the tier for one second instead of escalating
   exponentially into a 60-second cross-request skip. Server-directed
@@ -60,11 +125,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed the enabled retry-sweep hold default from unlimited to 60 seconds;
   `maxHoldMs: 0` remains an explicit unlimited opt-in. EWMA success durations
   and failure penalties are clamped to the effective upstream timeout, and
-  held-request time is now reported by `ccr_hold_wait_seconds`.
+  held-request time is now reported by `ccr_hold_wait_seconds`. Negative
+  success duration bounds are ignored in favor of the measured elapsed time
+  so a malformed limit cannot synthesize a zero-latency sample.
 - Added optional conversation-provider stickiness under
   `Router.stickySessions`. It is disabled by default, honors the pinned route
   prefix, preserves configured order within each family, and only reorders
   the fallback portion when a remembered provider family is available.
+  Integration coverage now pins this reorder: a remembered alpha conversation
+  stays on alpha over a beta-first configured chain via an unpinned request.
+  In the absence of conversation metadata, the hashed fallback key combines
+  the system prompt with the complete first user message, and overflow evicts
+  oldest entries in a loop so the local map shrinks back to its 10,000-entry
+  cap.
+- Added optional tail-latency hedging under `Router.hedging`. When enabled, a
+  primary attempt that exceeds `ttftThresholdMs` races one next-tier attempt;
+  the first usable result wins and the loser is cancelled. Hedges draw from
+  the global retry budget and fallback admission permits. Hedging is disabled
+  by default and exposes launch, hedge-win, and primary-win counters.
+  Review fix: only a successful result wins the hedge race. When the first
+  attempt completes with a transport or deterministic failure, the router now
+  awaits the competing attempt before reporting, so a fast failed hedge can no
+  longer cancel a healthy in-flight primary (or the reverse).
+- Changed retry-budget exhaustion to stop the cascade without overriding the
+  sweep's failure mix: a sweep that exhausted the budget while only seeing
+  rate limits now surfaces the synthesized 429 (with `Retry-After`) instead of
+  a terminal 503. Budget exhaustion no longer counts as a tier failure.
 - Changed client-key activation to a dedicated `AUTH_HOST`/`AUTH_PORT` listener.
   The existing `HOST`/`PORT` listener remains unauthenticated for local
   clients, while Cloudflare or another reverse proxy targets only the separate
@@ -95,6 +181,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unmatched or duplicate result is retained as labeled text, and the next user turn
   remains protocol-valid. This is applied only after malformed continuation shape is
   detected, so complete tool histories pass through unchanged.
+- Review hardening preserves pairing when OpenAI tool arguments are truncated or
+  invalid by carrying the raw arguments in a typed marker, deduplicates repeated
+  tool IDs, drops blank assistant fragments, moves tool results ahead of text,
+  and moves continuation repair inputs instead of deep-cloning whole histories.
 - Added an optional shared fallback-policy helper for multiple local listeners.
   One policy derives registered configurations while retaining their primary
   routes, protocol settings and retry hold limits. Service launchers and worker
@@ -111,7 +201,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `serve` resolves the binary via `CCR_TEST_BINARY`/`CARGO_HOME`/PATH, reads
   the consumer file once, preflights the credentials file before rewriting
   anything, and injects runtime credentials only for registered consumers, and
-  `restart_required` is documented as empty under `check` because no files were
+  preflight credential probes attach provider `extra_headers` alongside the
+  auth header on every probe request (extra values override the auth header on
+  a key collision, matching CCR dispatch) instead of sending each extra header
+  as a standalone unauthenticated request, and `restart_required` is
+  documented as empty under `check` because no files were
   rewritten. Follow-up review fixes: duplicate provider names in a consumer or
   the shared provider list are rejected instead of silently keeping the last
   entry, consumer names containing glob metacharacters are rejected so the

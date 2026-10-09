@@ -39,6 +39,10 @@ MiniMax-M3.1-Flash-Preview.
 Inspect the active config and live route counters before claiming which
 backend served a request.
 
+For MiniMax, follow [MiniMax setup and operations](minimax.md). Its transformer
+must be explicitly configured, source-policy changes must also update the
+installed launcher module, and busy listeners must wait for an idle restart.
+
 | Local file | Responsibility |
 | --- | --- |
 | `~/.claude-code-router/config.json` | Providers and routing; `${ENV_VAR}` credential placeholders |

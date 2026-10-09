@@ -370,7 +370,23 @@ fn default_honor_ratelimit_headers() -> bool {
 impl Provider {
     /// Resolve model-specific pricing, falling back to the provider default.
     pub fn pricing_for_model(&self, model: &str) -> Option<&ModelPricing> {
-        self.model_pricing.get(model).or(self.pricing.as_ref())
+        self.model_pricing
+            .get(model)
+            .or_else(|| self.model_pricing.get(self.canonical_model_alias(model)))
+            .or(self.pricing.as_ref())
+    }
+
+    /// Resolve a provider-neutral model alias to the model ID this provider
+    /// actually serves, so pricing keyed by the canonical ID still applies when
+    /// a route names an alias such as `MiniMax-M3`.
+    fn canonical_model_alias<'a>(&self, model: &'a str) -> &'a str {
+        if crate::transform::minimax::is_minimax_provider_name(&self.name, &self.api_base_url)
+            && crate::transform::minimax::is_m3_model(model)
+        {
+            crate::transform::minimax::MINIMAX_M3_1_FLASH_PREVIEW
+        } else {
+            model
+        }
     }
 
     /// Get the provider-level transformer chain, or an empty slice if none.
@@ -631,6 +647,10 @@ pub struct RouterConfig {
     #[serde(rename = "stickySessions")]
     pub sticky_sessions: StickySessionsConfig,
 
+    /// Optional tail-latency hedging. Disabled by default.
+    #[serde(default)]
+    pub hedging: HedgingConfig,
+
     /// Named presets that override model parameters and routing.
     #[serde(default)]
     #[serde(rename = "presets")]
@@ -785,6 +805,33 @@ impl Default for StickySessionsConfig {
 
 fn default_sticky_ttl_ms() -> u64 {
     3_600_000
+}
+
+/// Tail-latency hedging configuration.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct HedgingConfig {
+    /// Launch one fallback attempt when the primary has not produced a usable
+    /// first result before `ttft_threshold_ms`. Disabled by default.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Hedge threshold in milliseconds. Must be greater than zero when enabled.
+    #[serde(default = "default_hedge_threshold_ms")]
+    #[serde(rename = "ttftThresholdMs")]
+    pub ttft_threshold_ms: u64,
+}
+
+impl Default for HedgingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ttft_threshold_ms: default_hedge_threshold_ms(),
+        }
+    }
+}
+
+fn default_hedge_threshold_ms() -> u64 {
+    10_000
 }
 
 impl Default for RetryBudgetConfig {

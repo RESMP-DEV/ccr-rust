@@ -11,9 +11,21 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::router::AnthropicRequest;
+
+/// Hard bound on locally retained conversation preferences.
+const MAX_ENTRIES: usize = 10_000;
+
+/// Hash payload for the conversation fallback key. Derived from request
+/// content that already exists; no unavailable identity is assumed.
+#[derive(Serialize)]
+struct ConversationKeyInput<'a> {
+    system: &'a serde_json::Value,
+    first_user_message: &'a crate::router::Message,
+}
 
 #[derive(Debug, Clone)]
 struct Entry {
@@ -44,13 +56,23 @@ impl StickySessionTracker {
 
     /// Extract a stable conversation key. No key means keep today's routing.
     pub fn conversation_key(request: &AnthropicRequest) -> Option<String> {
-        // The normalized Anthropic request currently has no metadata field.
-        // Use the leading system prompt as the stable fallback; hash it so
-        // private prompt text never becomes a cache key in logs or metrics.
+        // The normalized Anthropic request has no conversation-id metadata.
+        // Combine the system prompt with the complete first user message so
+        // unrelated conversations sharing a common system prompt do not
+        // collide. Hash the payload so private prompt text never becomes a
+        // cache key in logs or metrics.
         let system = request.system.as_ref()?;
-        let serialized = serde_json::to_string(system).ok()?;
-        let digest = Sha256::digest(serialized.as_bytes());
-        Some(format!("system:{digest:x}"))
+        let first_user_message = request
+            .messages
+            .iter()
+            .find(|message| message.role == "user")?;
+        let key_input = ConversationKeyInput {
+            system,
+            first_user_message,
+        };
+        let serialized = serde_json::to_vec(&key_input).ok()?;
+        let digest = Sha256::digest(&serialized);
+        Some(format!("conversation:{digest:x}"))
     }
 
     pub fn remember(&self, key: &str, provider: &str) {
@@ -60,18 +82,19 @@ impl StickySessionTracker {
         let mut entries = self.entries.lock();
         // Bound the local map defensively; conversations are not unbounded
         // state and stale entries are harmless to evict.
-        if entries.len() >= 10_000 {
+        if entries.len() >= MAX_ENTRIES {
             let now = Instant::now();
             entries.retain(|_, entry| entry.expires_at > now);
         }
-        if entries.len() >= 10_000 {
-            if let Some(oldest) = entries
+        while entries.len() >= MAX_ENTRIES {
+            let oldest = entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.expires_at)
-                .map(|(key, _)| key.clone())
-            {
-                entries.remove(&oldest);
-            }
+                .map(|(key, _)| key.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            entries.remove(&oldest);
         }
         entries.insert(
             key.to_string(),
@@ -129,6 +152,15 @@ mod tests {
         .unwrap()
     }
 
+    fn request_with_system_and_user(system: &str, user: &str) -> AnthropicRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "p,m",
+            "messages": [{"role":"user","content":user}],
+            "system": system
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn system_prompt_keys_are_stable_and_hashed() {
         let one = StickySessionTracker::conversation_key(&request_with_system("stable")).unwrap();
@@ -138,6 +170,41 @@ mod tests {
         assert_eq!(one, two);
         assert_ne!(one, other);
         assert!(!one.contains("stable"));
+    }
+
+    #[test]
+    fn common_system_prompts_do_not_collide_across_conversations() {
+        let shared = "shared default system prompt";
+        let one = StickySessionTracker::conversation_key(&request_with_system_and_user(
+            shared,
+            "first task",
+        ))
+        .unwrap();
+        let two = StickySessionTracker::conversation_key(&request_with_system_and_user(
+            shared,
+            "second task",
+        ))
+        .unwrap();
+        let repeat = StickySessionTracker::conversation_key(&request_with_system_and_user(
+            shared,
+            "first task",
+        ))
+        .unwrap();
+        assert_ne!(one, two);
+        assert_eq!(one, repeat);
+        assert!(!one.contains(shared));
+    }
+
+    #[test]
+    fn cap_evicts_until_the_map_fits() {
+        let tracker = StickySessionTracker::new(Duration::from_secs(60));
+        for index in 0..(MAX_ENTRIES + 500) {
+            tracker.remember(&format!("conversation-{index}"), "provider");
+        }
+
+        tracker.remember("conversation-overflow", "provider");
+
+        assert_eq!(tracker.entries.lock().len(), MAX_ENTRIES);
     }
 
     #[test]

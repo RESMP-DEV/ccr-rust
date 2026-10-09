@@ -6,17 +6,21 @@
 //! configurable percentage of active client requests, with a small floor so a
 //! quiet router can still recover from one transient failure.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::metrics;
 
-const RETRY_FLOOR: usize = 3;
+const RETRY_FLOOR: u64 = 3;
+/// `state` packs the active-request count in its high half and admitted
+/// retries in its low half. Reserving a retry therefore linearizes against
+/// both concurrent request arrival and completion.
+const ACTIVE_COUNT_SHIFT: u32 = 32;
+const COUNT_MASK: u64 = (1_u64 << ACTIVE_COUNT_SHIFT) - 1;
 
 #[derive(Debug, Default)]
 pub struct RetryBudget {
-    active_requests: AtomicUsize,
-    retries_in_flight: AtomicUsize,
+    state: AtomicU64,
 }
 
 /// RAII active-client-request marker.
@@ -27,7 +31,13 @@ pub struct ActiveRequest {
 
 impl Drop for ActiveRequest {
     fn drop(&mut self) {
-        self.budget.active_requests.fetch_sub(1, Ordering::AcqRel);
+        let _ = self
+            .budget
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let active = current >> ACTIVE_COUNT_SHIFT;
+                Some(current & COUNT_MASK | (active.saturating_sub(1) << ACTIVE_COUNT_SHIFT))
+            });
     }
 }
 
@@ -39,7 +49,13 @@ pub struct RetryPermit {
 
 impl Drop for RetryPermit {
     fn drop(&mut self) {
-        self.budget.retries_in_flight.fetch_sub(1, Ordering::AcqRel);
+        let _ = self
+            .budget
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let retries = current & COUNT_MASK;
+                Some(current & !COUNT_MASK | retries.saturating_sub(1))
+            });
     }
 }
 
@@ -49,7 +65,12 @@ impl RetryBudget {
     }
 
     pub fn request_started(self: &Arc<Self>) -> ActiveRequest {
-        self.active_requests.fetch_add(1, Ordering::AcqRel);
+        let _ = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let active = current >> ACTIVE_COUNT_SHIFT;
+                Some(current & COUNT_MASK | (active.saturating_add(1) << ACTIVE_COUNT_SHIFT))
+            });
         ActiveRequest {
             budget: self.clone(),
         }
@@ -61,32 +82,48 @@ impl RetryBudget {
             metrics::record_retry_budget_overflow();
             return None;
         }
-        let active = self.active_requests.load(Ordering::Acquire).max(1);
-        let allowance = RETRY_FLOOR
-            .max(((active as u64 * u64::from(percent)) / 100).min(usize::MAX as u64) as usize);
-        let current = self.retries_in_flight.fetch_add(1, Ordering::AcqRel);
-        if current >= allowance {
-            self.retries_in_flight.fetch_sub(1, Ordering::AcqRel);
-            metrics::record_retry_budget_overflow();
-            return None;
+        let mut current = self.state.load(Ordering::Acquire);
+        loop {
+            let active = (current >> ACTIVE_COUNT_SHIFT).max(1);
+            let retries = current & COUNT_MASK;
+            let allowance = RETRY_FLOOR.max(active * u64::from(percent) / 100);
+            let Some(next) = retries
+                .checked_add(1)
+                .filter(|reserved| *reserved <= allowance)
+            else {
+                metrics::record_retry_budget_overflow();
+                return None;
+            };
+            match self.state.compare_exchange_weak(
+                current,
+                current & !COUNT_MASK | next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(RetryPermit {
+                        budget: self.clone(),
+                    })
+                }
+                Err(observed) => current = observed,
+            }
         }
-        Some(RetryPermit {
-            budget: self.clone(),
-        })
     }
 
     pub fn active_requests(&self) -> usize {
-        self.active_requests.load(Ordering::Acquire)
+        usize::try_from(self.state.load(Ordering::Acquire) >> ACTIVE_COUNT_SHIFT)
+            .unwrap_or(usize::MAX)
     }
 
     pub fn retries_in_flight(&self) -> usize {
-        self.retries_in_flight.load(Ordering::Acquire)
+        usize::try_from(self.state.load(Ordering::Acquire) & COUNT_MASK).unwrap_or(usize::MAX)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Barrier, Mutex};
 
     #[test]
     fn zero_percent_disables_retries() {
@@ -105,5 +142,40 @@ mod tests {
         assert!(budget.acquire_retry(20).is_none());
         drop(permits);
         assert_eq!(budget.retries_in_flight(), 0);
+    }
+
+    /// Reservation and allowance checks are one CAS. Contending threads can
+    /// defer or reject each other, but they cannot all increment after reading
+    /// the same allowance.
+    #[test]
+    fn concurrent_reservations_cannot_exceed_the_allowance() {
+        const THREADS: usize = 16;
+        let budget = Arc::new(RetryBudget::new());
+        let _request = budget.request_started();
+        let permits: Mutex<Vec<RetryPermit>> = Mutex::new(Vec::new());
+        let barrier = Barrier::new(THREADS);
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let budget = &budget;
+                let permits = &permits;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    if let Some(permit) = budget.acquire_retry(1) {
+                        permits.lock().expect("permit log lock").push(permit);
+                    }
+                });
+            }
+        });
+
+        // One active request has a floor of three retries, even at 1%, and
+        // the 16 racing threads admitted exactly that many.
+        assert_eq!(
+            permits.lock().expect("permit log lock").len(),
+            RETRY_FLOOR as usize
+        );
+        assert_eq!(budget.active_requests(), 1);
+        assert_eq!(budget.retries_in_flight(), RETRY_FLOOR as usize);
     }
 }

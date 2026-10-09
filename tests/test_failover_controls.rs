@@ -7,7 +7,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -81,6 +81,7 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
     };
     Router::new()
         .route("/v1/messages", post(ccr_rust::router::handle_messages))
+        .route("/metrics", get(ccr_rust::metrics::metrics_handler))
         .with_state(state)
 }
 
@@ -290,14 +291,17 @@ async fn sticky_sessions_prefer_the_conversation_provider_family() {
     }
     let (first_url, first_hits) = spawn_fixed_upstream(200, json!({})).await;
     let (second_url, second_hits) = spawn_fixed_upstream(200, json!({})).await;
+    // Configure the chain so a non-sticky request prefers beta; the sticky
+    // reorder is the only thing that can keep the remembered conversation on
+    // alpha.
     let config = load_config(&json!({
         "Providers": [
             {"name": "alpha", "api_base_url": first_url, "api_key": "k", "models": ["m"]},
             {"name": "beta", "api_base_url": second_url, "api_key": "k", "models": ["m"]}
         ],
         "Router": {
-            "default": "alpha,m",
-            "tiers": ["alpha,m", "beta,m"],
+            "default": "beta,m",
+            "tiers": ["beta,m", "alpha,m"],
             "strictTierOrder": true,
             "stickySessions": {"enabled": true, "ttlMs": 60000},
             "tierRetries": {"alpha": {"max_retries": 0}, "beta": {"max_retries": 0}}
@@ -306,21 +310,26 @@ async fn sticky_sessions_prefer_the_conversation_provider_family() {
     }));
     let app = build_app(config);
 
-    let body = json!({
+    let pinned_body = json!({
         "model": "alpha,m",
         "system": "conversation-stable-system-prompt",
         "messages": [user_message()],
         "max_tokens": 16
     });
 
-    // First turn serves on alpha and records the family.
-    assert_eq!(send(&app, body.clone()).await.0, StatusCode::OK);
+    // First turn direct-pins alpha, serves it, and records the family even
+    // though beta leads the configured chain.
+    assert_eq!(send(&app, pinned_body).await.0, StatusCode::OK);
 
-    // Flip the chain so a non-sticky request would now prefer beta; the
-    // remembered conversation must keep serving on alpha.
-    let state = app.clone();
-    let _ = &state;
-    let second = send(&app, body).await;
+    // The next turn sends the unpinned model so stable_partition owns the
+    // candidate order: without the remembered preference, beta would serve.
+    let unpinned_body = json!({
+        "model": "m",
+        "system": "conversation-stable-system-prompt",
+        "messages": [user_message()],
+        "max_tokens": 16
+    });
+    let second = send(&app, unpinned_body).await;
     assert_eq!(second.0, StatusCode::OK);
     assert_eq!(
         first_hits.load(Ordering::SeqCst),
@@ -331,5 +340,108 @@ async fn sticky_sessions_prefer_the_conversation_provider_family() {
         second_hits.load(Ordering::SeqCst),
         0,
         "fallback must not be used while the remembered family is eligible"
+    );
+}
+
+/// Launch a delayed-success upstream so a configured hedge can race its
+/// immediate fallback and cancel the slow primary when the fallback wins.
+async fn spawn_delayed_success_upstream(delay_ms: u64) -> (String, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    let app = Router::new().route(
+        "/chat/completions",
+        post(move || {
+            let hits = counter.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                axum::Json(json!({
+                    "id": "slow_ok",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "slow"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), hits)
+}
+
+/// Hedging launches the next eligible tier after the configured threshold and
+/// returns whichever attempt produces a usable result first.
+#[tokio::test]
+async fn hedge_uses_fallback_when_primary_exceeds_threshold() {
+    if skip_if_localhost_bind_unavailable("hedge_uses_fallback_when_primary_exceeds_threshold") {
+        return;
+    }
+    let (slow_url, slow_hits) = spawn_delayed_success_upstream(150).await;
+    let (backup_url, backup_hits) = spawn_fixed_upstream(200, json!({})).await;
+    let config = load_config(&json!({
+        "Providers": [
+            {"name": "slow", "api_base_url": slow_url, "api_key": "k", "models": ["m"]},
+            {"name": "backup", "api_base_url": backup_url, "api_key": "k", "models": ["m"]}
+        ],
+        "Router": {
+            "default": "slow,m",
+            "tiers": ["slow,m", "backup,m"],
+            "strictTierOrder": true,
+            "tierRetries": {"slow": {"max_retries": 0}, "backup": {"max_retries": 0}},
+            "retryBudgetPercent": 100,
+            "hedging": {"enabled": true, "ttftThresholdMs": 20}
+        },
+        "API_TIMEOUT_MS": 5000
+    }));
+
+    let started = std::time::Instant::now();
+    let app = build_app(config);
+    let (status, body) = send(
+        &app,
+        json!({"model": "slow,m", "messages": [user_message()], "max_tokens": 16}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["content"][0]["text"], "ok");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "hedged request should not wait for multiple sequential attempts, took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(slow_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
+
+    let metrics_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let metrics_text = String::from_utf8_lossy(
+        &axum::body::to_bytes(metrics_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .to_string();
+    assert!(
+        metrics_text.contains("ccr_hedges_launched_total"),
+        "hedge launch metric should be registered, got: {metrics_text}"
+    );
+    assert!(
+        metrics_text.contains("ccr_hedge_wins_total{tier=\"backup,m\"}"),
+        "backup hedge win should be counted, got: {metrics_text}"
     );
 }

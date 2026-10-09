@@ -97,11 +97,13 @@ transport dropped it.
 The local configs reference `api_key: "${CCR_ZAI_API_KEY}"` and the other
 provider references approved by the shared fallback policy. Those variables are
 injected only by the governed `serve*.py` launchers, which read `runtime-credentials.json`
-(mode 0600) and `execve`s the router. **Starting `ccr-rust` directly from a
-shell without those variables makes both providers 401** with the literal
-placeholder string as the key; the failure looks exactly like an expired
-credential. This happened on 2026-09-23 after a manual restart and was
-misdiagnosed as key expiry before the env loss was found.
+(mode 0600) and `execve`s the router. Starting `ccr-rust` directly from a shell
+without those variables normally fails startup validation because the literal
+placeholders remain unexpanded. If `CCR_ALLOW_UNEXPANDED_CREDENTIALS=true` is
+also set, the providers return 401 with the placeholder string as the key; the
+failure looks exactly like an expired credential. This happened on 2026-09-23
+after a manual restart and was misdiagnosed as key expiry before the env loss
+was found.
 
 Canonical restarts on this workstation are **launchd**, not manual shells:
 the main, worker, OCR, and authenticated LaunchAgents all run the governed

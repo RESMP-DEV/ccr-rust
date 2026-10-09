@@ -106,6 +106,11 @@
             "_comment": "Keep a conversation on the provider family that last served it, so failover does not switch protocol families mid-conversation. The pinned prefix (direct routing, web search) never moves.",
             "enabled": false,
             "ttlMs": 3600000
+        },
+        "hedging": {
+            "_comment": "Launch the next eligible tier after this threshold and return the first usable result. Hedges consume retry budget and admission permits.",
+            "enabled": false,
+            "ttftThresholdMs": 10000
         }
     },
     "Presets": {

@@ -54,16 +54,9 @@ pub(super) struct ResponsesStreamConverter {
     finished: bool,
 }
 
-fn is_quote_only(text: &str) -> bool {
-    let mut quotes = false;
-    text.chars().all(|ch| {
-        if matches!(ch, '"' | '\'' | '“' | '”' | '‘' | '’') {
-            quotes = true;
-            true
-        } else {
-            ch.is_whitespace()
-        }
-    }) && quotes
+fn is_quote_prefix_candidate(text: &str) -> bool {
+    text.chars()
+        .all(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '“' | '”' | '‘' | '’'))
 }
 
 fn split_trailing_quote_artifact(text: &str) -> (&str, Option<&str>) {
@@ -459,7 +452,7 @@ impl ResponsesStreamConverter {
             return;
         };
         if !tool_calls.is_empty() {
-            self.discard_held_quote_text_before_tool();
+            self.discard_quote_prefix_before_tool();
         }
         for tool_call in tool_calls {
             let index = tool_call
@@ -495,13 +488,30 @@ impl ResponsesStreamConverter {
     }
 
     fn push_message_text_delta(&mut self, text: &str, output: &mut String) {
-        if self.preserved_response.is_none() && self.message_text.is_empty() && is_quote_only(text)
-        {
+        let leading_message_item =
+            !self.message_text_part_added && self.tools.values().all(|tool| !tool.added);
+        let can_hold_prefix = self.preserved_response.is_none()
+            && leading_message_item
+            && is_quote_prefix_candidate(text);
+        if can_hold_prefix || self.message_quote_prefix_held {
             self.message_text.push_str(text);
             self.message_quote_prefix_held = true;
+            if is_quote_prefix_candidate(&self.message_text) {
+                return;
+            }
+            self.message_quote_prefix_held = false;
+            let held = self.message_text.clone();
+            self.emit_message_text_delta(&held, output);
             return;
         }
 
+        self.emit_message_text_delta(text, output);
+    }
+
+    fn emit_message_text_delta(&mut self, text: &str, output: &mut String) {
+        // A held trailing-quote suffix keeps accumulating while the text still
+        // ends in a quote artifact; any following body flushes the suffix first
+        // because the quotes proved to be real content.
         if !self.message_quote_suffix.is_empty() {
             let (_, artifact) = split_trailing_quote_artifact(text);
             if artifact.is_some() {
@@ -509,29 +519,6 @@ impl ResponsesStreamConverter {
                 return;
             }
             self.flush_held_quote_suffix(output);
-        }
-
-        if self.message_quote_prefix_held {
-            if is_quote_only(text) {
-                self.message_text.push_str(text);
-                return;
-            }
-            self.message_quote_prefix_held = false;
-            let (body, artifact) = split_trailing_quote_artifact(text);
-            if !body.is_empty() {
-                self.ensure_message_content_part("output_text", output);
-                self.message_text.push_str(body);
-                append_response_delta(
-                    output,
-                    "response.output_text.delta",
-                    &self.message_text.clone(),
-                    self.message_identity("output_text"),
-                );
-            }
-            if let Some(artifact) = artifact {
-                self.message_quote_suffix.push_str(artifact);
-            }
-            return;
         }
 
         let (text, artifact) = split_trailing_quote_artifact(text);
@@ -550,22 +537,7 @@ impl ResponsesStreamConverter {
         }
     }
 
-    fn flush_held_quote_suffix(&mut self, output: &mut String) {
-        if self.message_quote_suffix.is_empty() {
-            return;
-        }
-        let suffix = std::mem::take(&mut self.message_quote_suffix);
-        self.ensure_message_content_part("output_text", output);
-        self.message_text.push_str(&suffix);
-        append_response_delta(
-            output,
-            "response.output_text.delta",
-            &suffix,
-            self.message_identity("output_text"),
-        );
-    }
-
-    fn discard_held_quote_text_before_tool(&mut self) {
+    fn discard_quote_prefix_before_tool(&mut self) {
         if self.message_quote_prefix_held {
             self.message_text.clear();
             self.message_quote_prefix_held = false;
@@ -584,6 +556,21 @@ impl ResponsesStreamConverter {
             );
             self.message_quote_prefix_held = false;
         }
+    }
+
+    fn flush_held_quote_suffix(&mut self, output: &mut String) {
+        if self.message_quote_suffix.is_empty() {
+            return;
+        }
+        let suffix = std::mem::take(&mut self.message_quote_suffix);
+        self.ensure_message_content_part("output_text", output);
+        self.message_text.push_str(&suffix);
+        append_response_delta(
+            output,
+            "response.output_text.delta",
+            &suffix,
+            self.message_identity("output_text"),
+        );
     }
 
     fn ensure_tool_item(&mut self, index: usize, output: &mut String) {
@@ -656,7 +643,7 @@ impl ResponsesStreamConverter {
         if block.get("type").and_then(|value| value.as_str()) != Some("tool_use") {
             return;
         }
-        self.discard_held_quote_text_before_tool();
+        self.discard_quote_prefix_before_tool();
         let index = chunk
             .get("index")
             .and_then(|value| value.as_u64())

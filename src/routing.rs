@@ -371,13 +371,15 @@ impl<'a> AttemptTimer<'a> {
     }
 
     /// Finish a successful attempt and clamp the recorded duration to an
-    /// upstream timeout bound.
+    /// upstream timeout bound. A negative bound is ignored so a bad timeout
+    /// cannot synthesize a zero-latency observation.
     pub fn finish_success_with_limit(mut self, max_duration_secs: f64) -> f64 {
-        let duration = self
-            .start
-            .elapsed()
-            .as_secs_f64()
-            .min(max_duration_secs.max(0.0));
+        let max_duration_secs = if max_duration_secs < 0.0 {
+            f64::INFINITY
+        } else {
+            max_duration_secs
+        };
+        let duration = self.start.elapsed().as_secs_f64().min(max_duration_secs);
         self.tracker.record_success(&self.tier, duration);
         self.recorded = true;
         duration
@@ -551,6 +553,19 @@ mod tests {
         let duration = timer.finish_success();
         assert!(duration >= 0.01, "duration should be >= 10ms");
 
+        let (ewma, count) = tracker.get_latency("tier-0").unwrap();
+        assert!(ewma > 0.0);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_attempt_timer_negative_limit_records_elapsed_time() {
+        let tracker = EwmaTracker::new();
+        let timer = AttemptTimer::start(&tracker, "tier-0");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let duration = timer.finish_success_with_limit(-1.0);
+
+        assert!(duration > 0.0, "a negative limit must not become zero");
         let (ewma, count) = tracker.get_latency("tier-0").unwrap();
         assert!(ewma > 0.0);
         assert_eq!(count, 1);

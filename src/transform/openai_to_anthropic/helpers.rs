@@ -3,6 +3,8 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// Extract system messages from the messages array and combine them.
 ///
@@ -44,6 +46,8 @@ pub(super) fn extract_system_messages(
 /// Anthropic: content is always an array of content blocks
 pub(super) fn transform_message_content_to_anthropic(
     message_obj: &mut serde_json::Map<String, Value>,
+    next_generated_ordinal: &mut usize,
+    generated_tool_ids: &mut Vec<String>,
 ) -> Result<()> {
     let tool_calls = message_obj.remove("tool_calls");
 
@@ -171,8 +175,25 @@ pub(super) fn transform_message_content_to_anthropic(
 
             if let Some(content_array) = content.as_array_mut() {
                 for tool_call in tool_calls_array {
-                    if let Some(tool_use_block) = convert_openai_tool_call(&tool_call) {
+                    let source_id = tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string);
+                    if let Some(tool_use_block) =
+                        convert_openai_tool_call(&tool_call, *next_generated_ordinal)
+                    {
+                        if source_id.is_none() {
+                            generated_tool_ids.push(
+                                tool_use_block
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            );
+                        }
                         content_array.push(tool_use_block);
+                        *next_generated_ordinal += 1;
                     }
                 }
             }
@@ -185,11 +206,28 @@ pub(super) fn transform_message_content_to_anthropic(
 /// Convert an OpenAI `role: "tool"` message into Anthropic `tool_result` format.
 pub(super) fn transform_tool_result_message_to_anthropic(
     message_obj: &mut serde_json::Map<String, Value>,
+    generated_tool_ids: &mut Vec<String>,
 ) {
+    let source_id = message_obj
+        .get("tool_call_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
     let tool_use_id = message_obj
         .remove("tool_call_id")
         .and_then(|v| v.as_str().map(str::to_owned))
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            if generated_tool_ids.is_empty() {
+                None
+            } else {
+                generated_tool_ids.first().cloned()
+            }
+        })
         .unwrap_or_else(|| "toolu_unknown".to_string());
+    if source_id.is_none() && !generated_tool_ids.is_empty() {
+        generated_tool_ids.remove(0);
+    }
 
     let content = message_obj
         .remove("content")
@@ -212,7 +250,9 @@ pub(super) fn transform_tool_result_message_to_anthropic(
 /// Codex continuation history can contain blank assistant messages and one
 /// assistant message per parallel tool call. Anthropic-compatible providers
 /// require one assistant turn containing every tool_use and the immediately
-/// following user turn containing every matching tool_result.
+/// following user turn containing every matching tool_result. Merged turns
+/// intentionally carry Anthropic role/content semantics; source-only OpenAI
+/// metadata is not forwarded because it is not part of the Messages request.
 pub(super) fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
     let mut normalized: Vec<Value> = Vec::with_capacity(messages.len());
 
@@ -230,12 +270,21 @@ pub(super) fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
             continue;
         }
 
+        let last_is_assistant_with_tool_use = normalized
+            .last()
+            .and_then(Value::as_object)
+            .is_some_and(anthropic_message_has_tool_use);
+        let current_is_assistant_with_tool_use =
+            role == "assistant" && anthropic_message_has_tool_use(message_obj);
         let merge_with_last = normalized
             .last()
             .and_then(Value::as_object)
             .and_then(|last| last.get("role"))
             .and_then(Value::as_str)
-            .is_some_and(|last_role| last_role == role);
+            .is_some_and(|last_role| last_role == role)
+            // Post-tool assistant text starts a subsequent turn so repair can
+            // supply the missing user tool-result turn between them.
+            && !(last_is_assistant_with_tool_use && !current_is_assistant_with_tool_use);
 
         if merge_with_last {
             let last = normalized.last_mut().expect("last message was checked");
@@ -256,38 +305,53 @@ pub(super) fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
 /// rather than silently discarded.
 fn repair_anthropic_tool_turns(messages: Vec<Value>) -> Vec<Value> {
     let mut repaired = Vec::with_capacity(messages.len() + 1);
-    let mut index = 0;
+    let mut messages = messages.into_iter().peekable();
+    let mut previous_had_tool_turn = false;
 
-    while index < messages.len() {
-        let message = messages[index].clone();
+    while let Some(mut message) = messages.next() {
         let expected_ids = assistant_tool_use_ids(&message);
         if expected_ids.is_empty() {
-            let mut message = message;
-            neutralize_unmatched_tool_results(&mut message, &[]);
+            if !previous_had_tool_turn {
+                neutralize_unmatched_tool_results(&mut message);
+            }
             repaired.push(message);
-            index += 1;
+            previous_had_tool_turn = false;
             continue;
         }
 
         repaired.push(message);
-        index += 1;
-
-        if index < messages.len()
-            && messages[index]
-                .get("role")
-                .and_then(Value::as_str)
-                .is_some_and(|role| role == "user")
-        {
-            let mut result_message = messages[index].clone();
-            repair_user_tool_results(&mut result_message, &expected_ids);
-            repaired.push(result_message);
-            index += 1;
-        } else {
+        let next_is_user = messages
+            .peek()
+            .and_then(|next| next.get("role"))
+            .and_then(Value::as_str)
+            .is_some_and(|role| role == "user");
+        if next_is_user {
+            let needs_repair = messages
+                .peek()
+                .is_some_and(|next| !tool_results_are_complete_and_ordered(next, &expected_ids));
+            if needs_repair {
+                let mut result_message = messages.next().expect("peek confirmed a message");
+                repair_user_tool_results(&mut result_message, &expected_ids);
+                repaired.push(result_message);
+            }
+        } else if messages.peek().is_some() {
             repaired.push(synthetic_tool_results(&expected_ids));
         }
+        previous_had_tool_turn = true;
     }
 
     repaired
+}
+
+fn anthropic_message_has_tool_use(message: &serde_json::Map<String, Value>) -> bool {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        })
 }
 
 fn assistant_tool_use_ids(message: &Value) -> Vec<String> {
@@ -299,6 +363,7 @@ fn assistant_tool_use_ids(message: &Value) -> Vec<String> {
         return Vec::new();
     }
 
+    let mut seen = std::collections::HashSet::new();
     message
         .get("content")
         .and_then(Value::as_array)
@@ -307,10 +372,48 @@ fn assistant_tool_use_ids(message: &Value) -> Vec<String> {
                 .iter()
                 .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
                 .filter_map(|block| block.get("id").and_then(Value::as_str))
+                .filter(|id| seen.insert((*id).to_string()))
                 .map(str::to_string)
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn tool_results_are_complete_and_ordered(message: &Value, expected_ids: &[String]) -> bool {
+    let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+        return false;
+    };
+    let expected = expected_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen = std::collections::HashSet::new();
+    let mut non_tool_started = false;
+
+    for block in blocks {
+        let is_tool_result = block
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|block_type| block_type == "tool_result");
+        if is_tool_result {
+            if non_tool_started || !block.is_object() {
+                return false;
+            }
+            let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                return false;
+            };
+            if !expected.contains(id) || !seen.insert(id.to_string()) {
+                return false;
+            }
+        } else {
+            non_tool_started = true;
+            if !block.is_object() {
+                return false;
+            }
+        }
+    }
+
+    expected_ids.iter().all(|id| seen.contains(id))
 }
 
 fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
@@ -332,18 +435,19 @@ fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
         .cloned()
         .collect::<std::collections::HashSet<_>>();
     let mut seen = std::collections::HashSet::new();
-    for block in blocks.iter_mut() {
+    let mut results = Vec::new();
+    let mut rest = Vec::new();
+    for block in std::mem::take(blocks) {
         if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            rest.push(normalize_non_tool_content_block(block));
             continue;
         }
-        let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
-            *block = unmatched_tool_result_text(block);
-            continue;
-        };
-        if expected.contains(id) && seen.insert(id.to_string()) {
-            continue;
+        match block.get("tool_use_id").and_then(Value::as_str) {
+            Some(id) if expected.contains(id) && seen.insert(id.to_string()) => {
+                results.push(block);
+            }
+            _ => rest.push(unmatched_tool_result_text(&block)),
         }
-        *block = unmatched_tool_result_text(block);
     }
 
     let missing = expected_ids
@@ -351,17 +455,15 @@ fn repair_user_tool_results(message: &mut Value, expected_ids: &[String]) {
         .filter(|id| !seen.contains(*id))
         .cloned()
         .collect::<Vec<_>>();
-    blocks.extend(synthetic_tool_result_blocks(&missing));
+    results.extend(synthetic_tool_result_blocks(&missing));
+    results.extend(rest);
+    *blocks = results;
 }
 
-fn neutralize_unmatched_tool_results(message: &mut Value, expected_ids: &[String]) {
+fn neutralize_unmatched_tool_results(message: &mut Value) {
     if message.get("role").and_then(Value::as_str) != Some("user") {
         return;
     }
-    let expected = expected_ids
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
     let Some(message_obj) = message.as_object_mut() else {
         return;
     };
@@ -375,14 +477,18 @@ fn neutralize_unmatched_tool_results(message: &mut Value, expected_ids: &[String
         if block.get("type").and_then(Value::as_str) != Some("tool_result") {
             continue;
         }
-        let matched = block
-            .get("tool_use_id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| expected.contains(id));
-        if !matched {
-            *block = unmatched_tool_result_text(block);
-        }
+        *block = unmatched_tool_result_text(block);
     }
+}
+
+fn normalize_non_tool_content_block(block: Value) -> Value {
+    if block.is_object() {
+        return block;
+    }
+    serde_json::json!({
+        "type": "text",
+        "text": extract_text_content(&block),
+    })
 }
 
 fn synthetic_tool_results(ids: &[String]) -> Value {
@@ -618,20 +724,32 @@ pub(super) fn convert_openai_content_block(block: &Value) -> Result<Value> {
 ///   "input": {"key": "value"}
 /// }
 /// ```
-pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
+pub(super) fn convert_openai_tool_call(tool_call: &Value, ordinal: usize) -> Option<Value> {
     let function = tool_call.get("function")?;
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())?;
+    let input = match function.get("arguments") {
+        Some(value @ Value::Object(_)) => value.clone(),
+        Some(Value::String(arguments_str)) => {
+            let parsed = serde_json::from_str::<Value>(arguments_str).unwrap_or(Value::Null);
+            if parsed.is_object() {
+                parsed
+            } else {
+                serde_json::json!({ "ccr_invalid_arguments": arguments_str })
+            }
+        }
+        _ => serde_json::json!({}),
+    };
 
-    let name = function.get("name")?.as_str()?;
-    let arguments_str = function.get("arguments")?.as_str()?;
-
-    // Parse arguments JSON string into an object
-    let input: Value = serde_json::from_str(arguments_str).ok()?;
-
-    // Get or generate tool ID
+    // Get a tool ID, or derive a stable request-local ID for an idless call.
     let id = tool_call
         .get("id")
         .and_then(|v| v.as_str())
-        .unwrap_or("toolu_unknown");
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| generated_tool_id(name, &input.to_string(), ordinal));
 
     Some(serde_json::json!({
         "type": "tool_use",
@@ -639,4 +757,81 @@ pub(super) fn convert_openai_tool_call(tool_call: &Value) -> Option<Value> {
         "name": name,
         "input": input
     }))
+}
+
+fn generated_tool_id(name: &str, arguments: &str, ordinal: usize) -> String {
+    let mut hasher = DefaultHasher::new();
+    (name, arguments, ordinal).hash(&mut hasher);
+    format!("toolu_{:016x}", hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_tool_use_ids_deduplicates_repeated_ids() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_same", "name": "probe", "input": {}},
+                {"type": "tool_use", "id": "call_same", "name": "probe", "input": {}}
+            ]
+        });
+        assert_eq!(assistant_tool_use_ids(&message), vec!["call_same"]);
+    }
+
+    #[test]
+    fn complete_ordered_tool_results_are_detected() {
+        let message = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_complete", "content": "result"},
+                {"type": "text", "text": "continue"}
+            ]
+        });
+        assert!(tool_results_are_complete_and_ordered(
+            &message,
+            &["call_complete".to_string()]
+        ));
+    }
+
+    #[test]
+    fn object_tool_arguments_are_preserved_directly() {
+        let tool_call = serde_json::json!({
+            "id": "call_object_args",
+            "function": {"name": "probe", "arguments": {"ok": true}}
+        });
+        let converted = convert_openai_tool_call(&tool_call, 0).expect("named call must convert");
+        assert_eq!(converted["input"], serde_json::json!({"ok": true}));
+    }
+
+    #[test]
+    fn malformed_tool_arguments_remain_a_paired_tool_use() {
+        let tool_call = serde_json::json!({
+            "id": "call_bad_json",
+            "function": {"name": "probe", "arguments": "{truncated"}
+        });
+        let converted =
+            convert_openai_tool_call(&tool_call, 0).expect("tool call must remain paired");
+        assert_eq!(converted["type"], "tool_use");
+        assert_eq!(converted["id"], "call_bad_json");
+        assert_eq!(converted["input"]["ccr_invalid_arguments"], "{truncated");
+    }
+
+    #[test]
+    fn repair_user_tool_results_wraps_raw_string_content() {
+        let mut message = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_a", "content": "ok"},
+                "continue"
+            ]
+        });
+        repair_user_tool_results(&mut message, &["call_a".to_string()]);
+        let blocks = message["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "continue");
+    }
 }
