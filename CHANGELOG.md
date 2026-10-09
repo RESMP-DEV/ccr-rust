@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed the source-pinned shared policy script to match the live machine copy
+  again after the GMI route change diverged from it. The MiniMax M3/M3.1
+  compatibility transformer (`{"use": ["minimax"]}`) and the preflight
+  probe-header merge (provider `extra_headers` ride on every probe with the
+  credential instead of becoming standalone unauthenticated attempts) were
+  applied to the installed policy script on 2026-10-08 without being committed;
+  the 2026-10-09 GMI commit then resynchronized consumers from the repo copy,
+  silently dropping the transformer and leaving the installed approval
+  template rejecting the GMI route chain. Both fixes are back in source with
+  tests, the merged script is reinstalled, and consumers are resynchronized.
+
 - Added the source-pinned GMI Cloud OpenAI-compatible fallback provider. The
   active route uses the unambiguous free `Qwen/Qwen3.8-Max-0902` deployment
   after the GLM tiers and before DeepSeek; the duplicate paid/free base Max ID

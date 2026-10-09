@@ -69,6 +69,10 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "protocol": "anthropic",
         "auth_header": "authorization",
         "models": ["MiniMax-M3.1-Flash-Preview"],
+        # Required for MiniMax M3/M3.1 compatibility: adaptive thinking
+        # injection and malformed-output sanitization live in the transformer.
+        # Without this the registry builds an empty chain and neither runs.
+        "transformer": {"use": ["minimax"]},
     },
 }
 # os.umask is process-global and not atomic, so a set/restore dance inside each
@@ -364,28 +368,24 @@ def credential_environment(config: dict[str, Any], path: Path | None) -> dict[st
     return env
 
 
-def _probe_headers(provider: dict[str, Any], secret: str) -> list[tuple[str, str]]:
+def _probe_headers(provider: dict[str, Any], secret: str) -> dict[str, str]:
     """Credential headers in the same precedence CCR dispatch uses.
 
     Responses providers send `Authorization: Bearer`. Anthropic providers send
-    the configured `auth_header`, defaulting to `x-api-key`. Provider
-    `extra_headers` are attached to every attempt so a provider that
-    authenticates through a custom header is probed the way CCR calls it.
+    the configured `auth_header`, defaulting to `x-api-key`.
+
+    The auth header is returned alone; provider `extra_headers` are merged in
+    `_probe_requests` so every attempt carries them alongside the credential,
+    the way CCR dispatch does, rather than replacing it.
     """
     protocol = provider.get("protocol", "responses")
     if protocol == "anthropic":
         configured = provider.get("auth_header") or "x-api-key"
         name = str(configured).strip().lower()
         if name in ("authorization", "bearer", "authorization-bearer"):
-            pairs = [("Authorization", f"Bearer {secret}")]
-        else:
-            pairs = [(name, secret)]
-    else:
-        pairs = [("Authorization", f"Bearer {secret}")]
-    for extra_name, extra_value in (provider.get("extra_headers") or {}).items():
-        if isinstance(extra_value, str):
-            pairs.append((extra_name, extra_value))
-    return pairs
+            return {"Authorization": f"Bearer {secret}"}
+        return {name: secret}
+    return {"Authorization": f"Bearer {secret}"}
 
 
 def _probe_requests(
@@ -401,23 +401,32 @@ def _probe_requests(
     """
     protocol = provider.get("protocol", "responses")
     base = str(provider.get("api_base_url", "")).rstrip("/")
-    headers = list(_probe_headers(provider, secret))
+    # Same merge order as CCR dispatch: extra_headers are applied after the
+    # auth header, so they override it on a key collision and ride along on
+    # every attempt instead of becoming standalone unauthenticated probes.
+    headers = {
+        **_probe_headers(provider, secret),
+        **{
+            str(extra_name): extra_value
+            for extra_name, extra_value in (provider.get("extra_headers") or {}).items()
+            if isinstance(extra_value, str)
+        },
+    }
     requests: list[tuple[str, urllib.request.Request]] = []
-    for header, value in headers:
-        requests.append(
-            (
-                "models",
-                urllib.request.Request(
-                    f"{base}/models",
-                    headers={
-                        header: value,
-                        "accept": "application/json",
-                        "user-agent": "ccr-fallback-policy-preflight/1",
-                    },
-                    method="GET",
-                ),
-            )
+    requests.append(
+        (
+            "models",
+            urllib.request.Request(
+                f"{base}/models",
+                headers={
+                    **headers,
+                    "accept": "application/json",
+                    "user-agent": "ccr-fallback-policy-preflight/1",
+                },
+                method="GET",
+            ),
         )
+    )
     if protocol == "anthropic":
         models = provider.get("models")
         model = models[0] if isinstance(models, list) and models else ""
@@ -429,23 +438,22 @@ def _probe_requests(
             }
         ).encode()
         version = provider.get("anthropic_version") or "2023-06-01"
-        for header, value in headers:
-            requests.append(
-                (
-                    "messages",
-                    urllib.request.Request(
-                        f"{base}/messages",
-                        data=body,
-                        headers={
-                            header: value,
-                            "content-type": "application/json",
-                            "anthropic-version": version,
-                            "user-agent": "ccr-fallback-policy-preflight/1",
-                        },
-                        method="POST",
-                    ),
-                )
+        requests.append(
+            (
+                "messages",
+                urllib.request.Request(
+                    f"{base}/messages",
+                    data=body,
+                    headers={
+                        **headers,
+                        "content-type": "application/json",
+                        "anthropic-version": version,
+                        "user-agent": "ccr-fallback-policy-preflight/1",
+                    },
+                    method="POST",
+                ),
             )
+        )
     return requests
 
 

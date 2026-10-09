@@ -226,6 +226,15 @@ class PolicyTests(unittest.TestCase):
         minimax = policy.MACHINE_SHARED_PROVIDERS["minimax"]
         self.assertEqual(minimax["auth_header"], "authorization")
         self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash-Preview"])
+        self.assertEqual(minimax["transformer"], {"use": ["minimax"]})
+
+    def test_probe_extra_headers_ride_with_the_credential(self) -> None:
+        gmi = policy.MACHINE_SHARED_PROVIDERS["gmi"]
+        requests = policy._probe_requests(gmi, "secret")
+        self.assertEqual([kind for kind, _ in requests], ["models"])
+        headers = {key.lower(): value for key, value in requests[0][1].header_items()}
+        self.assertEqual(headers["authorization"], "Bearer secret")
+        self.assertEqual(headers["user-agent"], "ccr-fallback-policy-preflight/1")
 
     def test_gmi_free_promotion_is_after_glm_and_before_deepseek(self) -> None:
         self.assertEqual(
