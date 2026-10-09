@@ -1851,6 +1851,140 @@ mod tests {
         assert_eq!(delta_text, "The empty value is \"\"");
     }
 
+    fn message_stream_texts(payload: &str) -> (String, Option<String>) {
+        let mut delta_text = String::new();
+        let mut done_text = None;
+        for (_, data) in parse_sse_frames(payload) {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
+            match event["type"].as_str() {
+                Some("response.output_text.delta") => {
+                    delta_text.push_str(event["delta"].as_str().unwrap_or_default())
+                }
+                Some("response.output_text.done") => {
+                    done_text = event["item"]["text"]
+                        .as_str()
+                        .or_else(|| event["text"].as_str())
+                        .map(str::to_string)
+                }
+                _ => {}
+            }
+        }
+        (delta_text, done_text)
+    }
+
+    fn text_frame(text: &str) -> String {
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": text}
+        })
+        .to_string()
+    }
+
+    fn tool_frame(id: &str) -> String {
+        serde_json::json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "tool_use", "id": id, "name": "probe", "input": {}}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn incremental_stream_resolved_prefix_commits_once() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_prefix_once", "model": "test-model"}
+        });
+        let mut stream = converter.push_frame(Some("message_start"), &message_start.to_string());
+        stream += &converter.push_frame(Some("content_block_delta"), &text_frame("\"\""));
+        stream += &converter.push_frame(Some("content_block_delta"), &text_frame("hello"));
+        stream += &converter.finish();
+        let (delta_text, done_text) = message_stream_texts(&stream);
+        assert_eq!(delta_text, "\"\"hello");
+        assert_eq!(done_text.as_deref(), Some("\"\"hello"));
+    }
+
+    #[test]
+    fn incremental_stream_holds_suffix_on_first_body_fragment() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_first_body_suffix", "model": "test-model"}
+        });
+        let mut stream = converter.push_frame(Some("message_start"), &message_start.to_string());
+        stream +=
+            &converter.push_frame(Some("content_block_delta"), &text_frame("Now writing\"\""));
+        stream += &converter.push_frame(Some("content_block_start"), &tool_frame("t_once"));
+        stream += &converter.finish();
+        let (delta_text, done_text) = message_stream_texts(&stream);
+        assert_eq!(delta_text, "Now writing");
+        assert_eq!(done_text.as_deref(), Some("Now writing"));
+    }
+
+    #[test]
+    fn incremental_stream_body_after_held_suffix_is_not_swallowed() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_body_after_suffix", "model": "test-model"}
+        });
+        let mut stream = converter.push_frame(Some("message_start"), &message_start.to_string());
+        stream += &converter.push_frame(Some("content_block_delta"), &text_frame("hello"));
+        stream += &converter.push_frame(Some("content_block_delta"), &text_frame("\"\""));
+        stream += &converter.push_frame(Some("content_block_delta"), &text_frame(" next\"\""));
+        stream += &converter.push_frame(Some("content_block_start"), &tool_frame("t_next"));
+        stream += &converter.finish();
+        let (delta_text, done_text) = message_stream_texts(&stream);
+        assert_eq!(delta_text, "hello\"\" next");
+        assert_eq!(done_text.as_deref(), Some("hello\"\" next"));
+    }
+
+    #[test]
+    fn incremental_stream_whitespace_joins_held_suffix() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_ws_suffix", "model": "test-model"}
+        });
+        let mut stream = converter.push_frame(Some("message_start"), &message_start.to_string());
+        stream += &converter.push_frame(Some("content_block_delta"), &text_frame("hello"));
+        stream += &converter.push_frame(Some("content_block_delta"), &text_frame("\"\""));
+        stream += &converter.push_frame(Some("content_block_delta"), &text_frame(" "));
+        stream += &converter.push_frame(Some("content_block_start"), &tool_frame("t_ws"));
+        stream += &converter.finish();
+        let (delta_text, done_text) = message_stream_texts(&stream);
+        assert_eq!(delta_text, "hello");
+        assert_eq!(done_text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn incremental_stream_holds_quote_pair_across_fragments() {
+        for (tail, expected) in [("tool", "hello"), ("finish", "hello\"\"")] {
+            let mut converter = ResponsesStreamConverter::new(None);
+            let message_start = serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_split_pair", "model": "test-model"}
+            });
+            let mut stream =
+                converter.push_frame(Some("message_start"), &message_start.to_string());
+            stream += &converter.push_frame(Some("content_block_delta"), &text_frame("hello"));
+            stream += &converter.push_frame(Some("content_block_delta"), &text_frame("\""));
+            stream += &converter.push_frame(Some("content_block_delta"), &text_frame("\""));
+            if tail == "tool" {
+                stream +=
+                    &converter.push_frame(Some("content_block_start"), &tool_frame("t_split"));
+            }
+            stream += &converter.finish();
+            let (delta_text, done_text) = message_stream_texts(&stream);
+            assert_eq!(delta_text, expected, "tail={tail}");
+            assert_eq!(done_text.as_deref(), Some(expected), "tail={tail}");
+        }
+    }
+
     #[tokio::test]
     async fn incremental_stream_failure_retains_active_response_id() {
         let first = format!(

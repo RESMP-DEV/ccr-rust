@@ -43,6 +43,7 @@ pub(super) struct ResponsesStreamConverter {
     message_text: String,
     message_quote_prefix_held: bool,
     message_quote_suffix: String,
+    message_quote_pending: String,
     refusal_text: String,
     reasoning_text: String,
     response_status: String,
@@ -83,6 +84,32 @@ fn split_trailing_quote_artifact(text: &str) -> (&str, Option<&str>) {
     }
 }
 
+fn split_pending_quote_tail(text: &str) -> (&str, Option<&str>) {
+    // After the artifact split, a trailing quote run holds at most one quote;
+    // buffer it separately so a pair split across two fragments can still
+    // qualify as an artifact once the second half arrives.
+    let mut tail_start = text.len();
+    let mut quotes = 0;
+    for (index, ch) in text.char_indices().rev() {
+        if ch.is_whitespace() {
+            tail_start = index;
+            continue;
+        }
+        if ch == '"' {
+            quotes += 1;
+            tail_start = index;
+            continue;
+        }
+        break;
+    }
+    if quotes == 1 {
+        let (body, tail) = text.split_at(tail_start);
+        (body, Some(tail))
+    } else {
+        (text, None)
+    }
+}
+
 impl ResponsesStreamConverter {
     pub(super) fn new(preserved_response: Option<serde_json::Value>) -> Self {
         let response_status = preserved_response
@@ -112,6 +139,7 @@ impl ResponsesStreamConverter {
             message_text: String::new(),
             message_quote_prefix_held: false,
             message_quote_suffix: String::new(),
+            message_quote_pending: String::new(),
             refusal_text: String::new(),
             reasoning_text: String::new(),
             response_status,
@@ -500,7 +528,9 @@ impl ResponsesStreamConverter {
                 return;
             }
             self.message_quote_prefix_held = false;
-            let held = self.message_text.clone();
+            // The held buffer already lives in message_text; take it out so the
+            // normal emission path re-commits it exactly once.
+            let held = std::mem::take(&mut self.message_text);
             self.emit_message_text_delta(&held, output);
             return;
         }
@@ -509,10 +539,25 @@ impl ResponsesStreamConverter {
     }
 
     fn emit_message_text_delta(&mut self, text: &str, output: &mut String) {
-        // A quote-only fragment with no preceding message body is standalone
-        // mid-stream content (typically between tool calls), not a trailing
-        // artifact suffix: emit it verbatim.
-        if self.message_text.is_empty() {
+        // A sub-threshold trailing quote may be the first half of an artifact
+        // split across fragments, so it stays buffered until the next text or
+        // tool call resolves it.
+        let buffer;
+        let text: &str = if self.message_quote_pending.is_empty() {
+            text
+        } else {
+            buffer = format!("{}{}", self.message_quote_pending, text);
+            self.message_quote_pending.clear();
+            &buffer
+        };
+
+        let (body, artifact) = split_trailing_quote_artifact(text);
+        let body_has_real_text = body.chars().any(|ch| !ch.is_whitespace() && ch != '"');
+
+        // A quote/whitespace-only fragment with no preceding message body and
+        // no held context is standalone mid-stream content (typically between
+        // tool calls), not a trailing artifact suffix: emit it verbatim.
+        if self.message_text.is_empty() && !body_has_real_text {
             self.ensure_message_content_part("output_text", output);
             self.message_text.push_str(text);
             append_response_delta(
@@ -523,31 +568,34 @@ impl ResponsesStreamConverter {
             );
             return;
         }
-        // A held trailing-quote suffix keeps accumulating while the text still
-        // ends in a quote artifact; any following body flushes the suffix first
-        // because the quotes proved to be real content.
+        // While a trailing-quote artifact is held, fragments that add no real
+        // body text (more quotes or whitespace) keep accumulating into it;
+        // real body text proves the held quotes were content and flushes them
+        // first.
+        if !self.message_quote_suffix.is_empty() && !body_has_real_text {
+            self.message_quote_suffix.push_str(text);
+            return;
+        }
         if !self.message_quote_suffix.is_empty() {
-            let (_, artifact) = split_trailing_quote_artifact(text);
-            if artifact.is_some() {
-                self.message_quote_suffix.push_str(text);
-                return;
-            }
             self.flush_held_quote_suffix(output);
         }
 
-        let (text, artifact) = split_trailing_quote_artifact(text);
-        if !text.is_empty() {
+        let (body, tail) = split_pending_quote_tail(body);
+        if !body.is_empty() {
             self.ensure_message_content_part("output_text", output);
-            self.message_text.push_str(text);
+            self.message_text.push_str(body);
             append_response_delta(
                 output,
                 "response.output_text.delta",
-                text,
+                body,
                 self.message_identity("output_text"),
             );
         }
         if let Some(artifact) = artifact {
             self.message_quote_suffix.push_str(artifact);
+        }
+        if let Some(tail) = tail {
+            self.message_quote_pending.push_str(tail);
         }
     }
 
@@ -557,6 +605,7 @@ impl ResponsesStreamConverter {
             self.message_quote_prefix_held = false;
         }
         self.message_quote_suffix.clear();
+        self.message_quote_pending.clear();
     }
 
     fn flush_held_quote_prefix(&mut self, output: &mut String) {
@@ -583,6 +632,21 @@ impl ResponsesStreamConverter {
             output,
             "response.output_text.delta",
             &suffix,
+            self.message_identity("output_text"),
+        );
+    }
+
+    fn flush_held_quote_pending(&mut self, output: &mut String) {
+        if self.message_quote_pending.is_empty() {
+            return;
+        }
+        let tail = std::mem::take(&mut self.message_quote_pending);
+        self.ensure_message_content_part("output_text", output);
+        self.message_text.push_str(&tail);
+        append_response_delta(
+            output,
+            "response.output_text.delta",
+            &tail,
             self.message_identity("output_text"),
         );
     }
@@ -762,6 +826,7 @@ impl ResponsesStreamConverter {
 
         self.flush_held_quote_prefix(&mut output);
         self.flush_held_quote_suffix(&mut output);
+        self.flush_held_quote_pending(&mut output);
         self.finish_message_content_parts(&mut output);
 
         if self.preserved_response.is_none() && self.message_item_added {
