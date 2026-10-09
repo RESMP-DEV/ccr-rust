@@ -56,7 +56,7 @@ impl TierAdmission {
         self.ceiling.store(ceiling, Ordering::Release);
         let _ = self
             .limit
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 let capped = current.min(ceiling);
                 (capped != current).then_some(capped)
             });
@@ -68,7 +68,7 @@ impl TierAdmission {
     fn record_success(&self, key: &str) {
         let grown = self
             .limit
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 let ceiling = self.ceiling.load(Ordering::Acquire);
                 Some(current.saturating_add(1).min(ceiling))
             })
@@ -85,7 +85,7 @@ impl TierAdmission {
     fn record_rejection(&self, key: &str) {
         let cut = self
             .limit
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some((current / 2).max(DEFAULT_MIN_LIMIT as u64))
             })
             .map_or(DEFAULT_MIN_LIMIT as u64, |old| {
