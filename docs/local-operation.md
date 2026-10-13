@@ -27,8 +27,9 @@ ccr-local validate
 | --- | --- |
 | `claude-ccr` | Start the local service if needed, launch Claude Code through CCR |
 | `codex-ccr` | Start the local service if needed, launch Codex with the `ccr` profile |
-| `ccr-local start` / `stop` / `restart` | Control the launchd service |
+| `ccr-local start` / `stop` / `restart` / `restart-now` | Control the launchd service; `restart` waits for idle, `restart-now` is the emergency override |
 | `ccr-local status` / `validate` | Check the listener or load and validate its configuration |
+| `ccr-wait-idle` | Require two consecutive samples with zero active requests and streams |
 
 The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
@@ -56,7 +57,9 @@ installed launcher module, and busy listeners must wait for an idle restart.
 
 The service loads `runtime-credentials.json`, not older `.env` files. Changes
 to a file do not change a running process until it is restarted. Coordinate a
-restart with other active work. The local Codex fork's `--ignore-user-config`
+restart with other active work: build/install first, then use the idle-gated
+`restart` verb rather than `launchctl kickstart -k`. The local Codex fork's
+`--ignore-user-config`
 also skips named profiles; do not combine it with `--profile ccr`.
 
 ## Set up another machine

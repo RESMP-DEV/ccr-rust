@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   currently enforces a 75% line floor, and opt-in mutation diagnostics are
   configured for production source. Property tests now check SSE chunk
   reassembly and retry-backoff invariants.
+- Added an idle-restart gate for local launchd listeners. It waits for two
+  consecutive samples with both `ccr_active_requests` and `ccr_active_streams`
+  at zero, so routine restarts no longer interrupt a live model round trip.
+  The installed main and worker wrappers retain an explicit `restart-now`
+  emergency override.
 - Changed the dependency lock: `async-trait` 0.1.89 → 0.1.92 (pulls in `syn`
   3.0.6) so the `async_trait` expansion no longer trips the toolchain's
   `double_must_use` lint under `clippy -D warnings`; the same refresh replaces

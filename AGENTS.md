@@ -120,6 +120,8 @@ Run at least the relevant unit or integration tests for the area you changed. Fo
 
 Integration tests use mocked upstreams, so prefer updating those over inventing ad hoc manual checks. Use `scripts/quality.py --coverage` for measured source coverage and `--mutation` only as an explicit, potentially long diagnostic.
 
+Installing a newly built CLI does not itself require restarting a live listener. Coordinate activation with `scripts/ccr_wait_idle.py` (or the installed wrappers' default idle-gated `restart`) so an active LLM turn is not interrupted. Use `restart-now` only for an explicit emergency.
+
 ## Pitfalls
 
 Watch out for these recurring mistakes:
