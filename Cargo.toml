@@ -65,6 +65,7 @@ zstd = "0.13"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.8"
 tempfile = "3"
 tower = { version = "0.4", features = ["util"] }
 wiremock = "0.6"

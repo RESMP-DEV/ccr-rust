@@ -58,8 +58,11 @@ Prometheus collectors: token counts (input/output), latencies (p50/p90/p99), pro
 ## Testing
 
 ```bash
-# Run tests
-cargo test
+# Run the deterministic offline quality matrix
+python3 scripts/quality.py
+
+# Focus on property invariants while iterating
+python3 scripts/quality.py --fast
 
 # Run a single test
 cargo test test_anthropic_routing -- --nocapture
@@ -69,6 +72,13 @@ cargo clippy
 
 # Format code
 cargo fmt
+```
+
+Coverage and mutation testing are explicit diagnostics:
+
+```bash
+python3 scripts/quality.py --coverage
+python3 scripts/quality.py --mutation
 ```
 
 ## Code style

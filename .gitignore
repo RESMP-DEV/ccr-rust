@@ -26,6 +26,7 @@ Thumbs.db
 tasks/
 
 # Runtime output
+/build/
 agent_workspace/
 logs/
 reports/

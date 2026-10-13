@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added a receipt-writing offline quality dispatcher. The default matrix covers
+  formatting, strict Clippy, all-features Rust tests, the no-default-features
+  boundary, Python helpers, and the vendored GP package; opt-in LLVM coverage
+  currently enforces a 75% line floor, and opt-in mutation diagnostics are
+  configured for production source. Property tests now check SSE chunk
+  reassembly and retry-backoff invariants.
 - Changed the dependency lock: `async-trait` 0.1.89 → 0.1.92 (pulls in `syn`
   3.0.6) so the `async_trait` expansion no longer trips the toolchain's
   `double_must_use` lint under `clippy -D warnings`; the same refresh replaces

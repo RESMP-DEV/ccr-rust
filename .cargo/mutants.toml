@@ -1,0 +1,9 @@
+# Mutation diagnostics focus on production Rust. Vendored source has its own
+# direct test suite, and generated/build outputs are not product code.
+examine_globs = ["src/**"]
+exclude_globs = ["vendor/**", "build/**", "tests/**"]
+additional_cargo_args = ["--locked"]
+additional_cargo_test_args = ["--all-features", "--locked"]
+all_features = true
+test_workspace = true
+output = "build/reports/mutants"
