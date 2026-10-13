@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import unittest
@@ -39,6 +40,23 @@ class IdleRestartTests(unittest.TestCase):
     def test_parse_metrics_rejects_missing_gauges(self) -> None:
         with self.assertRaises(ValueError):
             ccr_wait_idle.parse_metrics("ccr_active_requests 0\n")
+
+    def test_parse_metrics_accepts_labels_timestamps_and_floats(self) -> None:
+        snapshot = ccr_wait_idle.parse_metrics(
+            METRICS_TEMPLATE.format(requests=1, streams=0).replace(
+                "ccr_active_requests 1",
+                'ccr_active_requests{listener="main"} 1.5 1697212800000',
+            )
+        )
+
+        self.assertEqual(snapshot.active_requests, 1.5)
+        self.assertEqual(snapshot.active_streams, 0)
+
+    def test_parse_metrics_rejects_malformed_numbers(self) -> None:
+        with self.assertRaises(ValueError):
+            ccr_wait_idle.parse_metrics(
+                "ccr_active_requests 1.2.3\nccr_active_streams 0\n"
+            )
 
     def test_wait_requires_consecutive_idle_samples(self) -> None:
         payloads = [
@@ -89,6 +107,37 @@ class IdleRestartTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertFalse(result["ok"])
         self.assertIn("stayed busy", result["error"])
+
+    def test_recovered_transport_error_does_not_mask_a_busy_timeout(self) -> None:
+        payload = METRICS_TEMPLATE.format(requests=2, streams=1)
+        with (
+            mock.patch.object(
+                ccr_wait_idle.urllib.request,
+                "urlopen",
+                side_effect=[
+                    http.client.BadStatusLine("non-HTTP response"),
+                    *[FakeResponse(payload)] * 12,
+                ],
+            ),
+            self.assertRaises(ccr_wait_idle.BusyListener) as context,
+        ):
+            ccr_wait_idle.wait_until_idle(
+                "http://127.0.0.1:3456/metrics",
+                timeout=0.03,
+                poll_interval=0.005,
+                stable_samples=2,
+                request_timeout=1,
+            )
+
+        self.assertIn("listener stayed busy", str(context.exception))
+
+    def test_stable_samples_argument_rejects_single_sample(self) -> None:
+        with self.assertRaises(SystemExit) as context:
+            ccr_wait_idle.parse_args(
+                ["--url", "http://127.0.0.1/metrics", "--stable-samples", "1"]
+            )
+
+        self.assertEqual(context.exception.code, 2)
 
 
 if __name__ == "__main__":

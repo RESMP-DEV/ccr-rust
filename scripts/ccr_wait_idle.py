@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import re
 import sys
@@ -13,8 +14,10 @@ import urllib.request
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 
-REQUEST_PATTERN = re.compile(r"^ccr_active_requests\s+([0-9.eE+-]+)$")
-STREAM_PATTERN = re.compile(r"^ccr_active_streams\s+([0-9.eE+-]+)$")
+NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+METRIC_SUFFIX = rf"(?:\{{[^}}]*\}})?\s+({NUMBER})(?:\s+\d+)?"
+REQUEST_PATTERN = re.compile(rf"^ccr_active_requests{METRIC_SUFFIX}$")
+STREAM_PATTERN = re.compile(rf"^ccr_active_streams{METRIC_SUFFIX}$")
 
 
 @dataclass(frozen=True)
@@ -74,10 +77,16 @@ def wait_until_idle(
     while time.monotonic() < deadline:
         try:
             snapshot = read_metrics(url, request_timeout)
-        except (OSError, ValueError, urllib.error.URLError) as error:
+        except (
+            OSError,
+            ValueError,
+            urllib.error.URLError,
+            http.client.HTTPException,
+        ) as error:
             last_error = error
             consecutive_idle = 0
         else:
+            last_error = None
             samples += 1
             if snapshot.active_requests == 0 and snapshot.active_streams == 0:
                 consecutive_idle += 1
@@ -99,6 +108,13 @@ def wait_until_idle(
     )
 
 
+def stable_samples_argument(value: str) -> int:
+    samples = int(value)
+    if samples < 2:
+        raise argparse.ArgumentTypeError("must be at least 2")
+    return samples
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", required=True, help="Prometheus metrics URL")
@@ -111,7 +127,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--stable-samples",
-        type=int,
+        type=stable_samples_argument,
         default=2,
         help="consecutive idle samples required",
     )
