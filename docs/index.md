@@ -38,6 +38,7 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 - [Switching plans](switching-plans.md) — Kimi/GLM selection, profiles, presets, and fallback
 - [Observability](observability.md) — Prometheus metrics, TUI dashboard, token/latency tracking
 - [Quality matrix](quality-matrix.md) — offline quality checks, coverage/mutation modes, and receipts
+- [Idle restarts](idle-restart.md) — listener drain gate for preserving live LLM turns
 - [Dependency security](dependency-security.md) — resolved advisories and temporary transitive-risk decisions
 - [Debug capture](debug_capture.md) — capture requests/responses for troubleshooting
 - [Streaming design](streaming_incremental_design.md) — how streaming responses are handled
