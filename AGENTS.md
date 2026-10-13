@@ -116,9 +116,9 @@ and tests. See `docs/worker-inspection.md` for limits and exit semantics.
 
 ## Validation Expectations
 
-Run at least the relevant unit or integration tests for the area you changed. For routing, translation, or config work, `cargo test --all-features` is usually the minimum acceptable validation path. Changes under `vendor/gp-routing/` also run that package's own tests.
+Run at least the relevant unit or integration tests for the area you changed. For routing, translation, or config work, `python3 scripts/quality.py` is the default offline gate; `cargo test --all-features --locked` is the focused minimum while iterating. Changes under `vendor/gp-routing/` are included by the dispatcher and have their own tracked lockfile.
 
-Integration tests use mocked upstreams, so prefer updating those over inventing ad hoc manual checks.
+Integration tests use mocked upstreams, so prefer updating those over inventing ad hoc manual checks. Use `scripts/quality.py --coverage` for measured source coverage and `--mutation` only as an explicit, potentially long diagnostic.
 
 ## Pitfalls
 

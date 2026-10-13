@@ -171,6 +171,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bare_carriage_return_bounds_a_line_without_entering_its_value() {
+        assert_eq!(read_next_line(b"first\rsecond", 0), Some((5, 6)));
+        assert_eq!(read_next_line(b"first\r", 0), None);
+    }
+
+    #[test]
     fn decodes_split_event_and_data_fields() {
         let mut decoder = SseFrameDecoder::new();
 
