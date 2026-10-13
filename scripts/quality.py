@@ -328,7 +328,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--mutation", action="store_true", help="add mutation diagnostics"
     )
     parser.add_argument("--list", action="store_true", help="list checks and exit")
-    return parser.parse_args(argv)
+    arguments = parser.parse_args(argv)
+    if arguments.fast and arguments.mutation:
+        parser.error("--mutation cannot be combined with --fast")
+    return arguments
 
 
 def main() -> int:

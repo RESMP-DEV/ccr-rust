@@ -40,7 +40,8 @@ After PR review, the dispatcher received focused hardening:
 - A requested but unavailable or malformed coverage summary is recorded with a
   `coverage_summary_error` rather than silently omitted.
 - `--coverage --mutation` composes, while `--fast` remains exclusive with
-  `--coverage`; a mutation-only diagnostic extends the default matrix.
+  `--coverage` and `--mutation`; a mutation-only diagnostic extends the default
+  matrix.
 - Every check start failure is recorded in the log and result and the remaining
   checks still run.
 - Git metadata failures no longer prevent the receipt from being written.
@@ -55,6 +56,8 @@ The repaired tree passed the same default matrix and coverage gate. Coverage
 was unchanged at 78.78% lines, 77.16% functions, and 78.73% regions. Focused
 regressions were 14 Python tests and 6 Rust property/boundary tests, all green.
 No LLVM profiler artifacts remained at the worktree root.
+The final incremental CLI edge rejected `--fast --mutation`, bringing the
+focused Python regression count to 15; all 15 passed.
 
 Review suggestions for moving the vendor lockfile out of the tree or adding a
 manifest MSRV field were not applied: the lockfile is deliberately tracked and

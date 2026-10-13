@@ -71,6 +71,12 @@ class QualityMatrixTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             quality.parse_args(["--fast", "--coverage"])
 
+    def test_fast_remains_exclusive_with_mutation(self) -> None:
+        with self.assertRaises(SystemExit) as context:
+            quality.parse_args(["--fast", "--mutation"])
+
+        self.assertEqual(context.exception.code, 2)
+
     def test_selecting_coverage_for_listing_has_no_filesystem_side_effect(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
