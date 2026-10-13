@@ -13,9 +13,10 @@ proptest! {
         event in "[A-Za-z0-9_.:-]{0,64}",
         // SSE uses bare CR as a line terminator, so a data value containing
         // CR has no byte-preserving serialization in the wire format.
-        data in "[^\r]*",
+        data_lines in prop::collection::vec("[^\r]*", 1usize..5),
         cut_seeds in prop::collection::vec(any::<u64>(), 0usize..12),
     ) {
+        let data = data_lines.join("\n");
         let frame = SseFrame {
             event: if event.is_empty() { None } else { Some(event.clone()) },
             data: data.clone(),
@@ -46,9 +47,10 @@ proptest! {
     fn retry_backoff_is_bounded_and_non_decreasing(
         base_ms in 1u64..20_000,
         multiplier in 1.0f64..4.0,
-        max_ms in 1u64..60_000,
+        max_extra_ms in 0u64..40_000,
         attempt in 0usize..24,
     ) {
+        let max_ms = base_ms + max_extra_ms;
         let config = TierRetryConfig {
             base_backoff_ms: base_ms,
             backoff_multiplier: multiplier,
@@ -63,6 +65,20 @@ proptest! {
             let previous = config.backoff_duration(attempt - 1);
             prop_assert!(delay >= previous);
         }
+    }
+}
+
+#[test]
+fn retry_backoff_ceiling_below_base_is_constant() {
+    let config = TierRetryConfig {
+        base_backoff_ms: 10_000,
+        backoff_multiplier: 2.0,
+        max_backoff_ms: 25,
+        ..Default::default()
+    };
+
+    for attempt in 0..8 {
+        assert_eq!(config.backoff_duration(attempt), Duration::from_millis(25));
     }
 }
 
@@ -85,6 +101,22 @@ fn complete_frame_drains_but_partial_tail_remains_buffered() {
         vec![SseFrame {
             event: None,
             data: "partial".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn lf_frame_survives_a_split_after_line() {
+    let mut decoder = SseFrameDecoder::new();
+
+    assert!(decoder.push(b"event: message\ndata: first\n").is_empty());
+    let frames = decoder.push(b"\n");
+
+    assert_eq!(
+        frames,
+        vec![SseFrame {
+            event: Some("message".to_owned()),
+            data: "first".to_owned(),
         }]
     );
 }

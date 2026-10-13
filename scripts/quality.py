@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -32,12 +33,21 @@ def git_output(*arguments: str) -> str:
     result = subprocess.run(
         ("git", *arguments),
         cwd=ROOT,
-        check=True,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
     )
+    if result.returncode != 0:
+        message = result.stderr.strip()
+        raise RuntimeError(f"git {' '.join(arguments)} failed: {message}")
     return result.stdout.rstrip("\n")
+
+
+def git_state() -> tuple[str, list[str]]:
+    try:
+        return git_output("rev-parse", "HEAD"), dirty_files()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        return "unknown", [f"git metadata unavailable: {error}"]
 
 
 def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Check, ...]:
@@ -75,7 +85,6 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
 
     if coverage:
         output_dir = ROOT / "build" / "reports" / "coverage"
-        output_dir.mkdir(parents=True, exist_ok=True)
         checks.append(
             Check(
                 "llvm-coverage",
@@ -115,7 +124,7 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
             Check(
                 "python-helpers",
                 (
-                    os.sys.executable,
+                    sys.executable,
                     "-m",
                     "unittest",
                     "discover",
@@ -172,8 +181,8 @@ def run_check(check: Check) -> dict[str, object]:
                 check=False,
             )
             exit_code = process.returncode
-        except FileNotFoundError as error:
-            log.write(f"missing executable: {error}\n")
+        except OSError as error:
+            log.write(f"could not run command: {error}\n")
             exit_code = 127
     if check.name == "llvm-coverage":
         for profile in set(root_coverage_profiles()) - existing_profiles:
@@ -190,6 +199,13 @@ def run_check(check: Check) -> dict[str, object]:
 
 def root_coverage_profiles():
     return ROOT.glob("default_*.profraw")
+
+
+def prepare_coverage_report() -> None:
+    """Create the report directory and invalidate a previous HTML summary."""
+    output_dir = ROOT / "build" / "reports" / "coverage"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "html" / "index.html").unlink(missing_ok=True)
 
 
 def status_paths(status: str) -> list[str]:
@@ -216,70 +232,103 @@ def dirty_files() -> list[str]:
 
 
 def coverage_summary() -> dict[str, dict[str, object]] | None:
+    """Return label-matched totals from the current llvm-cov HTML report."""
     index = ROOT / "build" / "reports" / "coverage" / "html" / "index.html"
     if not index.exists():
         return None
     html = index.read_text(encoding="utf-8")
-    percentages = re.findall(r"<pre>\s*([0-9.]+)% \((\d+)/(\d+)\)</pre>", html)
-    if len(percentages) < 3:
-        return None
-    function, line, region = percentages[-3:]
+    return parse_coverage_summary(html)
+
+
+def parse_coverage_summary(html: str) -> dict[str, dict[str, object]]:
+    """Parse llvm-cov totals by header label instead of positional order."""
+    header_match = re.search(r"<tr>(.*?)</tr>", html, re.IGNORECASE)
+    totals_match = re.search(
+        r"<tr[^>]*>\s*<td[^>]*>\s*<pre>\s*Totals\s*</pre>\s*</td>(.*?)</tr>",
+        html,
+        re.IGNORECASE,
+    )
+    if header_match is None or totals_match is None:
+        raise ValueError("llvm-cov HTML summary table is missing or unreadable")
+
+    headers = [
+        value.strip()
+        for value in re.findall(r"<td[^>]*>\s*([^<]+?)\s*</td>", header_match.group(1))
+    ]
+    totals = re.findall(
+        r"<pre>\s*([0-9.]+)% \((\d+)/(\d+)\)\s*</pre>", totals_match.group(1)
+    )
+    expected = ("Function Coverage", "Line Coverage", "Region Coverage")
+    if tuple(headers[1:4]) != expected or len(totals) != 3:
+        raise ValueError("llvm-cov HTML summary columns are unsupported or incomplete")
+
+    values = {
+        "functions": totals[0],
+        "lines": totals[1],
+        "regions": totals[2],
+    }
     return {
-        "functions": {
-            "percent": float(function[0]),
-            "covered": int(function[1]),
-            "coverable": int(function[2]),
-        },
-        "lines": {
-            "percent": float(line[0]),
-            "covered": int(line[1]),
-            "coverable": int(line[2]),
-        },
-        "regions": {
-            "percent": float(region[0]),
-            "covered": int(region[1]),
-            "coverable": int(region[2]),
-        },
+        name: {
+            "percent": float(value[0]),
+            "covered": int(value[1]),
+            "coverable": int(value[2]),
+        }
+        for name, value in values.items()
     }
 
 
 def write_receipt(
     *, fast: bool, coverage: bool, mutation: bool, results: Sequence[dict[str, object]]
 ) -> None:
+    source_revision, source_dirty = git_state()
+    summary: dict[str, dict[str, object]] | None = None
+    summary_error: str | None = None
+    if coverage:
+        try:
+            summary = coverage_summary()
+            if summary is None:
+                summary_error = "coverage HTML index was not generated"
+        except (OSError, ValueError) as error:
+            summary_error = str(error)
+
     receipt = {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "agent": "Codex",
+        "agent": os.environ.get("QUALITY_AGENT", "Codex"),
         "mode": "fast" if fast else "default",
         "coverage": coverage,
         "mutation": mutation,
         "platform": platform.platform(),
-        "source_revision": git_output("rev-parse", "HEAD"),
-        "source_dirty": dirty_files(),
+        "source_revision": source_revision,
+        "source_dirty": source_dirty,
         "scope": (
             "Deterministic offline quality checks; no live provider is called. "
             "Coverage and mutation are included only when requested."
         ),
         "checks": list(results),
-        **({"coverage_summary": coverage_summary()} if coverage else {}),
+        **(
+            {"coverage_summary": summary, "coverage_summary_error": summary_error}
+            if coverage
+            else {}
+        ),
         "aggregate_passed": all(result["exit_code"] == 0 for result in results),
     }
     RECEIPT_PATH.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
+    fast_mode = parser.add_mutually_exclusive_group()
+    fast_mode.add_argument(
         "--fast", action="store_true", help="run property invariants only"
     )
-    mode.add_argument(
+    fast_mode.add_argument(
         "--coverage", action="store_true", help="run LLVM source coverage"
     )
-    mode.add_argument(
-        "--mutation", action="store_true", help="run mutation diagnostics"
+    parser.add_argument(
+        "--mutation", action="store_true", help="add mutation diagnostics"
     )
     parser.add_argument("--list", action="store_true", help="list checks and exit")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> int:
@@ -294,6 +343,8 @@ def main() -> int:
             print(" ".join(check.command))
         return 0
 
+    if arguments.coverage:
+        prepare_coverage_report()
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     RECEIPT_PATH.unlink(missing_ok=True)
     results = [run_check(check) for check in checks]
@@ -308,7 +359,7 @@ def main() -> int:
         print(
             f"{marker}: {result['name']} "
             f"({result['elapsed_seconds']:.3f}s, log={result['log']})",
-            file=os.sys.stderr,
+            file=sys.stderr,
         )
     return 0 if all(result["exit_code"] == 0 for result in results) else 1
 
