@@ -240,6 +240,27 @@ def derive(
             for name, value in aliases.items()
             if (route := alias_route(value)) is None or route in set(tiers)
         }
+    # The /v1/models listing advertises every tier's bare model id, but the
+    # router only dispatches qualified provider,model routes and explicit
+    # aliases: a bare id with no alias entry silently falls through to
+    # Router.default (observed serving zai,glm-5.3 for a requested
+    # MiniMax-M3.1-Flash-Preview). Derive one alias per unambiguous tier
+    # model so advertised ids stay routable without hand-editing every
+    # consumer; an operator entry is never overridden, and a name two
+    # providers share stays unaliased rather than silently choosing a winner.
+    derived_aliases = result["Router"].get("modelAliases")
+    if not isinstance(derived_aliases, dict):
+        derived_aliases = {}
+        result["Router"]["modelAliases"] = derived_aliases
+    claims: dict[str, int] = {}
+    for route in tiers:
+        model = route.partition(",")[2]
+        if model:
+            claims[model] = claims.get(model, 0) + 1
+    for route in tiers:
+        model = route.partition(",")[2]
+        if model and claims[model] == 1 and model not in derived_aliases:
+            derived_aliases[model] = route
     if router.get("topK") is not None:
         raise ValueError(
             f"Consumer {consumer} must remove topK before using strict fallback"

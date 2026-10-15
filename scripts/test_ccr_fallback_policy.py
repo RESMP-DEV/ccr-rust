@@ -65,8 +65,10 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(config["Router"]["retrySweeps"]["maxHoldMs"], 12345)
             self.assertEqual(
                 config["Router"]["modelAliases"],
-                {},
-                "aliases for routes outside the active chain must be pruned",
+                {"x": "fast,x", "y": "fast,y", "z": "full,z", "k": "last,k"},
+                "aliases outside the active chain are pruned and every"
+                " unambiguous tier id is derived as an alias so advertised"
+                " bare ids stay routable",
             )
             self.assertEqual(config["PORT"], 1234)
         self.assertFalse(policy.sync(self.root, check=True)["changed"])
@@ -175,6 +177,25 @@ class PolicyTests(unittest.TestCase):
         provider_names = [provider["name"] for provider in derived["Providers"]]
         self.assertEqual(provider_names, ["fast", "full", "last"])
         self.assertNotIn("stale", derived["Router"]["modelAliases"])
+
+    def test_bare_tier_ids_get_derived_aliases(self) -> None:
+        # An operator alias is authoritative: injection never overrides it,
+        # even when it points a tier's bare id at a different chain tier.
+        config = copy.deepcopy(self.config)
+        config["Router"]["modelAliases"]["y"] = "fast,x"
+        derived = policy.derive(config, self.policy, "worker.json")
+        self.assertEqual(
+            derived["Router"]["modelAliases"],
+            {"y": "fast,x", "x": "fast,x", "z": "full,z", "k": "last,k"},
+        )
+        # A model name offered by two providers is ambiguous: no alias is
+        # derived for it rather than silently choosing one provider.
+        self.policy["routes"].insert(3, "full,y")
+        ambiguous = copy.deepcopy(self.config)
+        ambiguous["Providers"][1]["models"].append("y")
+        derived = policy.derive(ambiguous, self.policy, "worker.json")
+        self.assertNotIn("y", derived["Router"]["modelAliases"])
+        self.assertEqual(derived["Router"]["modelAliases"]["x"], "fast,x")
 
     def test_machine_policy_is_pinned_to_source(self) -> None:
         machine_policy: dict[str, Any] = {
