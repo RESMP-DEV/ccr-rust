@@ -20,7 +20,6 @@ GLM model IDs below:
 {
   "version": 1,
   "routes": [
-    "zai,glm-5.3-flashx",
     "zai,glm-5.3-flash",
     "zai,glm-5.3",
     "kimi,k3-256k"
@@ -34,7 +33,7 @@ GLM model IDs below:
     "transformer": {"use": [["maxtoken", {"max_tokens": 32768}]]}
   }],
   "consumers": {
-    "glm-workers.json": {"primary": "zai,glm-5.3-flashx"},
+    "glm-workers.json": {"primary": "zai,glm-5.3-flash"},
     "config.json": {"primary": "zai,glm-5.3"}
   }
 }
