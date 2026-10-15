@@ -236,20 +236,40 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(headers["authorization"], "Bearer secret")
         self.assertEqual(headers["user-agent"], "ccr-fallback-policy-preflight/1")
 
-    def test_gmi_free_promotion_is_after_glm_and_before_deepseek(self) -> None:
+    def test_removed_tiers_stay_registered_providers(self) -> None:
+        # 2026-10-11: gmi (unreliable) and deepseek (balance exhausted) left
+        # the chain but stay registered so re-adding a chain entry restores
+        # them without rewiring credentials.
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[3],
-            "gmi,Qwen/Qwen3.8-Max-0902",
+            policy.MACHINE_ROUTE_CHAIN,
+            (
+                "zai,glm-5.3-flash",
+                "zai,glm-5.3",
+                "minimax,MiniMax-M3.1-Flash-Preview",
+            ),
+        )
+        self.assertNotIn("gmi,Qwen/Qwen3.8-Max-0902", policy.MACHINE_ROUTE_CHAIN)
+        self.assertNotIn("deepseek,deepseek-flash", policy.MACHINE_ROUTE_CHAIN)
+        self.assertIn("gmi", policy.MACHINE_SHARED_PROVIDERS)
+        self.assertIn("deepseek", policy.MACHINE_SHARED_PROVIDERS)
+        self.assertEqual(
+            policy.MACHINE_SHARED_PROVIDERS["gmi"]["api_base_url"],
+            "https://api.gmi-serving.com/v1",
+        )
+        self.assertIn("User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"])
+
+    def test_flashx_tier_removed_after_trial_expiry(self) -> None:
+        # The coding-plan FlashX trial expired 2026-10-09 (429 1311); leading
+        # any chain or primary with it would pay a guaranteed refusal.
+        self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN[0],
+            "zai,glm-5.3-flash",
         )
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[4],
-            "deepseek,deepseek-flash",
+            policy.MACHINE_CONSUMERS["glm-workers.json"],
+            "zai,glm-5.3-flash",
         )
-        gmi = policy.MACHINE_SHARED_PROVIDERS["gmi"]
-        self.assertEqual(gmi["protocol"], "openai")
-        self.assertEqual(gmi["api_base_url"], "https://api.gmi-serving.com/v1")
-        self.assertIn("Qwen/Qwen3.8-Max-0902", gmi["models"])
-        self.assertIn("User-Agent", gmi["extra_headers"])
 
     def test_governed_consumers_cannot_preserve_an_infinite_hold(self) -> None:
         config = copy.deepcopy(self.config)
@@ -547,6 +567,37 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(entry["status"], 200)
         self.assertIn("messages", entry["detail"])
         self.assertNotIn("private-example", json.dumps(result))
+
+    def test_registered_not_routed_provider_is_skipped_not_probed(self) -> None:
+        """A registered provider no route references must not gate preflight."""
+        self._policy(
+            {
+                "name": "fixture",
+                "api_base_url": self.endpoint,
+                "api_key": "${FIXTURE_KEY}",
+                "protocol": "responses",
+                "models": ["model"],
+            }
+        )
+        dormant_policy = json.loads(
+            (self.root / "fallback-policy.json").read_text(encoding="utf-8")
+        )
+        # Port 9 (discard) would fail as a transport error if ever probed.
+        dormant_policy["providers"].append(
+            {
+                "name": "dormant",
+                "api_base_url": "http://127.0.0.1:9/v1",
+                "api_key": "${FIXTURE_KEY}",
+                "protocol": "responses",
+                "models": ["stale"],
+            }
+        )
+        policy.atomic_json(self.root / "fallback-policy.json", dormant_policy)
+        self.status = 200
+        result = policy.preflight(self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["registered_not_routed"], ["dormant"])
+        self.assertEqual([entry["provider"] for entry in result["providers"]], ["fixture"])
 
     def test_unresolved_credential_is_reported_before_any_network_call(self) -> None:
         policy.atomic_json(
