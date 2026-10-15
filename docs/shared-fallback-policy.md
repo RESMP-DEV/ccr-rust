@@ -92,10 +92,17 @@ cannot expand routing by editing `fallback-policy.json`. A route expansion
 requires a reviewed source-policy change, tests and a live credential preflight.
 Derived consumers also remove providers and model aliases whose routes are not
 active, preventing a dormant provider from becoming an accidental future tier.
-The approved main-machine shared chain places GMI Qwen3.8-Max-0902 after the
-GLM tiers, then ends with DeepSeek followed by
-MiniMax-M3.1-Flash-Preview. The explicit preview model ID is required: the
-shorter `MiniMax-M3.1-Flash` alias was observed upstream returning
+Each unambiguous tier model additionally gets a derived bare-id alias
+(`<model>` → `<provider>,<model>`): the `/v1/models` listing advertises bare
+ids that the router otherwise silently dispatches to `Router.default` (a
+requested `MiniMax-M3.1-Flash-Preview` was measured serving `zai,glm-5.3`
+before the alias existed). An operator alias entry is never overridden, and a
+model name offered by two providers stays unaliased rather than guessing.
+The approved main-machine shared chain is GLM 5.3 Flash, then GLM 5.3, then
+MiniMax-M3.1-Flash-Preview: the former FlashX head was removed 2026-10-11
+after its coding-plan trial expired, and GMI and DeepSeek stay registered but
+unrouted pending dated re-approval. The explicit preview model ID is required:
+the shorter `MiniMax-M3.1-Flash` alias was observed upstream returning
 `MiniMax-M3`, so status-code-only validation cannot distinguish it.
 
 Before changing or restarting a shared provider route, run:
