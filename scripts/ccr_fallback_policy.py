@@ -24,15 +24,16 @@ ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # JSON. Route changes require a source change, tests, and live qualification.
 MACHINE_ROOT = ROOT
 MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
-    "zai,glm-5.3-flashx",
+    # User-approved 2026-10-11 removal of the former first tier
+    # "zai,glm-5.3-flashx": its coding-plan trial expired 2026-10-09
+    # (429 code 1311, "plan does not yet include access"), so leading
+    # with it made every dispatch pay one guaranteed-refusal round trip.
     "zai,glm-5.3-flash",
     "zai,glm-5.3",
-    # User-approved 2026-10-09 GMI promotion tier. The exact promoted
-    # "Qwen/Qwen3.8-Max" id currently resolves across paid and free backends
-    # and returned 402 without credit; the dated 0902 deployment passed 5/5
-    # live completions with zero balance.
-    "gmi,Qwen/Qwen3.8-Max-0902",
-    "deepseek,deepseek-flash",
+    # Also removed from the chain 2026-10-11, providers kept registered
+    # below for re-adding after fixing: "gmi,Qwen/Qwen3.8-Max-0902"
+    # (user: not working reliably) and "deepseek,deepseek-flash" (PAYG
+    # balance exhausted, preflight 402). Re-add with a dated approval.
     # User-approved 2026-10-07 final tier. Do not shorten this id: the alias
     # "MiniMax-M3.1-Flash" is accepted upstream but serves MiniMax-M3.
     "minimax,MiniMax-M3.1-Flash-Preview",
@@ -40,11 +41,16 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
 MACHINE_CONSUMERS: dict[str, str] = {
     "config.json": "zai,glm-5.3",
     "config-auth.json": "zai,glm-5.3",
-    "glm-workers.json": "zai,glm-5.3-flashx",
+    # Repinned 2026-10-11 from zai,glm-5.3-flashx for the same expired-trial
+    # reason as the chain head: the worker primary must be a route the plan
+    # is actually entitled to serve.
+    "glm-workers.json": "zai,glm-5.3-flash",
     # OCR keeps its distinct local primary; shared fallback remains governed.
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
 }
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
+    # Registered option, unrouted since 2026-10-11 (user: not working
+    # reliably). Kept wired so re-adding the chain entry restores it.
     "gmi": {
         "name": "gmi",
         "api_base_url": "https://api.gmi-serving.com/v1",
@@ -55,6 +61,9 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "extra_headers": {"User-Agent": "ccr-rust/1 (+gmi)"},
         "models": ["Qwen/Qwen3.8-Max-0902"],
     },
+    # Registered option, unrouted since 2026-10-11 (PAYG balance exhausted,
+    # preflight 402). Kept wired so topping up plus re-adding the chain entry
+    # restores it.
     "deepseek": {
         "name": "deepseek",
         "api_base_url": "https://api.deepseek.com/anthropic/v1",
@@ -231,6 +240,27 @@ def derive(
             for name, value in aliases.items()
             if (route := alias_route(value)) is None or route in set(tiers)
         }
+    # The /v1/models listing advertises every tier's bare model id, but the
+    # router only dispatches qualified provider,model routes and explicit
+    # aliases: a bare id with no alias entry silently falls through to
+    # Router.default (observed serving zai,glm-5.3 for a requested
+    # MiniMax-M3.1-Flash-Preview). Derive one alias per unambiguous tier
+    # model so advertised ids stay routable without hand-editing every
+    # consumer; an operator entry is never overridden, and a name two
+    # providers share stays unaliased rather than silently choosing a winner.
+    derived_aliases = result["Router"].get("modelAliases")
+    if not isinstance(derived_aliases, dict):
+        derived_aliases = {}
+        result["Router"]["modelAliases"] = derived_aliases
+    claims: dict[str, int] = {}
+    for route in tiers:
+        model = route.partition(",")[2]
+        if model:
+            claims[model] = claims.get(model, 0) + 1
+    for route in tiers:
+        model = route.partition(",")[2]
+        if model and claims[model] == 1 and model not in derived_aliases:
+            derived_aliases[model] = route
     if router.get("topK") is not None:
         raise ValueError(
             f"Consumer {consumer} must remove topK before using strict fallback"
@@ -538,18 +568,40 @@ def probe_provider(
 
 
 def preflight(root: Path = ROOT, timeout: float = 15.0) -> dict[str, Any]:
-    """Verify every shared provider credential before a route change is trusted."""
+    """Verify every routed shared-provider credential before a route change is trusted.
+
+    A registered provider that no active route references is reported as
+    registered_not_routed and never probed: keeping one registered while
+    unrouted (an exhausted-balance DeepSeek awaiting top-up, say) must not
+    gate route changes on a credential nobody dispatches.
+    """
     policy = load_policy(root)
     credentials = root / "runtime-credentials.json"
-    shared = policy.get("providers", [])
-    if not shared:
+    if not policy.get("providers"):
         return {"providers": [], "ok": True, "detail": "no shared providers"}
+    routed: set[str] = {route.split(",", 1)[0] for route in policy["routes"]}
+    for settings in policy["consumers"].values():
+        routed.add(settings["primary"].split(",", 1)[0])
+        routed |= {
+            route.split(",", 1)[0]
+            for route in settings.get("additional_routes", [])
+        }
+    shared = [
+        provider
+        for provider in policy["providers"]
+        if provider.get("name") in routed
+    ]
     env = credential_environment(
         {"probe": json.dumps(shared)}, credentials if credentials.is_file() else None
     )
     results = [probe_provider(p, env, timeout) for p in shared]
     return {
         "providers": results,
+        "registered_not_routed": sorted(
+            provider.get("name")
+            for provider in policy["providers"]
+            if provider.get("name") not in routed
+        ),
         "ok": all(r["ok"] for r in results),
         "policy_sha256": hashlib.sha256(
             json.dumps(policy, sort_keys=True).encode()

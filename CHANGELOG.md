@@ -13,6 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed the shared fallback chain per the 2026-10-11 operator approval
+  (deployed then, committed now): removed the expired `zai,glm-5.3-flashx`
+  head after its coding-plan trial ended 2026-10-09, removed the GMI and
+  DeepSeek tiers (unroutable today; both providers stay registered for dated
+  re-approval), and repinned the worker listener primary to
+  `zai,glm-5.3-flash`.
+- Changed preflight to report registered-but-unrouted providers as
+  `registered_not_routed` and skip probing them, so a dormant credential
+  (an exhausted-balance provider awaiting top-up, say) cannot gate route
+  changes nobody dispatches.
+- Added derived bare-id aliases to governed consumers: every unambiguous tier
+  model gets `<model>` → `<provider>,<model>` in `Router.modelAliases`,
+  because the `/v1/models` listing advertises bare ids the router otherwise
+  silently dispatches to `Router.default` (a requested
+  `MiniMax-M3.1-Flash-Preview` was measured serving `zai,glm-5.3`). Operator
+  alias entries are never overridden, and a model name two providers share
+  stays unaliased.
+
 - Added a receipt-writing offline quality dispatcher. The default matrix covers
   formatting, strict Clippy, all-features Rust tests, the no-default-features
   boundary, Python helpers, and the vendored GP package; opt-in LLVM coverage
