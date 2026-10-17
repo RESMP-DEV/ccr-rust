@@ -99,8 +99,9 @@ before the alias existed). An operator alias entry is never overridden, and a
 model name offered by two providers stays unaliased rather than guessing.
 The approved main-machine shared chain is GLM 5.3 Flash, then GLM 5.3, then
 MiniMax-M3.1-Flash-Preview: the former FlashX head was removed 2026-10-11
-after its coding-plan trial expired, and GMI and DeepSeek stay registered but
-unrouted pending dated re-approval. The explicit preview model ID is required:
+after its coding-plan trial expired, FlashX is also absent from the Z.AI
+provider catalog, and GMI and DeepSeek stay registered but unrouted pending
+dated re-approval. The explicit preview model ID is required:
 the shorter `MiniMax-M3.1-Flash` alias was observed upstream returning
 `MiniMax-M3`, so status-code-only validation cannot distinguish it.
 

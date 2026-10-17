@@ -176,6 +176,10 @@ class PolicyTests(unittest.TestCase):
         derived = policy.derive(config, self.policy, "worker.json")
         provider_names = [provider["name"] for provider in derived["Providers"]]
         self.assertEqual(provider_names, ["fast", "full", "last"])
+        self.assertEqual(
+            [provider["models"] for provider in derived["Providers"]],
+            [["x", "y"], ["z"], ["k"]],
+        )
         self.assertNotIn("stale", derived["Router"]["modelAliases"])
 
     def test_bare_tier_ids_get_derived_aliases(self) -> None:
