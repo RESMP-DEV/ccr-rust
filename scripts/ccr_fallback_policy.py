@@ -219,11 +219,18 @@ def derive(
         if len(parts) != 2 or not isinstance(models, list) or parts[1] not in models:
             raise ValueError(f"Consumer {consumer} has an unavailable route: {route}")
     required_providers = {route.split(",", 1)[0] for route in tiers}
+    active_routes = set(tiers)
     result["Providers"] = [
         provider
         for provider in providers.values()
         if provider["name"] in required_providers
     ]
+    for provider in result["Providers"]:
+        provider["models"] = [
+            model
+            for model in provider.get("models", [])
+            if f"{provider['name']},{model}" in active_routes
+        ]
     router = result["Router"]
     aliases = router.get("modelAliases")
     if isinstance(aliases, dict):

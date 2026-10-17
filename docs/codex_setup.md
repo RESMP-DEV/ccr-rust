@@ -36,7 +36,7 @@ The locally tested build reads `~/.codex/ccr.config.toml` for `--profile ccr`:
 
 ```toml
 model_provider = "ccr_local"
-model = "zai,glm-5.3-flashx"
+model = "zai,glm-5.3-flash"
 
 [model_providers.ccr_local]
 name = "CCR-Rust local"

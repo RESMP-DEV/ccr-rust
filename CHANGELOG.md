@@ -13,12 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed guidance-free 429 backoff to be starvation-aware. A 429 without a
+  server Retry-After still paces a route for one second while the route keeps
+  admitting requests (concurrency-style caps must not blanket-skip a partially
+  available tier), but once a route has gone 20 seconds without any success
+  the local backoff doubles per consecutive 429 up to the same 60s ceiling the
+  Retry-After path uses. During the multi-hour 429 storms a coding-plan
+  quota window produces (measured ~2,000 recorded 429s/hour at peak on
+  2026-10-17), every incoming request otherwise paid one rejected round trip
+  on the walled route before cascading. Any success resets escalation
+  immediately, so recovery after the window rolls stays instant.
 - Changed the shared fallback chain per the 2026-10-11 operator approval
   (deployed then, committed now): removed the expired `zai,glm-5.3-flashx`
   head after its coding-plan trial ended 2026-10-09, removed the GMI and
   DeepSeek tiers (unroutable today; both providers stay registered for dated
   re-approval), and repinned the worker listener primary to
   `zai,glm-5.3-flash`.
+- Removed expired `glm-5.3-flashx` from the governed Z.AI provider catalog as
+  well as the route chain, so local model listings no longer advertise an
+  entitlement the coding plan cannot serve.
 - Changed preflight to report registered-but-unrouted providers as
   `registered_not_routed` and skip probing them, so a dormant credential
   (an exhausted-balance provider awaiting top-up, say) cannot gate route
