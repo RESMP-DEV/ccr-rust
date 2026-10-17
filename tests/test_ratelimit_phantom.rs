@@ -233,25 +233,88 @@ fn test_stale_generation_success_still_updates_quota_headers() {
     assert!(tracker.should_skip_tier(tier, true));
 }
 
-/// A 429 without a server Retry-After must only pace the tier briefly.
-/// Coding-plan endpoints reject some requests under concurrency while still
-/// admitting others, so escalating local backoff blanket-skips a tier that
-/// remains partially available.
+/// A 429 without a server Retry-After must only pace the tier briefly while
+/// the route keeps admitting requests. Coding-plan endpoints reject some
+/// requests under concurrency while still admitting others, so a tier whose
+/// successes interleave with 429s must not be blanket-skipped by escalating
+/// local backoff.
 #[test]
-fn test_429_without_retry_after_only_paces_briefly() {
+fn test_429_without_retry_after_only_paces_briefly_while_serving() {
     let tracker = RateLimitTracker::new();
     let tier = "zai-tier";
 
     for _ in 0..10 {
+        // A success inside the starvation window keeps the route classified
+        // as partially available; the next guidance-free 429 must pace, not
+        // escalate.
+        tracker.record_success(tier, Some(5), None);
+        tracker.record_429(tier, None);
+
+        let remaining = tracker
+            .backoff_remaining(tier)
+            .expect("a short pacing backoff should be active");
+        assert!(
+            remaining <= Duration::from_secs(1),
+            "backoff must not escalate while the route still admits requests, got {remaining:?}"
+        );
+    }
+}
+
+/// A route with no success at all (never served, or quota-walled past the
+/// starvation threshold) escalates its guidance-free backoff so sustained
+/// rejection stops costing one round trip per incoming request. Escalation
+/// doubles per consecutive 429 and caps at the same 60s ceiling the
+/// server-directed Retry-After uses.
+#[test]
+fn test_starved_route_escalates_without_retry_after() {
+    let tracker = RateLimitTracker::new();
+    let tier = "walled-tier";
+
+    let expected = [1u64, 2, 4, 8, 16, 32, 60, 60];
+    for (i, want_secs) in expected.iter().enumerate() {
+        tracker.record_429(tier, None);
+        let remaining = tracker
+            .backoff_remaining(tier)
+            .expect("backoff should be active after every 429");
+        // The window is sampled immediately, so it sits just under the
+        // intended duration; sub-second truncation would turn 1s into 0.
+        assert!(
+            remaining > Duration::from_secs(want_secs - 1)
+                && remaining <= Duration::from_secs(*want_secs),
+            "escalation step {} should back off {want_secs}s, got {:?}",
+            i + 1,
+            remaining
+        );
+    }
+}
+
+/// Any success on a starved route resets escalation: the next guidance-free
+/// 429 paces for one second again instead of resuming the doubled ladder.
+#[test]
+fn test_success_after_starvation_resets_escalation() {
+    let tracker = RateLimitTracker::new();
+    let tier = "walled-tier";
+
+    for _ in 0..5 {
         tracker.record_429(tier, None);
     }
+    let escalated = tracker
+        .backoff_remaining(tier)
+        .expect("backoff should be active");
+    assert!(
+        escalated > Duration::from_secs(8),
+        "five guidance-free 429s on a starved route must escalate, got {escalated:?}"
+    );
+
+    tracker.record_success(tier, Some(5), None);
+    tracker.record_429(tier, None);
 
     let remaining = tracker
         .backoff_remaining(tier)
         .expect("a short pacing backoff should be active");
     assert!(
         remaining <= Duration::from_secs(1),
-        "backoff must not escalate without server Retry-After, got {remaining:?}"
+        "a success must reset escalation, got {remaining:?}"
     );
 }
 

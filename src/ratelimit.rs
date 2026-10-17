@@ -14,6 +14,17 @@ lazy_static! {
     .unwrap();
 }
 
+/// A route whose most recent success is older than this (or that has never
+/// succeeded) is treated as starved. Coding-plan endpoints reject some
+/// requests under concurrency while still admitting others, and those mixed
+/// regimes have successes every few seconds; only a route with no admissions
+/// for this long escalates its local 429 backoff.
+const STARVATION_THRESHOLD: Duration = Duration::from_secs(20);
+
+/// Ceiling for locally escalated backoff. Matches the server Retry-After cap
+/// so client-facing retry guidance stays coherent across both paths.
+const MAX_LOCAL_BACKOFF: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Default)]
 pub struct TierRateLimitState {
     pub remaining: Option<u32>,
@@ -24,6 +35,10 @@ pub struct TierRateLimitState {
     /// snapshot of this counter predates the latest 429 must not clear the
     /// newer backoff (overlapping-request ordering).
     pub generation: u64,
+    /// Last time any request succeeded on this route, updated regardless of
+    /// generation ordering: escalation is about observed admission, not about
+    /// which overlapping request gets to clear a backoff window.
+    pub last_success_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -116,24 +131,43 @@ impl RateLimitTracker {
     pub fn record_429(&self, tier: &str, retry_after: Option<Duration>) {
         let mut tiers = self.tiers.write();
         let state = tiers.entry(tier.to_string()).or_default();
+        let now = Instant::now();
+        // A route still admitting requests (a success inside the starvation
+        // window) keeps the flat one-second pacing: concurrency-style caps
+        // must not be blanket-skipped. Only sustained, success-free rejection
+        // escalates.
+        let starved = !state
+            .last_success_at
+            .is_some_and(|t| now.duration_since(t) < STARVATION_THRESHOLD);
+        if !starved {
+            state.consecutive_429s = 0;
+        }
         state.consecutive_429s += 1;
         state.generation += 1;
 
         // A server-directed Retry-After is honored verbatim, capped at 60s.
-        // A 429 without server guidance only paces the tier for one second:
-        // plans that reject some requests under concurrency while still
-        // admitting others must not be blanket-skipped by escalating local
-        // backoff.
-        let backoff = retry_after
-            .map(|retry_after| retry_after.min(Duration::from_secs(60)))
-            .unwrap_or(Duration::from_secs(1));
+        // A 429 without server guidance paces the tier for one second while
+        // the route is still serving other requests; on a starved route the
+        // local backoff doubles per consecutive 429 up to the same 60s
+        // ceiling, so a provider-wide quota window (observed as multi-hour
+        // 429 storms with zero admissions) stops paying one rejected round
+        // trip per incoming request while cascade tiers absorb the traffic.
+        let backoff = match retry_after {
+            Some(retry_after) => retry_after.min(MAX_LOCAL_BACKOFF),
+            None if starved => {
+                let exponent = (state.consecutive_429s - 1).min(6);
+                Duration::from_secs((1u64 << exponent).min(MAX_LOCAL_BACKOFF.as_secs()))
+            }
+            None => Duration::from_secs(1),
+        };
 
-        state.backoff_until = Some(Instant::now() + backoff);
+        state.backoff_until = Some(now + backoff);
 
         tracing::warn!(
             tier = %tier,
             backoff_secs = %backoff.as_secs(),
             consecutive = %state.consecutive_429s,
+            starved,
             retry_after = ?retry_after,
             "Rate limited, backing off"
         );
@@ -164,6 +198,11 @@ impl RateLimitTracker {
             state.backoff_until = None;
         }
 
+        // Admission evidence is recorded unconditionally (see
+        // `last_success_at`): escalation tracks whether the route serves
+        // anyone, independent of overlapping-request backoff ordering.
+        state.last_success_at = Some(Instant::now());
+
         // Update rate limit info from response headers
         state.remaining = remaining;
         state.reset_at = reset_at;
@@ -184,6 +223,7 @@ impl RateLimitTracker {
         // Clear backoff state on successful request
         state.consecutive_429s = 0;
         state.backoff_until = None;
+        state.last_success_at = Some(Instant::now());
 
         // Update rate limit info from response headers
         state.remaining = remaining;
