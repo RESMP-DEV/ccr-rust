@@ -44,6 +44,14 @@ filtering; another machine is handling that boundary.
   mode-0600 timestamped backup. The three already-running `@z_ai/mcp-server`
   workers were terminated, and no `@z_ai/mcp-server` process remained.
 
+- Review round repair: Kilo Code Review reported that the port 3458 OCR primary
+  is `openrouter,nvidia/nemotron-3-ultra-550b-a55b:free`, not MiniMax. The
+  cordon commit had rewritten `docs/local-operation.md` to say OCR started at
+  MiniMax. That wording was corrected at head `81cce37`, which states ordinary,
+  worker, and OCR *fallback* routes start at MiniMax while the OCR primary stays
+  on OpenRouter. `python3 scripts/quality.py` passed all six checks at that head,
+  and the live 3458 catalog still lists OpenRouter before MiniMax.
+
 ## Restoration contract
 
 Do not restore either current GLM tier merely because the provider timestamp
