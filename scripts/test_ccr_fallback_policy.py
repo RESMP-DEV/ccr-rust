@@ -60,15 +60,22 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(
             result["consumers"]["worker.json"], ["fast,x", "fast,y", "full,z", "last,k"]
         )
-        for name in self.policy["consumers"]:
+        for name, settings in self.policy["consumers"].items():
             config = policy.read_json(self.root / name)
             self.assertEqual(config["Router"]["retrySweeps"]["maxHoldMs"], 12345)
             self.assertEqual(
                 config["Router"]["modelAliases"],
-                {"x": "fast,x", "y": "fast,y", "z": "full,z", "k": "last,k"},
-                "aliases outside the active chain are pruned and every"
+                {
+                    "x": "fast,x",
+                    "y": "fast,y",
+                    "z": "full,z",
+                    "k": "last,k",
+                    "ccr-primary": settings["primary"],
+                },
+                "aliases outside the active chain are pruned, every"
                 " unambiguous tier id is derived as an alias so advertised"
-                " bare ids stay routable",
+                " bare ids stay routable, and ccr-primary tracks each"
+                " consumer's primary tier",
             )
             self.assertEqual(config["PORT"], 1234)
         self.assertFalse(policy.sync(self.root, check=True)["changed"])
@@ -190,7 +197,13 @@ class PolicyTests(unittest.TestCase):
         derived = policy.derive(config, self.policy, "worker.json")
         self.assertEqual(
             derived["Router"]["modelAliases"],
-            {"y": "fast,x", "x": "fast,x", "z": "full,z", "k": "last,k"},
+            {
+                "y": "fast,x",
+                "x": "fast,x",
+                "z": "full,z",
+                "k": "last,k",
+                "ccr-primary": "fast,x",
+            },
         )
         # A model name offered by two providers is ambiguous: no alias is
         # derived for it rather than silently choosing one provider.
@@ -268,6 +281,8 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
             (
+                "zai,glm-5.3-flash",
+                "zai,glm-5.3",
                 "minimax,MiniMax-M3.1-Flash-Preview",
             ),
         )
@@ -281,34 +296,28 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertIn("User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"])
 
-    def test_cordoned_chain_has_an_entitled_primary(self) -> None:
-        # The exhausted GLM monthly tool quota was cordoned 2026-10-18. Every
-        # governed listener starts at a route that can still serve requests.
+    def test_restored_glm_chain_leads_with_entitled_primaries(self) -> None:
+        # 2026-10-18 user-directed restore: the monthly tool quota does not
+        # gate completions, so the GLM tiers lead again and every governed
+        # primary sits on a route the plan serves.
         self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN[0],
-            "minimax,MiniMax-M3.1-Flash-Preview",
+            "zai,glm-5.3-flash",
         )
         self.assertEqual(
             policy.MACHINE_CONSUMERS["glm-workers.json"],
-            "minimax,MiniMax-M3.1-Flash-Preview",
-        )
-
-    def test_glm_tiers_cordoned_until_monthly_quota_resets(self) -> None:
-        """Keep exhausted GLM coding-plan routes out of every governed chain."""
-        glm_routes = {
             "zai,glm-5.3-flash",
-            "zai,glm-5.3",
-            "zai,glm-5.3-flashx",
-        }
-        self.assertFalse(glm_routes.intersection(policy.MACHINE_ROUTE_CHAIN))
-        self.assertTrue(
-            glm_routes.isdisjoint(policy.MACHINE_CONSUMERS.values()),
         )
-        self.assertEqual(
-            policy.MACHINE_CONSUMERS["config.json"],
-            "minimax,MiniMax-M3.1-Flash-Preview",
-        )
+        self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
+
+    def test_zai_provider_registered_for_restored_routes(self) -> None:
+        zai = policy.MACHINE_SHARED_PROVIDERS["zai"]
+        self.assertEqual(zai["api_base_url"], "https://api.z.ai/api/v1")
+        self.assertEqual(zai["api_key"], "${CCR_ZAI_API_KEY}")
+        self.assertEqual(zai["protocol"], "responses")
+        self.assertIn("glm-5.3", zai["models"])
+        self.assertIn("glm-5.3-flash", zai["models"])
 
     def test_governed_consumers_cannot_preserve_an_infinite_hold(self) -> None:
         config = copy.deepcopy(self.config)

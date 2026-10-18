@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Restored the GLM-5.3-Flash and GLM-5.3 chain tiers and their consumer
+  primaries (main/auth GLM-5.3, workers GLM-5.3-Flash), reversing the
+  2026-10-18 quota cordon after its premise was disproved: the Z.AI monthly
+  tool quota gates tool usage, not model completions, and GLM kept serving
+  (the router completed thousands of GLM calls after the probe read
+  4000/4000, and the ZCode app served GLM on the same plan). Completions
+  stay limited by the rolling 5-hour prompt window and concurrency caps,
+  with refusals cascading to the MiniMax final tier. Derived consumer
+  configs now also expose a stable `ccr-primary` alias mapped to each
+  listener's primary tier, so clients pinned to it follow routing changes
+  without restarting long-lived sessions.
+
 - Changed guidance-free 429 backoff to be starvation-aware. A 429 without a
   server Retry-After still paces a route for one second while the route keeps
   admitting requests (concurrency-style caps must not blanket-skip a partially

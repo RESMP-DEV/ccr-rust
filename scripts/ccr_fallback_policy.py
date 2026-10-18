@@ -28,11 +28,15 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # "zai,glm-5.3-flashx": its coding-plan trial expired 2026-10-09
     # (429 code 1311, "plan does not yet include access"), so leading
     # with it made every dispatch pay one guaranteed-refusal round trip.
-    # Cordoned 2026-10-18 after `modelctl usage --provider zcode --json`
-    # reported the monthly tool quota at 4000/4000 (0%). The provider's
-    # reset deadline is 2026-10-28 20:26:14 America/Los_Angeles. Do not
-    # restore either GLM tier until a fresh usage probe shows monthly headroom;
-    # routing to an exhausted plan otherwise spends a refusal on every call.
+    # Restored 2026-10-18 by user direction after the cordon's premise was
+    # disproved: the monthly tool quota (4000/4000, resets 2026-10-28) gates
+    # the plan's tool usage, not model completions. The router served
+    # thousands of successful GLM calls after that probe read 0%, and the
+    # ZCode app kept serving GLM on the same plan. Completions are limited
+    # by the rolling 5-hour prompt window and concurrency caps; refusals
+    # cascade to the final tier below.
+    "zai,glm-5.3-flash",
+    "zai,glm-5.3",
     # Also removed from the chain 2026-10-11, providers kept registered
     # below for re-adding after fixing: "gmi,Qwen/Qwen3.8-Max-0902"
     # (user: not working reliably) and "deepseek,deepseek-flash" (PAYG
@@ -42,15 +46,27 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     "minimax,MiniMax-M3.1-Flash-Preview",
 )
 MACHINE_CONSUMERS: dict[str, str] = {
-    "config.json": "minimax,MiniMax-M3.1-Flash-Preview",
-    "config-auth.json": "minimax,MiniMax-M3.1-Flash-Preview",
-    # Repinned 2026-10-18 to the final tier while the Z.AI monthly tool quota
-    # is exhausted; the worker primary must not pay a guaranteed refusal.
-    "glm-workers.json": "minimax,MiniMax-M3.1-Flash-Preview",
+    # Primaries returned to their pre-cordon tiers with the 2026-10-18
+    # user-directed GLM restore.
+    "config.json": "zai,glm-5.3",
+    "config-auth.json": "zai,glm-5.3",
+    "glm-workers.json": "zai,glm-5.3-flash",
     # OCR keeps its distinct local primary; shared fallback remains governed.
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
 }
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
+    "zai": {
+        "name": "zai",
+        "api_base_url": "https://api.z.ai/api/v1",
+        "api_key": "${CCR_ZAI_API_KEY}",
+        "protocol": "responses",
+        "auth_header": "authorization",
+        # glm-5.3-flashx stays a registered capability only: its coding-plan
+        # trial expired 2026-10-09 and no chain entry routes to it, so
+        # derive() filters it out of generated consumer configs.
+        "models": ["glm-5.3", "glm-5.3-flashx", "glm-5.3-flash"],
+        "honor_ratelimit_headers": False,
+    },
     # Registered option, unrouted since 2026-10-11 (user: not working
     # reliably). Kept wired so re-adding the chain entry restores it.
     "gmi": {
@@ -270,6 +286,10 @@ def derive(
         model = route.partition(",")[2]
         if model and claims[model] == 1 and model not in derived_aliases:
             derived_aliases[model] = route
+    # Stable client handle: a pin like Codex's `ccr-primary` follows the
+    # consumer's primary tier across cordons and restores without restarting
+    # long-lived clients, which read their model pin only at process start.
+    derived_aliases.setdefault("ccr-primary", primary)
     if router.get("topK") is not None:
         raise ValueError(
             f"Consumer {consumer} must remove topK before using strict fallback"
