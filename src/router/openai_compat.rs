@@ -19,7 +19,10 @@ use tracing::error;
 
 use crate::frontend::codex::CodexFrontend;
 use crate::frontend::Frontend;
-use crate::metrics::increment_active_streams;
+use crate::frontend::FrontendType;
+use crate::metrics::{
+    increment_active_streams, record_anthropic_response_tools, record_streamed_tool_call,
+};
 use crate::sse::SseFrameDecoder;
 use crate::transform::anthropic_to_openai::AnthropicToOpenAiResponseTransformer;
 use crate::transformer::Transformer;
@@ -213,6 +216,7 @@ async fn convert_anthropic_json_response_to_openai(response: Response) -> Respon
         }
     };
 
+    record_anthropic_response_tools(&anthropic_response.content, FrontendType::Codex);
     let internal_response = anthropic_response_to_internal(anthropic_response);
     let frontend = CodexFrontend::new();
     let serialized = match frontend.serialize_response(internal_response) {
@@ -336,6 +340,7 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         let mut next_tool_index = 0;
         let mut response_id = None;
         let mut response_model = None;
+        let mut streaming_tool_calls: HashMap<u64, (String, u64)> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -396,6 +401,61 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                         .and_then(serde_json::Value::as_str)
                                         .map(str::to_string);
                                 }
+                                if event_kind.as_deref() == Some("content_block_start")
+                                    && event_json
+                                        .pointer("/content_block/type")
+                                        .and_then(serde_json::Value::as_str)
+                                        == Some("tool_use")
+                                {
+                                    if let (Some(index), Some(name)) = (
+                                        event_json.get("index").and_then(serde_json::Value::as_u64),
+                                        event_json
+                                            .pointer("/content_block/name")
+                                            .and_then(serde_json::Value::as_str),
+                                    ) {
+                                        streaming_tool_calls.insert(index, (name.to_string(), 0));
+                                    }
+                                }
+                                if event_kind.as_deref() == Some("content_block_delta") {
+                                    if let Some(index) =
+                                        event_json.get("index").and_then(serde_json::Value::as_u64)
+                                    {
+                                        if let Some(partial_json) = event_json
+                                            .pointer("/delta/partial_json")
+                                            .and_then(serde_json::Value::as_str)
+                                        {
+                                            if let Some((_, bytes)) =
+                                                streaming_tool_calls.get_mut(&index)
+                                            {
+                                                *bytes += partial_json.len() as u64;
+                                            }
+                                        }
+                                    }
+                                }
+                                if event_kind.as_deref() == Some("content_block_stop") {
+                                    if let Some(index) =
+                                        event_json.get("index").and_then(serde_json::Value::as_u64)
+                                    {
+                                        // Start/delta events are remapped to dense OpenAI indices,
+                                        // while stop events retain Anthropic's original index.
+                                        let storage_index = tool_indices.get(&index).copied().unwrap_or(index);
+                                        if let Some((name, bytes)) =
+                                            streaming_tool_calls.remove(&storage_index)
+                                        {
+                                            record_streamed_tool_call(
+                                                FrontendType::Codex,
+                                                &name,
+                                                bytes,
+                                            );
+                                        }
+                                    }
+                                }
+
+                                remap_anthropic_tool_call_index(
+                                    &mut event_json,
+                                    &mut tool_indices,
+                                    &mut next_tool_index,
+                                );
                                 let event_usage = match event_kind.as_deref() {
                                     Some("message_start") => Some(&event_json["message"]["usage"]),
                                     Some("message_delta" | "message_stop") => {
@@ -562,6 +622,7 @@ pub(super) async fn handle_responses_chat_completions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
 
     #[tokio::test]
     async fn duplicate_message_stop_does_not_emit_after_done() {
@@ -635,6 +696,36 @@ mod tests {
         assert_eq!(output.matches("data: [DONE]").count(), 1);
         assert!(!output.contains("late"));
         assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn streaming_tool_calls_record_metadata_only_metrics() {
+        let body = concat!(
+            "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"stream_exec\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let _ = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let metrics_response = crate::metrics::tool_metrics_handler().await.into_response();
+        let bytes = to_bytes(metrics_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let raw = String::from_utf8_lossy(&bytes).to_string();
+        let metrics: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+        let entry = metrics
+            .iter()
+            .find(|entry| entry["tool"] == "stream_exec")
+            .expect("streaming tool metric should exist");
+        assert!(entry["response_calls"].as_u64().unwrap_or(0) >= 1);
+        assert!(entry["avg_argument_bytes"].as_f64().unwrap_or(0.0) > 0.0);
+        assert!(!raw.contains("private"));
     }
 
     #[test]

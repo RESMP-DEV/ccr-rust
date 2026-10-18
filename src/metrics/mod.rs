@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 mod handlers;
 pub use handlers::*;
+mod tool_telemetry;
+pub use tool_telemetry::{
+    record_anthropic_request_tools, record_anthropic_response_tools, record_streamed_tool_call,
+};
 
 mod persistence;
 use persistence::*;

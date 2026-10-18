@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added metadata-only agent-tool telemetry. CCR counts request-history and
+  generated tool calls per sanitized frontend/tool label and buckets serialized
+  definition, argument, and result sizes, including streamed tool-call assembly.
+  The new `/v1/tool-metrics` endpoint and Prometheus series never retain or
+  return tool payloads, and Redis persistence carries the aggregates across
+  restarts.
 - Changed guidance-free 429 backoff to be starvation-aware. A 429 without a
   server Retry-After still paces a route for one second while the route keeps
   admitting requests (concurrency-style caps must not blanket-skip a partially

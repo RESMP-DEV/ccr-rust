@@ -49,10 +49,10 @@ use crate::config::ModelAliasTarget;
 use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::record_deterministic_rejection;
 use crate::metrics::{
-    increment_active_requests, record_failure, record_hedge_launched, record_hedge_win,
-    record_hold_wait, record_pre_request_tokens, record_primary_hedge_win,
-    record_request_duration_with_frontend, record_request_with_frontend, record_retry_sweep,
-    sync_ewma_gauge,
+    increment_active_requests, record_anthropic_request_tools, record_failure,
+    record_hedge_launched, record_hedge_win, record_hold_wait, record_pre_request_tokens,
+    record_primary_hedge_win, record_request_duration_with_frontend, record_request_with_frontend,
+    record_retry_sweep, sync_ewma_gauge,
 };
 use crate::routing::AttemptTimer;
 
@@ -503,6 +503,7 @@ pub async fn handle_messages(
     // Detect frontend type from headers and request
     let body_json = serde_json::to_value(&request).unwrap_or_default();
     let frontend = detect_frontend(&headers, &body_json);
+    record_anthropic_request_tools(&body_json, frontend);
     info!(
         "Incoming request for model: {} (frontend: {:?})",
         request.model, frontend

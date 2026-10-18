@@ -543,6 +543,7 @@ fn build_router(
             "/v1/frontend-metrics",
             get(metrics::frontend_metrics_handler),
         )
+        .route("/v1/tool-metrics", get(metrics::tool_metrics_handler))
         .route("/health", get(health))
         .route("/metrics", get(metrics::metrics_handler));
     let app = if authenticated {

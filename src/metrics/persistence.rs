@@ -19,6 +19,10 @@ use crate::ratelimit::restore_rate_limit_backoff_counter;
 use crate::routing::EwmaTracker;
 
 use super::sync_ewma_gauge;
+use super::tool_telemetry::{
+    TOOL_ARGUMENT_BYTES, TOOL_CALLS_TOTAL, TOOL_DEFINITION_BYTES, TOOL_RESULT_BUCKETS,
+    TOOL_RESULT_BYTES, TOOL_SIZE_BUCKETS,
+};
 use super::{
     PreRequestAuditEntry, TokenDriftEntry, AUDIT_LOG, AUDIT_LOG_CAPACITY,
     CACHE_CREATION_TOKENS_TOTAL, CACHE_READ_TOKENS_TOTAL, COST_USD_TOTAL, FAILURES_TOTAL,
@@ -324,6 +328,7 @@ fn load_snapshot(conn: &mut redis::Connection, prefix: &str) -> Result<RedisSnap
         METRIC_RATE_LIMIT_BACKOFFS_TOTAL,
         METRIC_RETRY_SWEEPS_TOTAL,
         METRIC_TOKEN_DRIFT_ALERTS_TOTAL,
+        TOOL_CALLS_TOTAL,
     ];
     let gauge_metrics = [
         METRIC_PEAK_ACTIVE_STREAMS,
@@ -335,6 +340,9 @@ fn load_snapshot(conn: &mut redis::Connection, prefix: &str) -> Result<RedisSnap
         METRIC_REQUEST_DURATION_SECONDS,
         METRIC_FRONTEND_REQUEST_DURATION_SECONDS,
         METRIC_PRE_REQUEST_TOKENS,
+        TOOL_DEFINITION_BYTES,
+        TOOL_ARGUMENT_BYTES,
+        TOOL_RESULT_BYTES,
     ];
 
     let mut snapshot = RedisSnapshot::default();
@@ -653,6 +661,8 @@ fn histogram_bounds(metric: &str) -> Option<&'static [f64]> {
             Some(REQUEST_DURATION_BUCKETS)
         }
         METRIC_PRE_REQUEST_TOKENS => Some(PRE_REQUEST_TOKENS_BUCKETS),
+        TOOL_DEFINITION_BYTES | TOOL_ARGUMENT_BYTES => Some(TOOL_SIZE_BUCKETS),
+        TOOL_RESULT_BYTES => Some(TOOL_RESULT_BUCKETS),
         _ => None,
     }
 }

@@ -16,6 +16,7 @@ use tracing::debug;
 
 use crate::routing::EwmaTracker;
 
+use super::tool_telemetry::{ARGUMENT_BYTES, CALLS, DEFINITION_BYTES, RESULT_BYTES};
 use super::{
     get_hist_offset, get_throughput_state, merge_histogram_offsets, PreRequestAuditEntry,
     ThroughputSample, ACTIVE_REQUESTS, ACTIVE_STREAMS, AUDIT_LOG, CACHE_CREATION_TOKENS_TOTAL,
@@ -44,6 +45,21 @@ pub struct FrontendMetrics {
     pub frontend: String,
     pub requests: u64,
     pub avg_latency_ms: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ToolMetrics {
+    pub frontend: String,
+    pub tool: String,
+    pub request_calls: u64,
+    pub response_calls: u64,
+    pub tool_results: u64,
+    pub definition_samples: u64,
+    pub avg_definition_bytes: f64,
+    pub argument_samples: u64,
+    pub avg_argument_bytes: f64,
+    pub result_samples: u64,
+    pub avg_result_bytes: f64,
 }
 
 /// Handler for GET /v1/token-drift - returns per-tier token verification summary.
@@ -392,6 +408,98 @@ pub async fn frontend_metrics_handler() -> impl IntoResponse {
     metrics_list.sort_by(|a, b| a.frontend.cmp(&b.frontend));
 
     Json(metrics_list)
+}
+
+pub async fn tool_metrics_handler() -> impl IntoResponse {
+    let mut metrics: std::collections::BTreeMap<(String, String), ToolMetrics> =
+        std::collections::BTreeMap::new();
+
+    for metric in CALLS
+        .collect()
+        .iter()
+        .flat_map(|family| family.get_metric())
+    {
+        let labels: HashMap<&str, &str> = metric
+            .get_label()
+            .iter()
+            .map(|label| (label.name(), label.value()))
+            .collect();
+        let (Some(frontend), Some(tool), Some(direction)) = (
+            labels.get("frontend"),
+            labels.get("tool"),
+            labels.get("direction"),
+        ) else {
+            continue;
+        };
+        let entry = tool_metrics_entry(&mut metrics, frontend, tool);
+        let count = metric.get_counter().value() as u64;
+        match *direction {
+            "request" => entry.request_calls = count,
+            "response" => entry.response_calls = count,
+            "result" => entry.tool_results = count,
+            _ => {}
+        }
+    }
+
+    let histograms: [(&prometheus::HistogramVec, u8); 3] = [
+        (&DEFINITION_BYTES, 0),
+        (&ARGUMENT_BYTES, 1),
+        (&RESULT_BYTES, 2),
+    ];
+    for (histogram, kind) in histograms {
+        for metric in histogram
+            .collect()
+            .iter()
+            .flat_map(|family| family.get_metric())
+        {
+            let labels: HashMap<&str, &str> = metric
+                .get_label()
+                .iter()
+                .map(|label| (label.name(), label.value()))
+                .collect();
+            let (Some(frontend), Some(tool)) = (labels.get("frontend"), labels.get("tool")) else {
+                continue;
+            };
+            let histogram_metric = metric.get_histogram();
+            let count = histogram_metric.get_sample_count();
+            let average = if count == 0 {
+                0.0
+            } else {
+                (histogram_metric.get_sample_sum() / count as f64 * 10.0).round() / 10.0
+            };
+            let entry = tool_metrics_entry(&mut metrics, frontend, tool);
+            match kind {
+                0 => {
+                    entry.definition_samples = count;
+                    entry.avg_definition_bytes = average;
+                }
+                1 => {
+                    entry.argument_samples = count;
+                    entry.avg_argument_bytes = average;
+                }
+                _ => {
+                    entry.result_samples = count;
+                    entry.avg_result_bytes = average;
+                }
+            }
+        }
+    }
+
+    Json(metrics.into_values().collect::<Vec<_>>())
+}
+
+fn tool_metrics_entry<'a>(
+    metrics: &'a mut std::collections::BTreeMap<(String, String), ToolMetrics>,
+    frontend: &str,
+    tool: &str,
+) -> &'a mut ToolMetrics {
+    metrics
+        .entry((frontend.to_string(), tool.to_string()))
+        .or_insert_with(|| ToolMetrics {
+            frontend: frontend.to_string(),
+            tool: tool.to_string(),
+            ..ToolMetrics::default()
+        })
 }
 
 /// Per-tier throughput summary returned by /v1/throughput.

@@ -88,6 +88,10 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
             "/v1/frontend-metrics",
             get(ccr_rust::metrics::frontend_metrics_handler),
         )
+        .route(
+            "/v1/tool-metrics",
+            get(ccr_rust::metrics::tool_metrics_handler),
+        )
         .with_state(state)
 }
 
@@ -369,6 +373,135 @@ async fn test_frontend_metrics_records_codex_requests() {
         .find(|entry| entry.get("frontend").and_then(|v| v.as_str()) == Some("codex"))
         .expect("expected codex frontend metrics entry");
     assert!(codex["requests"].as_u64().unwrap_or(0) >= 1);
+}
+
+#[tokio::test]
+async fn test_tool_metrics_record_codex_tool_use_without_payload_leak() {
+    if skip_if_localhost_bind_unavailable() {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-tool-metrics",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_secret_1",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": "{\"cmd\":\"echo private-token-abc123\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 3,
+                "total_tokens": 8
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config_json = make_test_config(&mock_server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let request_body = json!({
+        "model": "mock,test-model",
+        "messages": [
+            {"role": "user", "content": "run the command"},
+            {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_prior_1",
+                "type": "function",
+                "function": {"name": "exec_command", "arguments": "{\"cmd\":\"echo earlier-private-def\"}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_prior_1", "content": "earlier-private-output"}
+        ],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "exec_command",
+                "description": "run a shell command with a private-token-abc123 hint",
+                "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+            }
+        }],
+        "max_tokens": 100
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("user-agent", "codex-cli/1.0.0")
+                .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/tool-metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let raw = String::from_utf8_lossy(&body_bytes);
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+
+    let exec_entry = entries
+        .iter()
+        .find(|entry| {
+            entry.get("frontend").and_then(|v| v.as_str()) == Some("codex")
+                && entry.get("tool").and_then(|v| v.as_str()) == Some("exec_command")
+        })
+        .expect("expected codex exec_command tool metrics entry");
+
+    assert!(exec_entry["request_calls"].as_u64().unwrap_or(0) >= 1);
+    assert!(exec_entry["tool_results"].as_u64().unwrap_or(0) >= 1);
+    assert!(exec_entry["avg_definition_bytes"].as_f64().unwrap_or(0.0) > 0.0);
+    assert!(exec_entry["avg_argument_bytes"].as_f64().unwrap_or(0.0) > 0.0);
+    assert!(exec_entry["avg_result_bytes"].as_f64().unwrap_or(0.0) > 0.0);
+
+    // Metadata only: no tool payload, argument, or result content may reach the endpoint.
+    for secret in [
+        "private-token-abc123",
+        "echo private",
+        "earlier-private-output",
+        "earlier-private-def",
+    ] {
+        assert!(
+            !raw.contains(secret),
+            "tool payload leaked into /v1/tool-metrics: {secret}"
+        );
+    }
 }
 
 #[tokio::test]
