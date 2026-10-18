@@ -97,8 +97,11 @@ ids that the router otherwise silently dispatches to `Router.default` (a
 requested `MiniMax-M3.1-Flash-Preview` was measured serving `zai,glm-5.3`
 before the alias existed). An operator alias entry is never overridden, and a
 model name offered by two providers stays unaliased rather than guessing.
-The approved main-machine shared chain is GLM 5.3 Flash, then GLM 5.3, then
-MiniMax-M3.1-Flash-Preview: the former FlashX head was removed 2026-10-11
+The approved main-machine shared chain is temporarily MiniMax-M3.1-Flash-Preview
+only. Both current GLM tiers were cordoned 2026-10-18 after the Z.AI monthly
+tool quota reported 4000/4000 used, with a provider-reported reset at
+2026-10-28 20:26:14 America/Los_Angeles. Do not restore them until a fresh
+usage probe shows monthly headroom. The former FlashX head remains removed
 after its coding-plan trial expired, FlashX is also absent from the Z.AI
 provider catalog, and GMI and DeepSeek stay registered but unrouted pending
 dated re-approval. The explicit preview model ID is required:

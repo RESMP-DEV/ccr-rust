@@ -216,11 +216,11 @@ class PolicyTests(unittest.TestCase):
         with unittest.mock.patch.object(policy, "MACHINE_ROOT", self.root):
             policy.load_policy(self.root)
 
-            self.policy["routes"].insert(3, "azure,gpt-6-astra")
+            self.policy["routes"].append("azure,gpt-6-astra")
             self.write_policy()
             with self.assertRaisesRegex(ValueError, "approved source policy"):
                 policy.load_policy(self.root)
-            self.policy["routes"].pop(3)
+            self.policy["routes"].pop()
 
             missing = min(policy.MACHINE_CONSUMERS)
             original_primary = self.policy["consumers"][missing]["primary"]
@@ -268,8 +268,6 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
             (
-                "zai,glm-5.3-flash",
-                "zai,glm-5.3",
                 "minimax,MiniMax-M3.1-Flash-Preview",
             ),
         )
@@ -283,17 +281,33 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertIn("User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"])
 
-    def test_flashx_tier_removed_after_trial_expiry(self) -> None:
-        # The coding-plan FlashX trial expired 2026-10-09 (429 1311); leading
-        # any chain or primary with it would pay a guaranteed refusal.
+    def test_cordoned_chain_has_an_entitled_primary(self) -> None:
+        # The exhausted GLM monthly tool quota was cordoned 2026-10-18. Every
+        # governed listener starts at a route that can still serve requests.
         self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN[0],
-            "zai,glm-5.3-flash",
+            "minimax,MiniMax-M3.1-Flash-Preview",
         )
         self.assertEqual(
             policy.MACHINE_CONSUMERS["glm-workers.json"],
+            "minimax,MiniMax-M3.1-Flash-Preview",
+        )
+
+    def test_glm_tiers_cordoned_until_monthly_quota_resets(self) -> None:
+        """Keep exhausted GLM coding-plan routes out of every governed chain."""
+        glm_routes = {
             "zai,glm-5.3-flash",
+            "zai,glm-5.3",
+            "zai,glm-5.3-flashx",
+        }
+        self.assertFalse(glm_routes.intersection(policy.MACHINE_ROUTE_CHAIN))
+        self.assertTrue(
+            glm_routes.isdisjoint(policy.MACHINE_CONSUMERS.values()),
+        )
+        self.assertEqual(
+            policy.MACHINE_CONSUMERS["config.json"],
+            "minimax,MiniMax-M3.1-Flash-Preview",
         )
 
     def test_governed_consumers_cannot_preserve_an_infinite_hold(self) -> None:

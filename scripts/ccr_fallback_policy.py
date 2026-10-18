@@ -28,8 +28,11 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # "zai,glm-5.3-flashx": its coding-plan trial expired 2026-10-09
     # (429 code 1311, "plan does not yet include access"), so leading
     # with it made every dispatch pay one guaranteed-refusal round trip.
-    "zai,glm-5.3-flash",
-    "zai,glm-5.3",
+    # Cordoned 2026-10-18 after `modelctl usage --provider zcode --json`
+    # reported the monthly tool quota at 4000/4000 (0%). The provider's
+    # reset deadline is 2026-10-28 20:26:14 America/Los_Angeles. Do not
+    # restore either GLM tier until a fresh usage probe shows monthly headroom;
+    # routing to an exhausted plan otherwise spends a refusal on every call.
     # Also removed from the chain 2026-10-11, providers kept registered
     # below for re-adding after fixing: "gmi,Qwen/Qwen3.8-Max-0902"
     # (user: not working reliably) and "deepseek,deepseek-flash" (PAYG
@@ -39,12 +42,11 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     "minimax,MiniMax-M3.1-Flash-Preview",
 )
 MACHINE_CONSUMERS: dict[str, str] = {
-    "config.json": "zai,glm-5.3",
-    "config-auth.json": "zai,glm-5.3",
-    # Repinned 2026-10-11 from zai,glm-5.3-flashx for the same expired-trial
-    # reason as the chain head: the worker primary must be a route the plan
-    # is actually entitled to serve.
-    "glm-workers.json": "zai,glm-5.3-flash",
+    "config.json": "minimax,MiniMax-M3.1-Flash-Preview",
+    "config-auth.json": "minimax,MiniMax-M3.1-Flash-Preview",
+    # Repinned 2026-10-18 to the final tier while the Z.AI monthly tool quota
+    # is exhausted; the worker primary must not pay a guaranteed refusal.
+    "glm-workers.json": "minimax,MiniMax-M3.1-Flash-Preview",
     # OCR keeps its distinct local primary; shared fallback remains governed.
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
 }
