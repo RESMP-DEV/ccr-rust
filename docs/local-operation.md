@@ -33,10 +33,11 @@ ccr-local validate
 
 The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
-Ordinary Claude and Codex sessions, worker sessions, and governed OCR fallback
-currently start at MiniMax-M3.1-Flash-Preview. GLM 5.3 and GLM 5.3-Flash are
-cordoned until the exhausted Z.AI monthly tool quota resets; FlashX remains
-absent after its coding-plan trial expired.
+Ordinary Claude and Codex sessions and worker sessions currently start at
+MiniMax-M3.1-Flash-Preview. OCR retains its distinct OpenRouter primary and
+falls through to MiniMax. GLM 5.3 and GLM 5.3-Flash are cordoned until the
+exhausted Z.AI monthly tool quota resets; FlashX remains absent after its
+coding-plan trial expired.
 Inspect the active config and live route counters before claiming which
 backend served a request.
 
