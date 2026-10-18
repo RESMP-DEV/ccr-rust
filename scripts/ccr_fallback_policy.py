@@ -54,14 +54,6 @@ MACHINE_CONSUMERS: dict[str, str] = {
     # OCR keeps its distinct local primary; shared fallback remains governed.
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
 }
-# Interactive sessions must never silently change models (2026-10-18 user
-# direction): the main listener serves exactly its primary route, so a
-# rate-limited GLM holds and re-sweeps, surfacing 429 to the client, instead
-# of cascading Codex or Claude traffic onto another tier or provider. Other
-# consumers keep the shared fallback chain.
-MACHINE_CONSUMER_ROUTES: dict[str, tuple[str, ...]] = {
-    "config.json": ("zai,glm-5.3",),
-}
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
     "zai": {
         "name": "zai",
@@ -161,9 +153,6 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
         extras = settings.get("additional_routes", [])
         if not isinstance(extras, list) or any(not isinstance(r, str) for r in extras):
             raise ValueError(f"Invalid additional routes for {name}")
-        scoped = settings.get("routes", [])
-        if not isinstance(scoped, list) or any(not isinstance(r, str) for r in scoped):
-            raise ValueError(f"Invalid route scope for {name}")
     if root.resolve() == MACHINE_ROOT.resolve():
         if tuple(routes) != MACHINE_ROUTE_CHAIN:
             raise ValueError(
@@ -185,11 +174,6 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
             if consumers[name].get("additional_routes", []) != []:
                 raise ValueError(
                     f"Consumer {name} cannot add routes outside the approved chain"
-                )
-            expected_routes = MACHINE_CONSUMER_ROUTES.get(name, ())
-            if tuple(consumers[name].get("routes", ())) != expected_routes:
-                raise ValueError(
-                    f"Consumer {name} route scope must remain {list(expected_routes)}"
                 )
         shared = {
             provider["name"]: provider
@@ -222,14 +206,6 @@ def derive(
     tiers = list(dict.fromkeys(candidates))
     if tiers[-1] != chain[-1]:
         raise ValueError("Additional routes cannot move the final fallback")
-    scoped = settings.get("routes")
-    if scoped is not None:
-        allowed = set(scoped)
-        if primary not in allowed:
-            raise ValueError(
-                f"Consumer {consumer} route scope excludes its primary"
-            )
-        tiers = [route for route in tiers if route in allowed]
     result = copy.deepcopy(config)
     # A silent last-wins overwrite would hide a misconfigured duplicate entry,
     # so collisions in either list are rejected like duplicate routes are.

@@ -220,14 +220,7 @@ class PolicyTests(unittest.TestCase):
             "routes": list(policy.MACHINE_ROUTE_CHAIN),
             "providers": copy.deepcopy(list(policy.MACHINE_SHARED_PROVIDERS.values())),
             "consumers": {
-                name: dict(
-                    {"primary": primary},
-                    **(
-                        {"routes": list(policy.MACHINE_CONSUMER_ROUTES[name])}
-                        if name in policy.MACHINE_CONSUMER_ROUTES
-                        else {}
-                    ),
-                )
+                name: {"primary": primary}
                 for name, primary in policy.MACHINE_CONSUMERS.items()
             },
         }
@@ -257,15 +250,6 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside the approved chain"):
                 policy.load_policy(self.root)
             self.policy["consumers"]["config.json"]["additional_routes"] = []
-            self.policy["consumers"]["config.json"]["routes"] = [
-                "zai,glm-5.3-flash"
-            ]
-            self.write_policy()
-            with self.assertRaisesRegex(ValueError, "route scope"):
-                policy.load_policy(self.root)
-            self.policy["consumers"]["config.json"]["routes"] = list(
-                policy.MACHINE_CONSUMER_ROUTES["config.json"]
-            )
 
             self.policy["providers"][0]["api_base_url"] = "https://tampered.invalid/v1"
             self.write_policy()
@@ -334,33 +318,6 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(zai["protocol"], "responses")
         self.assertIn("glm-5.3", zai["models"])
         self.assertIn("glm-5.3-flash", zai["models"])
-
-    def test_interactive_listener_scoped_to_primary_route_only(self) -> None:
-        # 2026-10-18 user direction: the main listener must never cascade
-        # Codex or Claude sessions onto another tier or provider.
-        self.assertEqual(
-            policy.MACHINE_CONSUMER_ROUTES,
-            {"config.json": ("zai,glm-5.3",)},
-        )
-        self.assertIn(
-            policy.MACHINE_CONSUMERS["config.json"],
-            policy.MACHINE_CONSUMER_ROUTES["config.json"],
-        )
-
-    def test_route_scope_pins_a_consumer_to_its_primary(self) -> None:
-        # A scoped consumer serves exactly the allowed routes with the
-        # primary first; providers outside the scope drop out entirely.
-        self.policy["consumers"]["worker.json"]["routes"] = ["fast,x"]
-        derived = policy.derive(copy.deepcopy(self.config), self.policy, "worker.json")
-        self.assertEqual(derived["Router"]["tiers"], ["fast,x"])
-        self.assertEqual(
-            [provider["name"] for provider in derived["Providers"]], ["fast"]
-        )
-        self.assertEqual(derived["Router"]["modelAliases"]["ccr-primary"], "fast,x")
-        # A scope that excludes the primary is a configuration error.
-        self.policy["consumers"]["worker.json"]["routes"] = ["full,z"]
-        with self.assertRaisesRegex(ValueError, "route scope excludes its primary"):
-            policy.derive(copy.deepcopy(self.config), self.policy, "worker.json")
 
     def test_governed_consumers_cannot_preserve_an_infinite_hold(self) -> None:
         config = copy.deepcopy(self.config)

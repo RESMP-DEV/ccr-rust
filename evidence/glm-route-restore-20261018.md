@@ -112,3 +112,16 @@ Anomaly, not fully investigated: one process generation (started 11:07:41Z
 by a SIGTERM whose sender was not identified) served an empty `/metrics`
 body, breaking `ccr-wait-idle`; the next generation serves 4,480 bytes and
 the idle gate works again.
+
+## Amendment 2: scoping reverted to the plain chain (same day)
+
+The no-drop scoping in Amendment 1 over-corrected the user's intent: "never
+accidentally dropped onto MiniMax" referred to the cordon-style removal of
+GLM, not the absence of fallback. Standard Codex should ride the ordinary
+chain: GLM-5.3, then GLM-5.3-Flash, then MiniMax. `MACHINE_CONSUMER_ROUTES`,
+its gate pin, the derive filter, and their tests were removed. 29 tests
+pass, ruff clean; preflight ok (zai + minimax); sync changed only
+config.json; an idle-gated restart activated `Tier order: ["zai,glm-5.3",
+"zai,glm-5.3-flash", "minimax,MiniMax-M3.1-Flash-Preview"]`; a live
+`ccr-primary` request was served by glm-5.3 ("Success on zai after 2.78s").
+The idle gate worked normally on this restart (metrics healthy).

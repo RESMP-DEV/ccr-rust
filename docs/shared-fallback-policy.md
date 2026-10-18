@@ -105,11 +105,10 @@ distinguishing model sessions from tool use, the router kept completing GLM
 calls (by the thousand) after the probe read zero, as did the ZCode app on
 the same plan, and the observed completion limits are the rolling 5-hour
 prompt window and concurrency caps, so the cordon's guaranteed-refusal
-rationale did not apply. The main listener is route-scoped to its primary
-(`zai,glm-5.3` only) so interactive Codex and Claude sessions never silently
-cascade onto another model or provider: a rate-limited GLM holds and
-re-sweeps, then surfaces 429. Worker, auth, and OCR consumers keep the
-shared chain ending at MiniMax. The former FlashX head remains removed after
+rationale did not apply. The main listener's chain is GLM-5.3, then
+GLM-5.3-Flash, then MiniMax, so interactive Codex and Claude sessions always
+start on GLM-5.3 and cascade only on actual tier failure. The former
+FlashX head remains removed after
 its coding-plan trial expired, FlashX is also absent from the Z.AI provider
 catalog, and GMI and DeepSeek stay registered but unrouted pending dated
 re-approval. The explicit preview model ID is required:
