@@ -84,3 +84,31 @@ chain and follows router-side route changes with no client restart.
   no worker job or OCR review ran during this repair.
 - The OCR dyld wedge is characterized by one sample; root cause was not
   investigated further after the clean respawn.
+
+## Amendment: interactive no-drop scoping (same day)
+
+User direction: Z.AI draws no distinction between model sessions and tool
+use for metering (tool calls are model-initiated), the plan plainly has
+capacity while in use, and interactive Codex traffic must never be dropped
+onto another provider. Implemented `MACHINE_CONSUMER_ROUTES =
+{"config.json": ("zai,glm-5.3",)}`: the main listener derives a
+single-tier chain (GLM-5.3 only), so a rate-limited GLM holds and re-sweeps,
+surfacing 429 to the client, instead of cascading to GLM-5.3-Flash or
+MiniMax. Workers, auth, and OCR keep the shared chain.
+
+- Tests: 31 passing (scope derivation, scope-excludes-primary error, gate
+  tamper on the scope, machine constants); ruff clean.
+- Deployed both execution copies, gate passed, preflight ok (zai + minimax),
+  `check`/`sync` changed only `config.json`.
+- Activation: the idle-gated restart aborted because that process generation
+  served HTTP 200 with an empty `/metrics` body (see anomaly below); with
+  idleness verified from the request log (last completed request 11:07:39Z),
+  a direct `launchctl kickstart -k` activated `Tier order: ["zai,glm-5.3"]`.
+- Verification: 3456 catalog advertises only `zai,glm-5.3`, `glm-5.3`,
+  `claude-glm-5.3`, and `ccr-primary`; live `ccr-primary` request logged
+  "Success on zai after 1.26s".
+
+Anomaly, not fully investigated: one process generation (started 11:07:41Z
+by a SIGTERM whose sender was not identified) served an empty `/metrics`
+body, breaking `ccr-wait-idle`; the next generation serves 4,480 bytes and
+the idle gate works again.

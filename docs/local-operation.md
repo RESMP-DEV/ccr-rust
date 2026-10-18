@@ -33,12 +33,15 @@ ccr-local validate
 
 The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
-Ordinary Claude and Codex sessions currently start at GLM-5.3; worker
-sessions start at GLM-5.3-Flash. OCR retains its distinct OpenRouter primary.
-The GLM tiers were restored 2026-10-18, the same day they were cordoned,
-after the cordon's premise was disproved: the exhausted monthly counter gates
-the plan's tool usage, not model completions. Refusals cascade to the
-MiniMax final tier; FlashX remains absent after its coding-plan trial
+Ordinary Claude and Codex sessions serve GLM-5.3 only: the main listener is
+route-scoped to its primary so interactive traffic never silently cascades
+onto another model or provider, and a rate-limited GLM holds and re-sweeps
+before surfacing 429. Worker sessions start at GLM-5.3-Flash; OCR retains
+its distinct OpenRouter primary; both keep the shared fallback chain. The
+GLM tiers were restored 2026-10-18, the same day they were cordoned, after
+the cordon's premise was disproved (Z.AI meters usage without distinguishing
+model sessions from tool use; the observed limits are the 5-hour prompt
+window and concurrency). FlashX remains absent after its coding-plan trial
 expired.
 Inspect the active config and live route counters before claiming which
 backend served a request.

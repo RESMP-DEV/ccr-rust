@@ -100,15 +100,19 @@ model name offered by two providers stays unaliased rather than guessing.
 The approved main-machine shared chain is GLM-5.3-Flash, GLM-5.3, then
 MiniMax-M3.1-Flash-Preview. Both GLM tiers were cordoned 2026-10-18 after the
 Z.AI monthly tool quota reported 4000/4000 used, then restored the same day
-by user direction once that premise was disproved: the monthly counter gates
-the plan's tool usage, not model completions, and the router kept completing
-GLM calls (by the thousand) after the probe read zero, as did the ZCode app
-on the same plan. Completions are limited by the rolling 5-hour prompt window
-and concurrency caps, and refusals cascade to the MiniMax final tier, so the
-cordon's guaranteed-refusal rationale did not apply. The former FlashX head
-remains removed after its coding-plan trial expired, FlashX is also absent
-from the Z.AI provider catalog, and GMI and DeepSeek stay registered but
-unrouted pending dated re-approval. The explicit preview model ID is required:
+by user direction once that premise was disproved: Z.AI meters usage without
+distinguishing model sessions from tool use, the router kept completing GLM
+calls (by the thousand) after the probe read zero, as did the ZCode app on
+the same plan, and the observed completion limits are the rolling 5-hour
+prompt window and concurrency caps, so the cordon's guaranteed-refusal
+rationale did not apply. The main listener is route-scoped to its primary
+(`zai,glm-5.3` only) so interactive Codex and Claude sessions never silently
+cascade onto another model or provider: a rate-limited GLM holds and
+re-sweeps, then surfaces 429. Worker, auth, and OCR consumers keep the
+shared chain ending at MiniMax. The former FlashX head remains removed after
+its coding-plan trial expired, FlashX is also absent from the Z.AI provider
+catalog, and GMI and DeepSeek stay registered but unrouted pending dated
+re-approval. The explicit preview model ID is required:
 the shorter `MiniMax-M3.1-Flash` alias was observed upstream returning
 `MiniMax-M3`, so status-code-only validation cannot distinguish it.
 

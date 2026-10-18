@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Route-scoped the main listener to its primary (`zai,glm-5.3` only) per
+  user direction: interactive Codex and Claude sessions can never silently
+  cascade onto another tier or provider; a rate-limited GLM holds and
+  re-sweeps before surfacing 429. The scope is pinned in the source policy
+  (`MACHINE_CONSUMER_ROUTES`) and enforced by the machine gate; worker,
+  auth, and OCR consumers keep the shared fallback chain.
 - Restored the GLM-5.3-Flash and GLM-5.3 chain tiers and their consumer
   primaries (main/auth GLM-5.3, workers GLM-5.3-Flash), reversing the
   2026-10-18 quota cordon after its premise was disproved: the Z.AI monthly
