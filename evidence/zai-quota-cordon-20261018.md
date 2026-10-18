@@ -30,6 +30,18 @@ filtering; another machine is handling that boundary.
   Its machine receipt is `build/reports/quality/receipt.json`.
 - Idle-gated restarts activated MiniMax-only catalogs on ports 3457, 3458, and
   3461. Health probes returned 200; `/v1/models` exposed no Z.AI IDs.
+- Terminal watcher state (2026-10-18 02:52 America/Los_Angeles): the watcher
+  exited 75 after its one-hour bounded wait because the main listener never
+  drained; `launchctl print gui/501/com.kearm.ccr-cordon-activate` reports
+  `state = not running`, `last exit code = 75: EX_TEMPFAIL`. The main listener
+  on port 3456 therefore still serves its pre-restart in-memory chain, which
+  still advertises `zai,glm-5.3` and `zai,glm-5.3-flash`. The on-disk cordon is
+  complete: `~/.claude-code-router/fallback-policy.json` routes and primaries
+  are MiniMax-only (OCR keeps its OpenRouter primary), all three deployed policy
+  module copies match the source hash, and ports 3457/3458/3461 are live on the
+  derived chain. Restarting 3456 would cut the active turn that observes it, so
+  activation stays deferred to the next idle restart; the watcher plist is kept
+  for that purpose and reports its own failure instead of masking it.
 - A bounded one-hour idle watcher was installed at
   `/Users/kearm/build/ccr-cordon/activate-main-listener.sh` for the active main
   listener on port 3456. It waits for two stable idle samples, kickstarts the
