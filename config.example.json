@@ -41,7 +41,7 @@
             "protocol": "anthropic",
             "auth_header": "authorization",
             "models": [
-                "MiniMax-M3.1-Flash-Preview",
+                "MiniMax-M3.1-Flash",
                 "MiniMax-M3"
             ]
         },
@@ -85,6 +85,17 @@
                 "glm-5.2",
                 "auto"
             ],
+            "transformer": {
+                "use": [
+                    [
+                        "maxtoken",
+                        {
+                            "max_tokens": 32768,
+                            "only_if_missing": true
+                        }
+                    ]
+                ]
+            },
             "tier_name": "ccr-qwen"
         }
     ],

@@ -38,6 +38,9 @@ required on the Anthropic-compatible base URL:
         "glm-5.2",
         "auto"
       ],
+      "transformer": {
+        "use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": true}]]
+      },
       "tier_name": "ccr-qwen"
     }
   ],
@@ -54,11 +57,14 @@ the final fallback. The governed workstation uses:
 ```text
 zai,glm-5.3-flash
 qwen,qwen3.8-flash
-minimax,MiniMax-M3.1-Flash-Preview
+minimax,MiniMax-M3.1-Flash
+qwen,deepseek-v4.1-flash
 ```
 
 GLM-5.3 remains the main/auth primary but is deliberately absent from this
 worker chain: worker volume should not consume the judgment seat.
+Main/auth additionally place `qwen,qwen3.8-max` immediately after GLM-5.3 and
+before the Flash/Qwen volume fallbacks.
 
 ## Verification
 
@@ -72,6 +78,10 @@ codex-ccr --model qwen,qwen3.8-flash
 
 The current flash models think by default; keep any client output cap at 512
 tokens or above unless thinking is explicitly disabled.
+CCR's Qwen provider injects `max_tokens: 32768` only when a client omits the
+field. Qwen rejects an Anthropic request without an output limit even when
+some Anthropic-compatible providers tolerate the omission; Codex is the known
+affected client.
 
 Confirm the tool round trip completed and inspect the router log or metrics
 to prove the `qwen` tier served it rather than a fallback. Repeat with

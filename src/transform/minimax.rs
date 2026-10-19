@@ -22,7 +22,7 @@ use anyhow::Result;
 use serde_json::Value;
 use tracing::{trace, warn};
 
-pub(crate) const MINIMAX_M3_1_FLASH_PREVIEW: &str = "MiniMax-M3.1-Flash-Preview";
+pub(crate) const MINIMAX_M3_1_FLASH: &str = "MiniMax-M3.1-Flash";
 const MALFORMED_MINIMAX_PLACEHOLDER: &str = "[MALFORMED_MINIMAX_OUTPUT_REMOVED]";
 
 /// Models that support native Anthropic-style thinking blocks (M3).
@@ -295,7 +295,7 @@ impl Transformer for MinimaxTransformer {
         if is_m3_model(&model) {
             obj.insert(
                 "model".to_string(),
-                Value::String(MINIMAX_M3_1_FLASH_PREVIEW.to_string()),
+                Value::String(MINIMAX_M3_1_FLASH.to_string()),
             );
         }
 
@@ -492,7 +492,7 @@ mod tests {
         });
 
         let transformed = transformer.transform_request(request).unwrap();
-        assert_eq!(transformed["model"], MINIMAX_M3_1_FLASH_PREVIEW);
+        assert_eq!(transformed["model"], MINIMAX_M3_1_FLASH);
         assert_eq!(transformed["thinking"]["type"], "adaptive");
         assert!(transformed.get("reasoning_split").is_none());
     }
@@ -502,7 +502,7 @@ mod tests {
         let transformer = MinimaxTransformer;
         let user_content = r#"Keep this literal <tool_call> example and quotes: ""."#;
         let request = json!({
-            "model": MINIMAX_M3_1_FLASH_PREVIEW,
+            "model": "MiniMax-M3.1-Flash-Preview",
             "messages": [
                 {"role": "user", "content": user_content},
                 {

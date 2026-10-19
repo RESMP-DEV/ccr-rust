@@ -383,7 +383,7 @@ impl Provider {
         if crate::transform::minimax::is_minimax_provider_name(&self.name, &self.api_base_url)
             && crate::transform::minimax::is_m3_model(model)
         {
-            crate::transform::minimax::MINIMAX_M3_1_FLASH_PREVIEW
+            crate::transform::minimax::MINIMAX_M3_1_FLASH
         } else {
             model
         }

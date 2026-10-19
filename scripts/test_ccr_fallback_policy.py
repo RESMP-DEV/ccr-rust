@@ -104,7 +104,6 @@ class PolicyTests(unittest.TestCase):
 
     def test_final_fallback_cannot_be_promoted_by_extra_routes(self) -> None:
         self.policy["consumers"]["worker.json"]["additional_routes"] = [
-            "last,k",
             "fast,y",
         ]
         # Duplicate existing routes are harmless and cannot reorder the final fallback.
@@ -220,7 +219,12 @@ class PolicyTests(unittest.TestCase):
             "routes": list(policy.MACHINE_ROUTE_CHAIN),
             "providers": copy.deepcopy(list(policy.MACHINE_SHARED_PROVIDERS.values())),
             "consumers": {
-                name: {"primary": primary}
+                name: {
+                    "primary": primary,
+                    "additional_routes": list(
+                        policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.get(name, ())
+                    ),
+                }
                 for name, primary in policy.MACHINE_CONSUMERS.items()
             },
         }
@@ -236,34 +240,35 @@ class PolicyTests(unittest.TestCase):
             self.policy["routes"].pop()
 
             missing = min(policy.MACHINE_CONSUMERS)
-            original_primary = self.policy["consumers"][missing]["primary"]
+            original_settings = copy.deepcopy(self.policy["consumers"][missing])
             self.policy["consumers"].pop(missing)
             self.write_policy()
             with self.assertRaisesRegex(ValueError, "listener registrations"):
                 policy.load_policy(self.root)
-            self.policy["consumers"][missing] = {"primary": original_primary}
+            self.policy["consumers"][missing] = original_settings
 
+            original_extras = self.policy["consumers"]["config.json"]["additional_routes"]
             self.policy["consumers"]["config.json"]["additional_routes"] = [
                 "azure,gpt-6-astra"
             ]
             self.write_policy()
-            with self.assertRaisesRegex(ValueError, "outside the approved chain"):
+            with self.assertRaisesRegex(ValueError, "additional routes must remain"):
                 policy.load_policy(self.root)
-            self.policy["consumers"]["config.json"]["additional_routes"] = []
+            self.policy["consumers"]["config.json"]["additional_routes"] = original_extras
 
             self.policy["providers"][0]["api_base_url"] = "https://tampered.invalid/v1"
             self.write_policy()
             with self.assertRaisesRegex(ValueError, "shared provider definitions"):
                 policy.load_policy(self.root)
 
-    def test_minimax_final_tier_uses_the_disambiguated_preview_model(self) -> None:
+    def test_minimax_general_fallback_uses_the_official_non_preview_model(self) -> None:
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[-1],
-            "minimax,MiniMax-M3.1-Flash-Preview",
+            policy.MACHINE_ROUTE_CHAIN[-2],
+            "minimax,MiniMax-M3.1-Flash",
         )
         minimax = policy.MACHINE_SHARED_PROVIDERS["minimax"]
         self.assertEqual(minimax["auth_header"], "authorization")
-        self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash-Preview"])
+        self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash"])
         self.assertEqual(minimax["transformer"], {"use": ["minimax"]})
 
     def test_probe_extra_headers_ride_with_the_credential(self) -> None:
@@ -283,7 +288,8 @@ class PolicyTests(unittest.TestCase):
             (
                 "zai,glm-5.3-flash",
                 "qwen,qwen3.8-flash",
-                "minimax,MiniMax-M3.1-Flash-Preview",
+                "minimax,MiniMax-M3.1-Flash",
+                "qwen,deepseek-v4.1-flash",
             ),
         )
         self.assertNotIn("gmi,Qwen/Qwen3.8-Max-0902", policy.MACHINE_ROUTE_CHAIN)
@@ -313,11 +319,49 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
 
     def test_worker_chain_preserves_judgment_seat_with_qwen_credit_lane(self) -> None:
-        self.assertEqual(policy.MACHINE_ROUTE_CHAIN[1], "qwen,qwen3.8-flash")
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN[:2],
+            ("zai,glm-5.3-flash", "qwen,qwen3.8-flash"),
+        )
         self.assertNotIn("zai,glm-5.3", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
         self.assertEqual(
             policy.MACHINE_CONSUMERS["glm-workers.json"], "zai,glm-5.3-flash"
+        )
+
+    def test_main_and_auth_get_qwen_max_before_flash_fallbacks(self) -> None:
+        machine_policy = {
+            "version": 1,
+            "routes": list(policy.MACHINE_ROUTE_CHAIN),
+            "providers": copy.deepcopy(list(policy.MACHINE_SHARED_PROVIDERS.values())),
+            "consumers": {
+                name: {
+                    "primary": primary,
+                    "additional_routes": list(extras),
+                }
+                for name, primary in policy.MACHINE_CONSUMERS.items()
+                for extras in (policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.get(name, ()),)
+            },
+        }
+        config: dict[str, Any] = {
+            "Providers": [],
+            "Router": {
+                "default": policy.MACHINE_CONSUMERS["config.json"],
+                "retrySweeps": {"enabled": True, "maxHoldMs": 60_000},
+            },
+        }
+        derived = policy.derive(config, machine_policy, "config.json")
+        self.assertEqual(
+            derived["Router"]["tiers"][:3],
+            [
+                "zai,glm-5.3",
+                "qwen,qwen3.8-max",
+                "zai,glm-5.3-flash",
+            ],
+        )
+        self.assertLess(
+            derived["Router"]["tiers"].index("qwen,qwen3.8-max"),
+            derived["Router"]["tiers"].index("qwen,qwen3.8-flash"),
         )
 
     def test_qwen_token_plan_uses_verified_anthropic_endpoint(self) -> None:
@@ -328,6 +372,12 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertEqual(qwen["api_key"], "${CCR_QWEN_API_KEY}")
         self.assertEqual(qwen["protocol"], "anthropic")
+        self.assertEqual(
+            qwen["transformer"],
+            {
+                "use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]
+            },
+        )
         self.assertIn("qwen3.8-flash", qwen["models"])
         self.assertIn("deepseek-v4.1-flash", qwen["models"])
 

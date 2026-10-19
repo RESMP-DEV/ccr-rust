@@ -4,7 +4,7 @@ Use this page when adding MiniMax to an ordinary CCR configuration, running
 several MiniMax credentials, or operating the main workstation's shared
 fallback chain. The two hard requirements are easy to miss:
 
-1. Use `MiniMax-M3.1-Flash-Preview`, not the shorter M3.1 alias.
+1. Use the official `MiniMax-M3.1-Flash` ID.
 2. Configure `transformer: {use: ["minimax"]}` explicitly. CCR does not select
    a transformer from the provider name.
 
@@ -31,7 +31,7 @@ For a standalone configuration, start with this provider fragment:
   "api_key": "${MINIMAX_API_KEY}",
   "protocol": "anthropic",
   "auth_header": "authorization",
-  "models": ["MiniMax-M3.1-Flash-Preview"],
+  "models": ["MiniMax-M3.1-Flash"],
   "transformer": {"use": ["minimax"]}
 }
 ```
@@ -39,7 +39,7 @@ For a standalone configuration, start with this provider fragment:
 Add a matching route to `Router.default` or `Router.tiers`:
 
 ```json
-"minimax,MiniMax-M3.1-Flash-Preview"
+"minimax,MiniMax-M3.1-Flash"
 ```
 
 The router process must have `MINIMAX_API_KEY` in its environment. CCR does
@@ -53,19 +53,20 @@ namespaces are preferable when the plans must not share quota or fallback.
 
 ## Model IDs and provider names
 
-`MiniMax-M3.1-Flash-Preview` is the recommended and contractual M3.1 ID. A
-direct upstream request for `MiniMax-M3.1-Flash` returned HTTP 200 while
-serving `MiniMax-M3`; the explicit preview ID returned HTTP 200 and served the
-requested model. Therefore a status code does not distinguish these IDs.
+`MiniMax-M3.1-Flash` is the official launched ID. A live 2026-10-19 model
+listing contains it (and not a preview entry), and direct requests to both the
+official ID and a legacy preview pin return HTTP 200 with the response `model`
+matching each request. CCR therefore sends M3-family requests as the official
+ID and redirects legacy preview pins to that ID before dispatch.
 
 CCR recognizes the M3 family as:
 
 - exact `MiniMax-M3` or `minimax-m3`, case-insensitively;
 - any model beginning with `MiniMax-M3.`;
-- the exact preview ID above.
+- the legacy preview ID.
 
 For a MiniMax provider, CCR sends M3-family requests as
-`MiniMax-M3.1-Flash-Preview`. It injects only Anthropic-style
+`MiniMax-M3.1-Flash`. It injects only Anthropic-style
 `thinking: {type: "adaptive"}` and does not add the OpenAI-only
 `reasoning_split: true`.
 
@@ -78,7 +79,7 @@ Model-keyed transformer overrides still resolve by the requested route name;
 do not rely on that as a reason to keep an ambiguous model alias.
 
 M2.x models are a different compatibility family. They keep the
-`reasoning_split` handling and are not canonicalized to the M3.1 preview ID.
+`reasoning_split` handling and are not canonicalized to M3.1.
 Check MiniMax's current model reference before assigning capabilities or
 context limits across generations.
 
@@ -135,7 +136,8 @@ curl --fail --silent http://127.0.0.1:3456/v1/models
 catalog is exposed, not that the account can complete a request. Finish with a
 representative client tool round trip as described in
 [Local operation](local-operation.md#prove-the-selected-path). For MiniMax,
-also confirm that a non-streaming response echoes the exact preview model ID.
+also confirm that a non-streaming response echoes `MiniMax-M3.1-Flash`,
+including when the route uses an M3-family alias or the legacy preview ID.
 
 ## Governed fallback runbook
 
