@@ -396,6 +396,52 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(link.is_symlink())
         self.assertEqual(link.read_text(), good)
 
+    def test_retired_claude_ccr_is_not_restored(self) -> None:
+        """A pre-retirement snapshot must not put the old launcher back."""
+        retired = self.local_bin / "claude-ccr"
+        retired.write_text("#!/bin/bash\nexport ANTHROPIC_BASE_URL=http://127.0.0.1:3456\n")
+        os.chmod(retired, 0o700)
+
+        # Capture the surface while the pre-retirement launcher is present.
+        with mock.patch.object(
+            recovery, "BIN_FILES", ("ccr-local", "ccr-fallback-policy", "claude-ccr")
+        ):
+            snapshot_result = recovery.snapshot(label="pre-retirement", root=self.snapshots)
+        snapshot = self.snapshots / snapshot_result["snapshot"]
+        self.assertIn("local-bin/claude-ccr", snapshot_result["captured"])
+
+        # The machine now has the retired stub instead.
+        retired.write_text("#!/usr/bin/env bash\nexit 2\n")
+        os.chmod(retired, 0o755)
+
+        result = recovery.restore(snapshot, apply=True)
+
+        self.assertIn("local-bin/claude-ccr", result["unmapped"])
+        relatives = {change["relative"] for change in result["changes"]}
+        self.assertNotIn("local-bin/claude-ccr", relatives)
+        self.assertEqual(retired.read_text(), "#!/usr/bin/env bash\nexit 2\n")
+
+    def test_retired_claude_ccr_symlink_target_is_not_restored(self) -> None:
+        """The symlink-target form of a retired wrapper is also not restored."""
+        deployed = self.base / "deployed" / "claude-ccr"
+        deployed.write_text("#!/bin/bash\nexit 0\n")
+        retired = self.local_bin / "claude-ccr"
+        retired.symlink_to(deployed)
+
+        with mock.patch.object(
+            recovery, "BIN_FILES", ("ccr-local", "ccr-fallback-policy", "claude-ccr")
+        ):
+            snapshot_result = recovery.snapshot(label="pre-retirement", root=self.snapshots)
+        snapshot = self.snapshots / snapshot_result["snapshot"]
+        self.assertIn("local-bin/claude-ccr", snapshot_result["captured"])
+
+        retired.unlink()
+        result = recovery.restore(snapshot, apply=True)
+
+        self.assertIn("local-bin/claude-ccr", result["unmapped"])
+        self.assertIn("local-bin-targets/claude-ccr", result["unmapped"])
+        self.assertFalse(retired.exists())
+
     def test_restore_reports_unmapped_retired_manifest_entries(self) -> None:
         snapshot_result = recovery.snapshot(label="test", root=self.snapshots)
         snapshot = self.snapshots / snapshot_result["snapshot"]

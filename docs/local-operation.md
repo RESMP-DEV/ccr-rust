@@ -29,7 +29,7 @@ ccr-local validate
 
 | Command | Purpose |
 | --- | --- |
-| `claude-ccr` | Start the local service if needed, launch Claude Code through CCR. Retired on the maintainer's Mac (October 19, 2026), where Claude Code uses a native subscription login |
+| `claude-ccr` | Start the local service if needed, launch Claude Code through CCR. Retired on the maintainer's Mac (October 19, 2026), where native `claude` uses the Anthropic subscription login |
 | `codex-ccr` | Start the local service if needed, launch Codex with the `ccr` profile |
 | `ccr-local start` / `stop` / `restart` / `restart-now` | Control the launchd service; `restart` waits for idle, `restart-now` is the emergency override |
 | `ccr-local status` / `validate` | Check the listener or load and validate its configuration |
@@ -64,7 +64,11 @@ installed launcher module, and busy listeners must wait for an idle restart.
 | `~/.codex/ccr-live-model-catalog.json` | Codex model metadata; an unlisted slug falls back to generic metadata |
 | `~/.claude-code-router/LOCAL_SETUP.md` | Machine-specific setup and acceptance receipt |
 
-On the maintainer's Mac, Claude Code itself is deliberately not routed through CCR: it uses the native Anthropic subscription login, so no `apiKeyHelper`, localhost base URL, or CCR model pin belongs in its global settings. The service loads `runtime-credentials.json`, not older `.env` files. Changes
+On the maintainer's Mac, Claude Code itself is deliberately not routed through
+CCR: it uses the native Anthropic subscription login, so no `apiKeyHelper`,
+localhost base URL, or CCR model pin belongs in its global settings.
+
+The service loads `runtime-credentials.json`, not older `.env` files. Changes
 to a file do not change a running process until it is restarted. Coordinate a
 restart with other active work: build/install first, then use the idle-gated
 `restart` verb rather than `launchctl kickstart -k`. The local Codex fork's

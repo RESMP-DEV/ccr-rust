@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there runs as a native Anthropic subscription client, so the guides now
   record that a client's global settings must not carry an `apiKeyHelper`, a
   localhost base URL, or a CCR model pin. Routing behavior is unchanged.
+- Stopped `ccr-recovery` from restoring the retired `claude-ccr` wrapper. The
+  wrapper left the recovery inventory, so a snapshot taken before the
+  retirement now reports it as unmapped instead of writing the pre-retirement
+  launcher back onto the machine and silently undoing the retirement.
 
 - Added `ccr-recovery`, a governed snapshot/restore surface for consumer
   configs, credentials, launchd jobs, operator wrappers, tunnels, and Codex
