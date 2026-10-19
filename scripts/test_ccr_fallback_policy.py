@@ -262,7 +262,10 @@ class PolicyTests(unittest.TestCase):
                 policy.load_policy(self.root)
 
     def test_minimax_general_fallback_uses_the_official_non_preview_model(self) -> None:
-        self.assertIn("minimax,MiniMax-M3.1-Flash", policy.MACHINE_ROUTE_CHAIN)
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN[-3],
+            "minimax,MiniMax-M3.1-Flash",
+        )
         minimax = policy.MACHINE_SHARED_PROVIDERS["minimax"]
         self.assertEqual(minimax["auth_header"], "authorization")
         self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash"])
