@@ -103,6 +103,9 @@ The recommended multi-provider starting point is
 plan as the primary tier, MiniMax Token Plan as the second tier, the free NVIDIA
 NIM trial tier for overflow, and retry sweeps enabled with a bounded hold. See
 [Why route at all](#why-route-at-all) for the reasoning behind this shape.
+For an OpenRouter-only free-tier setup, see
+[examples/openrouter-free.json](examples/openrouter-free.json) and
+[OpenRouter setup](docs/openrouter.md).
 
 The minimal single-provider config gets a router running locally in about two minutes;
 the follower template needs three API keys and a validate run covering all three tiers.
