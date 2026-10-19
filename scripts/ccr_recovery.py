@@ -932,14 +932,12 @@ def doctor(root: Path = SNAPSHOT_ROOT, max_age_hours: float = 24.0) -> dict[str,
         newest = verify_snapshot(snapshots[-1])
     live_by_name = {name: live for live, name in resolve_targets()}
     captured: dict[str, str] = {}
-    if newest and snapshots:
+    symlinked: set[str] = set()
+    if newest and newest.get("ok"):
         manifest = read_manifest(snapshots[-1])
         captured = {
             relative: record["sha256"] for relative, record in manifest["files"].items()
         }
-    symlinked: set[str] = set()
-    if newest and snapshots:
-        manifest = read_manifest(snapshots[-1])
         symlinked = {
             relative
             for relative, record in manifest["files"].items()

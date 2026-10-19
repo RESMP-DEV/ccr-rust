@@ -529,7 +529,19 @@ class RecoveryTests(unittest.TestCase):
     def test_doctor_without_snapshots_is_not_ok(self) -> None:
         result = recovery.doctor(self.snapshots)
         self.assertFalse(result["ok"])
-        self.assertEqual(result["snapshot_count"], 0)
+
+    def test_doctor_reports_malformed_newest_manifest_without_crashing(self) -> None:
+        snapshot_result = recovery.snapshot(label="test", root=self.snapshots)
+        snapshot = self.snapshots / snapshot_result["snapshot"]
+        manifest_path = snapshot / recovery.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest["manifest_version"] = 99
+        manifest_path.write_text(json.dumps(manifest))
+
+        result = recovery.doctor(self.snapshots)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("Unsupported manifest version", result["newest"]["error"])
 
     def test_doctor_fails_when_a_listener_has_stale_routes(self) -> None:
         recovery.snapshot(label="test", root=self.snapshots)

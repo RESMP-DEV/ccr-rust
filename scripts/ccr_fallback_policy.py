@@ -182,6 +182,11 @@ def recovery_pre_snapshot(label: str) -> dict[str, Any]:
         return message
 
 
+def should_recovery_snapshot(root: Path) -> bool:
+    """Only the governed machine root receives machine-surface snapshots."""
+    return root.resolve() == MACHINE_ROOT.resolve()
+
+
 def read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -471,7 +476,7 @@ def sync(root: Path = ROOT, check: bool = False) -> dict[str, Any]:
         name for name, (on_disk, derived) in snapshots.items() if on_disk != derived
     ]
     if not check:
-        if changed:
+        if changed and should_recovery_snapshot(root):
             recovery_pre_snapshot("pre-sync")
         for name in changed:
             atomic_json(root / name, snapshots[name][1])
@@ -763,7 +768,8 @@ def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
             config, credentials if credentials.is_file() else None
         )
         if config != on_disk:
-            recovery_pre_snapshot("pre-serve")
+            if should_recovery_snapshot(root):
+                recovery_pre_snapshot("pre-serve")
             atomic_json(config_path, config)
     else:
         env = os.environ.copy()

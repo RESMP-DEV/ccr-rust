@@ -183,7 +183,7 @@ def catalog_sync(
         result["errors"].append(f"{type(error).__name__}: {error}")
 
     result["ok"] = not result["changes"] and not result["errors"]
-    if not apply or result["errors"]:
+    if not apply or result["errors"] or not result["changes"]:
         return result
     if take_snapshot:
         result["snapshot"] = take_pre_write_snapshot(snapshot_root)

@@ -48,7 +48,12 @@ class PolicyTests(unittest.TestCase):
         policy.atomic_json(self.root / "fallback-policy.json", self.policy)
 
     def test_sync_takes_pre_write_recovery_snapshot_only_when_writing(self) -> None:
-        with unittest.mock.patch("ccr_recovery.pre_snapshot") as pre:
+        with (
+            unittest.mock.patch("ccr_recovery.pre_snapshot") as pre,
+            unittest.mock.patch.object(
+                policy, "should_recovery_snapshot", lambda _: True
+            ),
+        ):
             policy.sync(self.root)
         self.assertTrue(pre.called)
         self.assertEqual(pre.call_args.kwargs.get("label"), "pre-sync")
@@ -59,6 +64,9 @@ class PolicyTests(unittest.TestCase):
     def test_missing_recovery_module_does_not_block_sync(self) -> None:
         with (
             unittest.mock.patch.dict(sys.modules, {"ccr_recovery": None}),
+            unittest.mock.patch.object(
+                policy, "should_recovery_snapshot", lambda _: True
+            ),
             unittest.mock.patch("sys.stderr") as stderr,
         ):
             result = policy.sync(self.root)
@@ -547,6 +555,9 @@ class PolicyTests(unittest.TestCase):
         with (
             unittest.mock.patch.dict(os.environ, {"LAST_KEY": "inherited"}),
             unittest.mock.patch.object(policy, "installed_binary", lambda: fake),
+            unittest.mock.patch.object(
+                policy, "should_recovery_snapshot", lambda _: True
+            ),
             unittest.mock.patch("ccr_recovery.pre_snapshot") as pre_snapshot,
             unittest.mock.patch(
                 "os.execve", side_effect=lambda *args: execve.append(args)

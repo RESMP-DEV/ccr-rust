@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import ccr_codex_catalog as catalog
 
@@ -66,6 +67,18 @@ class CodexCatalogTests(unittest.TestCase):
         self.assertTrue(first["ok"])
         self.assertTrue(second["ok"])
         self.assertEqual(second["changes"], [])
+
+    def test_apply_with_no_changes_neither_snapshots_nor_writes(self) -> None:
+        catalog.catalog_sync(self.path, apply=True, take_snapshot=False)
+        with (
+            mock.patch("ccr_codex_catalog.write_catalog") as write,
+            mock.patch("ccr_codex_catalog.take_pre_write_snapshot") as snapshot,
+        ):
+            result = catalog.catalog_sync(self.path, apply=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["changes"], [])
+        self.assertFalse(write.called)
+        self.assertFalse(snapshot.called)
 
     def test_missing_source_is_an_error(self) -> None:
         self.write_catalog([])
