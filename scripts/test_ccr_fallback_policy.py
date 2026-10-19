@@ -262,10 +262,7 @@ class PolicyTests(unittest.TestCase):
                 policy.load_policy(self.root)
 
     def test_minimax_general_fallback_uses_the_official_non_preview_model(self) -> None:
-        self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[-2],
-            "minimax,MiniMax-M3.1-Flash",
-        )
+        self.assertIn("minimax,MiniMax-M3.1-Flash", policy.MACHINE_ROUTE_CHAIN)
         minimax = policy.MACHINE_SHARED_PROVIDERS["minimax"]
         self.assertEqual(minimax["auth_header"], "authorization")
         self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash"])
@@ -289,6 +286,7 @@ class PolicyTests(unittest.TestCase):
                 "zai,glm-5.3-flash",
                 "qwen,qwen3.8-flash",
                 "minimax,MiniMax-M3.1-Flash",
+                "qwen,deepseek-v4.1-flash-1017",
                 "qwen,deepseek-v4.1-flash",
             ),
         )
@@ -379,7 +377,15 @@ class PolicyTests(unittest.TestCase):
             },
         )
         self.assertIn("qwen3.8-flash", qwen["models"])
+        self.assertIn("deepseek-v4.1-flash-1017", qwen["models"])
         self.assertIn("deepseek-v4.1-flash", qwen["models"])
+
+    def test_qwen_deepseek_1017_precedes_undated_fallback(self) -> None:
+        self.assertEqual(policy.MACHINE_ROUTE_CHAIN[-1], "qwen,deepseek-v4.1-flash")
+        self.assertLess(
+            policy.MACHINE_ROUTE_CHAIN.index("qwen,deepseek-v4.1-flash-1017"),
+            policy.MACHINE_ROUTE_CHAIN.index("qwen,deepseek-v4.1-flash"),
+        )
 
     def test_zai_provider_registered_for_restored_routes(self) -> None:
         zai = policy.MACHINE_SHARED_PROVIDERS["zai"]

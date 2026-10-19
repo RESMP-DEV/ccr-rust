@@ -46,8 +46,12 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # (user: not working reliably) and "deepseek,deepseek-flash" (PAYG
     # balance exhausted, preflight 402). Re-add with a dated approval.
     "minimax,MiniMax-M3.1-Flash",
+    # Qwen serves the dated 1017 refresh and the undated V4.1 Flash ID as
+    # distinct deployments. Prefer the current dated checkpoint, then retain
+    # the undated lane as the last resort if 1017 is unavailable.
+    "qwen,deepseek-v4.1-flash-1017",
     # Last general fallback for a MiniMax exhaustion window. This is Qwen's
-    # DeepSeek lane, not the native PAYG provider registered above.
+    # undated DeepSeek lane, not the native PAYG provider registered above.
     "qwen,deepseek-v4.1-flash",
 )
 MACHINE_CONSUMERS: dict[str, str] = {
@@ -115,6 +119,7 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
             "qwen3.7-max",
             "qwen3.7-plus",
             "qwen3.6-flash",
+            "deepseek-v4.1-flash-1017",
             "deepseek-v4.1-flash",
             "deepseek-v4-pro",
             "glm-5.3",

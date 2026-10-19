@@ -98,6 +98,7 @@ before the alias existed). An operator alias entry is never overridden, and a
 model name offered by two providers stays unaliased rather than guessing.
 The approved main-machine shared chain is GLM-5.3-Flash,
 `qwen,qwen3.8-flash`, MiniMax `MiniMax-M3.1-Flash`, then
+`qwen,deepseek-v4.1-flash-1017` and finally the undated
 `qwen,deepseek-v4.1-flash`. Main/auth additionally insert
 `qwen,qwen3.8-max` immediately after their GLM-5.3 primary. The Qwen Token
 Plan tier gives worker volume a separate credit pool and keeps GLM-5.3 out of the

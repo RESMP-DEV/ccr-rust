@@ -79,6 +79,7 @@
                 "qwen3.7-max",
                 "qwen3.7-plus",
                 "qwen3.6-flash",
+                "deepseek-v4.1-flash-1017",
                 "deepseek-v4.1-flash",
                 "deepseek-v4-pro",
                 "glm-5.3",
