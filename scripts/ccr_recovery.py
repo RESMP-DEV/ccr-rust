@@ -112,15 +112,25 @@ LAUNCH_AGENT_LABELS: tuple[str, ...] = (
 )
 
 # Operator wrappers and the deployed policy copy under version control.
+#
+# ``claude-ccr`` was retired on 2026-10-19: Claude Code on the maintainer's Mac
+# is a native Anthropic subscription client and must not be routed through CCR.
+# The wrapper is deliberately NOT in this inventory. Leaving it in would let
+# ``ccr-recovery restore`` write a pre-retirement launcher back onto the
+# machine, silently undoing the retirement; snapshots that still contain the
+# file now report it as unmapped instead of restoring it.
 BIN_FILES: tuple[str, ...] = (
     "ccr-local",
     "ccr-wait-idle",
     "ccr-fallback-policy",
     "ccr-catalog-sync",
     "ccr-glm-workers-local",
-    "claude-ccr",
     "codex-ccr",
 )
+
+# Retired wrappers that older snapshots may still contain. They are reported as
+# unmapped rather than restored, so a restore cannot resurrect them.
+RETIRED_BIN_FILES: tuple[str, ...] = ("claude-ccr",)
 
 # Live listeners and their launchd labels, used by the restart step.
 LISTENERS: tuple[tuple[str, int, str, str], ...] = (
@@ -537,6 +547,16 @@ def plan_restore(snapshot: Path) -> dict[str, Any]:
     unmapped: list[str] = []
     for name, record in sorted(captured.items()):
         symlink = False
+        retired = (
+            name.startswith("local-bin/")
+            or name.startswith("local-bin-targets/")
+        ) and name.split("/", 1)[1] in RETIRED_BIN_FILES
+        if retired:
+            # A retired wrapper captured by an older snapshot, as a regular file
+            # or as the target behind a symlink. Report it instead of restoring
+            # it, so a restore cannot undo the retirement.
+            unmapped.append(name)
+            continue
         if name in live_by_name:
             live = live_by_name[name]
             # The link itself: recreate the link pointing at the stored path.

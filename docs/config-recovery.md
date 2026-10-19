@@ -33,7 +33,7 @@ Exit code `0` means the requested operation succeeded and verified.
 | --- | --- |
 | `config-root/` | the four consumer configs, their launchd entrypoint scripts, `fallback-policy.json`, `runtime-credentials.json`, `ccr-api-key.env`, the deployed policy module, `.env`, `gmi_idle_activation.py` |
 | `launch-agents/` | the plist for each CCR listener, the API tunnel, and the modelctl guard |
-| `local-bin/` | `ccr-local`, `ccr-wait-idle`, `ccr-fallback-policy`, `ccr-catalog-sync`, `ccr-glm-workers-local`, `claude-ccr`, `codex-ccr` |
+| `local-bin/` | `ccr-local`, `ccr-wait-idle`, `ccr-fallback-policy`, `ccr-catalog-sync`, `ccr-glm-workers-local`, `codex-ccr`. The retired `claude-ccr` wrapper is not captured, and a snapshot that still contains it reports it as unmapped instead of restoring it |
 | `local-bin-targets/` | the files behind `local-bin` symlinks, so a link and its content are both recoverable |
 | `toolbelt-manifests/`, `lapis-tools/` | both registered copies of the recovery, catalog, and idle-gate tool manifests |
 | `share/`, `cloudflared/`, `syncthing/` | the deployed policy module, each tunnel `config.yml`, and the Syncthing config that owns the sanitized replication share |
