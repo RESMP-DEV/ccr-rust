@@ -6,7 +6,10 @@ extend or transfer a Claude subscription. Select CCR explicitly for a session
 and keep ordinary `claude` launches on their existing configuration.
 
 On the configured workstation, run `claude-ccr`. It starts the local service
-if needed and selects the configured Z.AI route. See
+if needed and selects the configured Z.AI route. On the maintainer's Mac this
+helper is retired (October 19, 2026): Claude Code there uses a native Anthropic
+subscription login and the helper exits 2 with a routing map. Every other
+machine can still opt in. See
 [Local operation](local-operation.md) for helper files, service commands, and
 the dated live-client acceptance. Those helpers are not installed by Cargo.
 For personal/corporate API plans or Claude logins, use

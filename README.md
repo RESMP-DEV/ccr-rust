@@ -90,6 +90,9 @@ Prebuilt release binaries are not published yet — build from source or use Doc
 Already set up locally? See [Local operation and agent use](docs/local-operation.md)
 for `claude-ccr`, `codex-ccr`, service control, and verification. To keep personal
 and corporate plans separate, follow [Authentication suites](docs/auth-suites.md).
+Claude Code routing through CCR is opt-in per machine: on the maintainer's Mac
+Claude Code uses a native Anthropic subscription login and `claude-ccr` is
+retired.
 The complete [documentation index](docs/index.md) covers setup and operations.
 
 Use [Switching coding plans](docs/switching-plans.md) to choose Kimi or Z.AI GLM

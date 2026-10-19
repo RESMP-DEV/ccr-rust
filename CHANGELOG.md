@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Documented that Claude Code through CCR stays opt-in per machine. The
+  maintainer's Mac retired `claude-ccr` on October 19, 2026 because Claude Code
+  there runs as a native Anthropic subscription client, so the guides now
+  record that a client's global settings must not carry an `apiKeyHelper`, a
+  localhost base URL, or a CCR model pin. Routing behavior is unchanged.
+
 - Added `ccr-recovery`, a governed snapshot/restore surface for consumer
   configs, credentials, launchd jobs, operator wrappers, tunnels, and Codex
   route metadata. Snapshots are hash-verified, restore defaults to dry run and

@@ -79,10 +79,12 @@ claude_route zai,glm-5.3
 CCR_BASE_URL=http://127.0.0.1:3459 claude_route zai,glm-5.3
 ```
 
-The current workstation's `claude-ccr` helper fixes its default model variables
-to GLM. Passing only `claude-ccr --model kimi,k3-256k` changes the main model
+Where `claude-ccr` is still in use, it fixes its default model variables to
+GLM. Passing only `claude-ccr --model kimi,k3-256k` changes the main model
 while its other defaults can still name GLM. Use the function above or separate
 plan-specific launchers when the entire session should stay with one provider.
+On the maintainer's Mac, `claude-ccr` is retired and Claude Code keeps its
+native subscription login instead.
 
 Claude also supports `/model` during a session. For example,
 `/model kimi,k3-256k` changes the main conversation model where custom names are

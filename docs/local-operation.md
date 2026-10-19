@@ -29,7 +29,7 @@ ccr-local validate
 
 | Command | Purpose |
 | --- | --- |
-| `claude-ccr` | Start the local service if needed, launch Claude Code through CCR |
+| `claude-ccr` | Start the local service if needed, launch Claude Code through CCR. Retired on the maintainer's Mac (October 19, 2026), where Claude Code uses a native subscription login |
 | `codex-ccr` | Start the local service if needed, launch Codex with the `ccr` profile |
 | `ccr-local start` / `stop` / `restart` / `restart-now` | Control the launchd service; `restart` waits for idle, `restart-now` is the emergency override |
 | `ccr-local status` / `validate` | Check the listener or load and validate its configuration |
@@ -59,12 +59,12 @@ installed launcher module, and busy listeners must wait for an idle restart.
 | `~/.claude-code-router/serve*.py` | Load allowed credentials and execute governed CCR listeners |
 | `~/Library/LaunchAgents/com.kearm.ccr-rust.plist` | Start at login and restart after exit |
 | `~/.claude-code-router/logs/` | Service logs; inspect locally, redact before sharing |
-| `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers |
+| `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers; `claude-ccr` is a retired stub on the maintainer's Mac |
 | `~/.codex/ccr.config.toml` | CCR provider profile for the installed Codex fork |
 | `~/.codex/ccr-live-model-catalog.json` | Codex model metadata; an unlisted slug falls back to generic metadata |
 | `~/.claude-code-router/LOCAL_SETUP.md` | Machine-specific setup and acceptance receipt |
 
-The service loads `runtime-credentials.json`, not older `.env` files. Changes
+On the maintainer's Mac, Claude Code itself is deliberately not routed through CCR: it uses the native Anthropic subscription login, so no `apiKeyHelper`, localhost base URL, or CCR model pin belongs in its global settings. The service loads `runtime-credentials.json`, not older `.env` files. Changes
 to a file do not change a running process until it is restarted. Coordinate a
 restart with other active work: build/install first, then use the idle-gated
 `restart` verb rather than `launchctl kickstart -k`. The local Codex fork's

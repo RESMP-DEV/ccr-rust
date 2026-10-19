@@ -25,6 +25,12 @@ before using these local helpers. They are not installed by Cargo. Use
 `claude-ccr` or `codex-ccr` for routed sessions. Other machines should follow
 the client setup guides linked from the documentation index.
 
+On the maintainer's Mac, `claude-ccr` is retired (October 19, 2026): Claude Code
+runs as a native Anthropic subscription client there, not through CCR, and the
+helper now exits 2 with a routing map. Keep CCR opt-in for Claude Code on every
+other machine, and never re-point a client's global settings at a local
+listener.
+
 For personal/corporate API plans, use disjoint router configs, credentials,
 ports, logs, and persistence namespaces. A `provider,model` pin can still
 fall back to another tier; it does not isolate accounts. For native subscription
