@@ -254,7 +254,10 @@ def safe_symlink_target(target: object) -> bool:
         return False
     path = Path(target)
     if path.is_absolute():
-        return True
+        try:
+            return path.resolve().is_relative_to(Path.home().resolve())
+        except (OSError, RuntimeError, ValueError):
+            return False
     return ".." not in path.parts
 
 
@@ -353,7 +356,7 @@ def snapshot(label: str = "manual", root: Path = SNAPSHOT_ROOT) -> dict[str, Any
     symlinks: set[str] = set()
     try:
         for live, name in resolve_targets():
-            if not live.exists():
+            if not live.exists() and not live.is_symlink():
                 missing.append(name)
                 continue
             destination = staging / name
@@ -531,6 +534,7 @@ def plan_restore(snapshot: Path) -> dict[str, Any]:
     captured = manifest["files"]
     live_by_name = {name: live for live, name in relative_targets()}
     entries: list[dict[str, Any]] = []
+    unmapped: list[str] = []
     for name, record in sorted(captured.items()):
         symlink = False
         if name in live_by_name:
@@ -538,12 +542,22 @@ def plan_restore(snapshot: Path) -> dict[str, Any]:
             # The link itself: recreate the link pointing at the stored path.
             symlink = bool(record.get("symlink"))
         elif name.startswith("local-bin-targets/"):
-            # The file behind a local-bin symlink: an ordinary file restore.
-            link = LOCAL_BIN / name.split("/", 1)[1]
-            live = Path(os.path.realpath(link))
+            # The snapshot's link record is authoritative even if the live
+            # link was removed or redirected during the drift being repaired.
+            link_name = name.split("/", 1)[1]
+            link_snapshot = snapshot / "local-bin" / link_name
+            try:
+                target = link_snapshot.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                target = ""
+            if not safe_symlink_target(target):
+                unmapped.append(name)
+                continue
+            live = Path(target)
         else:
-            # A cloudflared path records its tunnel directory; a stale snapshot
-            # naming a removed tunnel is reported, not written.
+            if not name.startswith("cloudflared/"):
+                unmapped.append(name)
+                continue
             live = CLOUDFLARED / name.split("/", 1)[1]
         entries.append(
             {
@@ -559,6 +573,7 @@ def plan_restore(snapshot: Path) -> dict[str, Any]:
         "label": manifest.get("label"),
         "created_at": manifest.get("created_at"),
         "entries": entries,
+        "unmapped": unmapped,
     }
 
 
@@ -803,11 +818,14 @@ def restore(
         if not live.exists() and not live.is_symlink():
             status["state"] = "missing"
         elif entry["symlink"] and live.is_symlink():
-            status["state"] = (
-                "unchanged"
-                if os.readlink(live) == entry["symlink"]
-                else "symlink-drift"
+            expected_target = (
+                (snapshot / entry["relative"]).read_text(encoding="utf-8").strip()
             )
+            status["state"] = (
+                "unchanged" if os.readlink(live) == expected_target else "symlink-drift"
+            )
+        elif not entry["symlink"] and live.is_symlink():
+            status["state"] = "type-drift"
         elif live.is_file():
             status["state"] = (
                 "unchanged" if sha256_file(live) == entry["sha256"] else "modified"
@@ -827,6 +845,7 @@ def restore(
         "applied": apply,
         "verification": verification,
         "changes": changes,
+        "unmapped": plan["unmapped"],
         "drift": [c for c in changes if c.get("state") not in (None, "unchanged")],
     }
     if not apply:

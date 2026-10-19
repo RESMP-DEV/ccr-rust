@@ -243,9 +243,14 @@ Pre-PR review and hardening completed on 2026-10-19:
   manifest paths/records/symlink targets before restore or replication, fails
   closed on credential-shaped content before creating a share, and reports
   malformed catalog entries through JSON errors.
-- Focused tests: 28 fallback-policy tests, 44 recovery tests, 6 catalog tests,
+- Focused tests: 29 fallback-policy tests, 48 recovery tests, 6 catalog tests,
   and the fresh-process Prometheus gauge test all pass. `ruff check` passes on
   every touched Python file.
+- The PR review round added seven recovery/import findings. Fixes now confine
+  absolute symlink targets to the user's home, preserve dangling links, derive
+  a link-target restore from the snapshot rather than drifted live state, skip
+  unmapped manifest entries, distinguish file-to-link type drift, compare
+  healthy links by target, and make a missing recovery module nonblocking.
 - Live read-only compatibility: all 30 existing recovery snapshots verify under
   the stricter manifest parser; `ccr-recovery doctor` reports no file drift,
   no missing live target, and runtime-matching main/worker/auth/OCR listeners.

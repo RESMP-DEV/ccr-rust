@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -54,6 +55,16 @@ class PolicyTests(unittest.TestCase):
         pre.reset_mock()
         policy.sync(self.root, check=True)
         self.assertFalse(pre.called)
+
+    def test_missing_recovery_module_does_not_block_sync(self) -> None:
+        with (
+            unittest.mock.patch.dict(sys.modules, {"ccr_recovery": None}),
+            unittest.mock.patch("sys.stderr") as stderr,
+        ):
+            result = policy.sync(self.root)
+        self.assertTrue(result["changed"])
+        output = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("pre-write snapshot failed to launch", output)
 
     def test_shared_edit_reaches_all_consumers_without_losing_primary_or_limits(
         self,

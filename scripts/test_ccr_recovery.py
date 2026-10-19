@@ -6,6 +6,7 @@ operator's live routing surface.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -20,7 +21,13 @@ import ccr_recovery as recovery
 
 class RecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
+        cache_root = Path(
+            os.environ.get("ALPHAHENG_CACHE_ROOT", Path.home() / ".cache" / "alphaheng")
+        )
+        cache_root.mkdir(parents=True, exist_ok=True)
+        self.directory = tempfile.TemporaryDirectory(
+            prefix="ccr-recovery-test-", dir=cache_root
+        )
         self.addCleanup(self.directory.cleanup)
         self.base = Path(self.directory.name)
         self.config_root = self.base / "claude-code-router"
@@ -183,6 +190,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("local-bin/ccr-fallback-policy", captured)
         self.assertIn("local-bin-targets/ccr-fallback-policy", captured)
 
+    def test_snapshot_captures_dangling_symlink(self) -> None:
+        with mock.patch.object(
+            recovery, "BIN_FILES", (*recovery.BIN_FILES, "dangling")
+        ):
+            (self.local_bin / "dangling").symlink_to(self.base / "missing-target")
+            result = recovery.snapshot(label="test", root=self.snapshots)
+        self.assertIn("local-bin/dangling", result["captured"])
+        self.assertNotIn("local-bin/dangling", result["missing"])
+
     def test_snapshot_reports_missing_files_without_failing(self) -> None:
         result = recovery.snapshot(label="test", root=self.snapshots)
         self.assertTrue(result["verified"]["ok"])
@@ -272,9 +288,12 @@ class RecoveryTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text())
         name = "config-root/config.json"
         manifest["files"][name]["symlink"] = True
-        (snapshot / name).write_text("/outside/home/target\n", encoding="utf-8")
+        payload = "/outside/home/target\n"
+        (snapshot / name).write_text(payload, encoding="utf-8")
+        manifest["files"][name]["sha256"] = hashlib.sha256(payload.encode()).hexdigest()
         manifest_path.write_text(json.dumps(manifest))
 
+        self.assertFalse(recovery.safe_symlink_target("/outside/home/target"))
         verification = recovery.verify_snapshot(snapshot)
         self.assertFalse(verification["ok"])
         self.assertIn(name, verification["mismatched"])
@@ -335,6 +354,28 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(os.readlink(link), original_target)
 
+    def test_restore_restores_the_file_behind_a_drifted_link(self) -> None:
+        snapshot_result = recovery.snapshot(label="test", root=self.snapshots)
+        snapshot = self.snapshots / snapshot_result["snapshot"]
+        link = self.local_bin / "ccr-fallback-policy"
+        target = Path(os.readlink(link))
+        good = target.read_text()
+        target.write_text("# clobbered target\n", encoding="utf-8")
+
+        result = recovery.restore(snapshot, apply=True)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(target))
+        self.assertEqual(target.read_text(), good)
+
+    def test_restore_dry_run_does_not_flag_a_healthy_symlink(self) -> None:
+        snapshot_result = recovery.snapshot(label="test", root=self.snapshots)
+        result = recovery.restore(self.snapshots / snapshot_result["snapshot"])
+        states = {change["relative"]: change["state"] for change in result["changes"]}
+        self.assertEqual(states["local-bin/ccr-fallback-policy"], "unchanged")
+        self.assertFalse(result["drift"])
+
     def test_restore_replaces_drifted_symlink_with_regular_file(self) -> None:
         snapshot_result = recovery.snapshot(label="test", root=self.snapshots)
         snapshot = self.snapshots / snapshot_result["snapshot"]
@@ -345,11 +386,34 @@ class RecoveryTests(unittest.TestCase):
         link.unlink()
         link.symlink_to(target)
 
+        dry_run = recovery.restore(snapshot)
+        states = {change["relative"]: change["state"] for change in dry_run["changes"]}
+        self.assertEqual(states["local-bin/ccr-local"], "type-drift")
+
         result = recovery.restore(snapshot, apply=True)
 
         self.assertTrue(result["ok"], result)
         self.assertFalse(link.is_symlink())
         self.assertEqual(link.read_text(), good)
+
+    def test_restore_reports_unmapped_retired_manifest_entries(self) -> None:
+        snapshot_result = recovery.snapshot(label="test", root=self.snapshots)
+        snapshot = self.snapshots / snapshot_result["snapshot"]
+        manifest_path = snapshot / recovery.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        record = dict(manifest["files"]["config-root/config.json"])
+        payload = "{}\n"
+        (snapshot / "config-root" / "retired.json").write_text(payload)
+        record["sha256"] = hashlib.sha256(payload.encode()).hexdigest()
+        manifest["files"]["config-root/retired.json"] = record
+        manifest_path.write_text(json.dumps(manifest))
+
+        result = recovery.restore(snapshot)
+
+        self.assertEqual(result["stage"], "dry-run", result)
+        self.assertIn("config-root/retired.json", result["unmapped"])
+        relatives = {change["relative"] for change in result["changes"]}
+        self.assertNotIn("config-root/retired.json", relatives)
 
     def test_restore_restores_secret_file_mode(self) -> None:
         snapshot_result = recovery.snapshot(label="test", root=self.snapshots)

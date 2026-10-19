@@ -160,6 +160,28 @@ MACHINE_POLICY_INTEGRITY_SHA256 = (
 )
 
 
+def recovery_pre_snapshot(label: str) -> dict[str, Any]:
+    """Take a best-effort recovery snapshot without blocking a config write."""
+    try:
+        script_root = Path(__file__).resolve().parent
+        if str(script_root) not in sys.path:
+            sys.path.insert(0, str(script_root))
+        from ccr_recovery import pre_snapshot
+
+        return pre_snapshot(label=label)
+    except (ImportError, OSError) as error:
+        message = {
+            "ok": False,
+            "label": label,
+            "error": f"{type(error).__name__}: {error}",
+        }
+        print(
+            f"ccr-recovery: pre-write snapshot failed to launch: {message['error']}",
+            file=sys.stderr,
+        )
+        return message
+
+
 def read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -450,12 +472,7 @@ def sync(root: Path = ROOT, check: bool = False) -> dict[str, Any]:
     ]
     if not check:
         if changed:
-            from ccr_recovery import pre_snapshot
-
-            # The snapshot root and this policy root are distinct concepts;
-            # use the keyword so a future signature change cannot silently
-            # point a snapshot at the live config directory.
-            pre_snapshot(label="pre-sync")
+            recovery_pre_snapshot("pre-sync")
         for name in changed:
             atomic_json(root / name, snapshots[name][1])
     return {
@@ -746,9 +763,7 @@ def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
             config, credentials if credentials.is_file() else None
         )
         if config != on_disk:
-            from ccr_recovery import pre_snapshot
-
-            pre_snapshot(label="pre-serve")
+            recovery_pre_snapshot("pre-serve")
             atomic_json(config_path, config)
     else:
         env = os.environ.copy()
