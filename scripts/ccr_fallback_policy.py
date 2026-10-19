@@ -35,8 +35,12 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # calls after that probe read 0%, and the ZCode app kept serving GLM on
     # the same plan. The observed completion limits are the rolling 5-hour
     # prompt window and concurrency caps.
+    # Worker order approved 2026-10-18: Flash handles subscription volume,
+    # Qwen's fresh credit pool is the next inexpensive tier, and MiniMax is
+    # the final fallback. GLM-5.3 remains the main/auth primary but is not a
+    # worker fallback, so volume work cannot consume the judgment seat.
     "zai,glm-5.3-flash",
-    "zai,glm-5.3",
+    "qwen,qwen3.8-flash",
     # Also removed from the chain 2026-10-11, providers kept registered
     # below for re-adding after fixing: "gmi,Qwen/Qwen3.8-Max-0902"
     # (user: not working reliably) and "deepseek,deepseek-flash" (PAYG
@@ -88,6 +92,28 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "api_key": "${CCR_DEEPSEEK_API_KEY}",
         "protocol": "anthropic",
         "models": ["deepseek-flash"],
+    },
+    # Qwen Token Plan (Standard tier). The sk-sp- key is plan-specific and
+    # must use this Anthropic-compatible endpoint, including the final /v1.
+    # Registered and live-tested 2026-10-18; model IDs came from /models and
+    # two real completions through CCR.
+    "qwen": {
+        "name": "qwen",
+        "api_base_url": "https://token-plan.maas.qwencloudapi.com/apps/anthropic/v1",
+        "api_key": "${CCR_QWEN_API_KEY}",
+        "protocol": "anthropic",
+        "models": [
+            "qwen3.8-flash",
+            "qwen3.8-max",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-flash",
+            "deepseek-v4.1-flash",
+            "deepseek-v4-pro",
+            "glm-5.3",
+            "glm-5.2",
+            "auto",
+        ],
     },
     "minimax": {
         "name": "minimax",

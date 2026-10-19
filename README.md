@@ -22,6 +22,7 @@ A router does not create capacity. It maximizes the availability of whatever cap
 - **Automatic failover** — providers are arranged in tiers; 5xx errors and timeouts cascade to the next tier automatically. Rate limits (429) are tracked and reported transparently.
 - **Multi-protocol** — one local endpoint speaks both the Anthropic API (`/v1/messages`) and the OpenAI API (`/v1/chat/completions`, `/v1/responses`), with request/response translation handled for you.
 - **Cost- and class-aware routing** — send different traffic classes (default / think / background / web search) to different models, optionally with GP-backed request-aware reranking.
+- **Off-peak lane playbooks** — pin credit-plan routes such as the Qwen Token Plan with timezone-safe day/night guidance instead of guessing which provider is cheapest.
 - **Observability** — Prometheus metrics, a live terminal dashboard, and token/latency/cost tracking per provider tier.
 - **MCP aggregation** — optional Model Context Protocol server and shared daemon for tool proxying.
 - **Compression** — response and tool-output compression transformers for long-running agent sessions.
@@ -94,6 +95,8 @@ The complete [documentation index](docs/index.md) covers setup and operations.
 Use [Switching coding plans](docs/switching-plans.md) to choose Kimi or Z.AI GLM
 per session, save Codex profiles, or configure deliberate fallback. A tested
 two-provider starting point is [examples/coding-plans.json](examples/coding-plans.json).
+To add the Qwen Token Plan as a credit lane, see
+[Qwen Token Plan integration](docs/qwen-token-plan.md).
 
 The recommended multi-provider starting point is
 [examples/config.followers.json](examples/config.followers.json): a GLM coding

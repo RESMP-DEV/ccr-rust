@@ -22,6 +22,7 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 ## Client Integrations
 
 - [Z.AI Setup](zai_minimax_setup.md) — coding-plan endpoints, GLM-5.3, and protocol choices
+- [Qwen Token Plan](qwen-token-plan.md) — credit-plan endpoint, exact model routes, off-peak timezone table, and lane selection
 - [MiniMax Setup and Operations](minimax.md) — exact M3.1 model ID, mandatory transformer, custom provider names, validation, and fallback-policy runbook
 - [Claude Code](claude_code_setup.md) — opt-in routing, provider credentials, and tool verification
 - [Codex](codex_setup.md) — Codex CLI routing

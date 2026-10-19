@@ -69,18 +69,22 @@
         },
         {
             "name": "qwen",
-            "_comment": "Alibaba Cloud Model Studio Coding Plan. Use coding-intl.dashscope.aliyuncs.com for subscription plans (sk-sp-xxx keys). Standard DashScope keys (sk-xxx) use dashscope-intl.aliyuncs.com.",
-            "api_base_url": "https://coding-intl.dashscope.aliyuncs.com/v1",
-            "api_key": "${QWEN_API_KEY}",
+            "_comment": "Qwen Token Plan. An sk-sp- key must use the Anthropic-compatible token-plan endpoint, including /v1.",
+            "api_base_url": "https://token-plan.maas.qwencloudapi.com/apps/anthropic/v1",
+            "api_key": "${CCR_QWEN_API_KEY}",
+            "protocol": "anthropic",
             "models": [
-                "qwen3-coder-next",
-                "qwen3.5-plus"
+                "qwen3.8-flash",
+                "qwen3.8-max",
+                "qwen3.7-max",
+                "qwen3.7-plus",
+                "qwen3.6-flash",
+                "deepseek-v4.1-flash",
+                "deepseek-v4-pro",
+                "glm-5.3",
+                "glm-5.2",
+                "auto"
             ],
-            "transformer": {
-                "use": [
-                    "anthropic"
-                ]
-            },
             "tier_name": "ccr-qwen"
         }
     ],
@@ -89,6 +93,7 @@
         "background": "deepseek,deepseek-chat",
         "tiers": [
             "deepseek,deepseek-reasoner",
+            "qwen,qwen3.8-flash",
             "minimax,MiniMax-M2.7",
             "openrouter,inclusionai/ling-2.6-flash:free"
         ],

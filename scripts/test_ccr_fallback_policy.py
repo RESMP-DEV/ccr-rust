@@ -282,7 +282,7 @@ class PolicyTests(unittest.TestCase):
             policy.MACHINE_ROUTE_CHAIN,
             (
                 "zai,glm-5.3-flash",
-                "zai,glm-5.3",
+                "qwen,qwen3.8-flash",
                 "minimax,MiniMax-M3.1-Flash-Preview",
             ),
         )
@@ -290,6 +290,7 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("deepseek,deepseek-flash", policy.MACHINE_ROUTE_CHAIN)
         self.assertIn("gmi", policy.MACHINE_SHARED_PROVIDERS)
         self.assertIn("deepseek", policy.MACHINE_SHARED_PROVIDERS)
+        self.assertIn("qwen", policy.MACHINE_SHARED_PROVIDERS)
         self.assertEqual(
             policy.MACHINE_SHARED_PROVIDERS["gmi"]["api_base_url"],
             "https://api.gmi-serving.com/v1",
@@ -310,6 +311,25 @@ class PolicyTests(unittest.TestCase):
             "zai,glm-5.3-flash",
         )
         self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
+
+    def test_worker_chain_preserves_judgment_seat_with_qwen_credit_lane(self) -> None:
+        self.assertEqual(policy.MACHINE_ROUTE_CHAIN[1], "qwen,qwen3.8-flash")
+        self.assertNotIn("zai,glm-5.3", policy.MACHINE_ROUTE_CHAIN)
+        self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
+        self.assertEqual(
+            policy.MACHINE_CONSUMERS["glm-workers.json"], "zai,glm-5.3-flash"
+        )
+
+    def test_qwen_token_plan_uses_verified_anthropic_endpoint(self) -> None:
+        qwen = policy.MACHINE_SHARED_PROVIDERS["qwen"]
+        self.assertEqual(
+            qwen["api_base_url"],
+            "https://token-plan.maas.qwencloudapi.com/apps/anthropic/v1",
+        )
+        self.assertEqual(qwen["api_key"], "${CCR_QWEN_API_KEY}")
+        self.assertEqual(qwen["protocol"], "anthropic")
+        self.assertIn("qwen3.8-flash", qwen["models"])
+        self.assertIn("deepseek-v4.1-flash", qwen["models"])
 
     def test_zai_provider_registered_for_restored_routes(self) -> None:
         zai = policy.MACHINE_SHARED_PROVIDERS["zai"]
