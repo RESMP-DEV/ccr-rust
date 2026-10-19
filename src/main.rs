@@ -122,6 +122,34 @@ Examples:
     /// Validate config file syntax and providers
     #[command(after_help = "Example:\n  ccr-rust --config examples/config.minimal.json validate")]
     Validate,
+    /// Diagnose config, provider credentials/catalogs, and listener health
+    #[command(after_help = "\
+Examples:
+  ccr-rust doctor                        Probe default listener on 127.0.0.1:3456
+  ccr-rust doctor --json                 Machine-readable report
+  ccr-rust doctor --skip-providers       Config + listener only, no network probes
+  ccr-rust doctor -p 3457                Probe a specific listener port")]
+    Doctor {
+        /// Listener host to probe
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Listener port to probe
+        #[arg(short, long, default_value = "3456")]
+        port: u16,
+
+        /// Per-probe timeout in seconds
+        #[arg(long, default_value = "10")]
+        timeout: u64,
+
+        /// Skip live provider credential/catalog probes (config + listener only)
+        #[arg(long)]
+        skip_providers: bool,
+
+        /// Emit one JSON report instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect saved worker runs without loading full transcripts
     Workers(ccr_rust::workers::WorkerArgs),
     #[cfg(feature = "dashboard")]
@@ -595,6 +623,97 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_doctor(
+    config_path: &str,
+    host: &str,
+    port: u16,
+    timeout: std::time::Duration,
+    skip_providers: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let report = ccr_rust::doctor::run(config_path, host, port, timeout, skip_providers).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        render_doctor(&report);
+    }
+
+    if !report.ok {
+        anyhow::bail!("doctor found one or more problems");
+    }
+    Ok(())
+}
+
+fn render_doctor(report: &ccr_rust::doctor::DoctorReport) {
+    use ccr_rust::doctor::ProviderStatus;
+    println!("Doctor: {}", report.config_path);
+    println!(
+        "{} config parsed; {} unresolved tier(s)",
+        if report.config_valid {
+            "\u{2713}"
+        } else {
+            "\u{2717}"
+        },
+        report.unresolved_tiers.len()
+    );
+    for tier in &report.unresolved_tiers {
+        println!("  \u{2717} tier '{tier}' names no configured provider/model");
+    }
+    if report.providers.is_empty() {
+        println!("\u{2022} provider probes skipped");
+    } else {
+        println!("Providers:");
+        for p in &report.providers {
+            let mark = match p.status {
+                ProviderStatus::Ok => "\u{2713}",
+                ProviderStatus::NoCatalog => "\u{25cb}",
+                ProviderStatus::Error => "\u{2717}",
+            };
+            println!(
+                "  {mark} {} ({}){}",
+                p.name,
+                p.protocol,
+                p.http_status
+                    .map(|c| format!(" HTTP {c}"))
+                    .unwrap_or_default()
+            );
+            println!("      {}", p.detail);
+            if !p.stale_models.is_empty() {
+                println!(
+                    "      \u{26a0} pinned but absent from live catalog: {}",
+                    p.stale_models.join(", ")
+                );
+            }
+        }
+    }
+    println!("Listener: {}", report.listener.url);
+    println!(
+        "  {} {}",
+        if report.listener.reachable {
+            "\u{2713}"
+        } else {
+            "\u{25cb}"
+        },
+        report.listener.detail
+    );
+    if !report.warnings.is_empty() {
+        println!("Warnings:");
+        for w in &report.warnings {
+            println!("  \u{26a0} {w}");
+        }
+    }
+    println!(
+        "\n{} doctor {}",
+        if report.ok { "\u{2713}" } else { "\u{2717}" },
+        if report.ok {
+            "healthy"
+        } else {
+            "found problems"
+        }
+    );
+}
+
 fn ensure_gp_build_support(config: &Config) -> anyhow::Result<()> {
     #[cfg(not(feature = "gp"))]
     if config.router().gp_routing.enabled {
@@ -729,6 +848,23 @@ async fn main() -> Result<()> {
             }
             Some(Commands::Validate) => {
                 validate_config(&config_path)?;
+            }
+            Some(Commands::Doctor {
+                host,
+                port,
+                timeout,
+                skip_providers,
+                json,
+            }) => {
+                run_doctor(
+                    &config_path,
+                    &host,
+                    port,
+                    std::time::Duration::from_secs(timeout),
+                    skip_providers,
+                    json,
+                )
+                .await?;
             }
             Some(Commands::Workers(args)) => ccr_rust::workers::run(args)?,
             #[cfg(feature = "dashboard")]

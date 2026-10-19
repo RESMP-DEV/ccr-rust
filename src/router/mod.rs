@@ -12,6 +12,7 @@ mod translate_response;
 
 mod dispatch;
 use dispatch::*;
+pub(crate) use dispatch::{build_anthropic_headers, build_openai_headers, provider_endpoint_url};
 
 mod streaming;
 pub use streaming::{
