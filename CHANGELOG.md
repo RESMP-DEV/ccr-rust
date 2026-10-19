@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added a current OpenRouter free-inference example and operator guide. The
+  catalog-checked routes include OpenRouter's free router, MiniMax M3.1 Flash,
+  XingChen Xing4.0, NVIDIA Nemotron 3.5 Super VL/Lightning, Cohere North Mini
+  Code, Poolside Laguna XS, and Inkling Small. The guide documents the
+  account-wide free-tier 429 boundary and the agent `User-Agent` requirement
+  used by some free endpoints.
 - Split the Qwen DeepSeek fallback by exact served ID. Qwen's published
   current checkpoint is `deepseek-v4.1-flash-1017`, while the undated
   `deepseek-v4.1-flash` ID also remains live and self-reports separately.
