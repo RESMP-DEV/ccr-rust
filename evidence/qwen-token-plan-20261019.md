@@ -1,8 +1,8 @@
-# Qwen Token Plan lane and timezone qualification — 2026-10-19
+# Qwen Token Plan lane and timezone wire measurement — 2026-10-19
 
 ## Scope
 
-Committed the already-live Qwen Token Plan machinery as a reviewed source
+Committed the already-live Qwen Token Plan wire machinery as a reviewed source
 change: registered the plan-specific Anthropic provider, inserted
 `qwen,qwen3.8-flash` as the worker chain's credit tier, updated the example
 configuration, and replaced the obsolete request-quota Coding Plan guide with
@@ -19,7 +19,8 @@ or retry semantics and does not add a clock-driven automation.
 - Both explicit CCR routes returned HTTP 200 with expected served models and
   usage fields: `qwen,qwen3.8-flash` served `qwen3.8-flash`, and
   `qwen,deepseek-v4.1-flash` served `deepseek-v4.1-flash`.
-- The four coefficient passes ran through listener
+- The four coefficient passes were issued by a noninteractive measurement
+  harness through listener
   `http://127.0.0.1:3457/v1/chat/completions` on 2026-10-18/19:
   `qwen3.8-flash` night/day = 306/96 responses and 6,747,861/2,161,956
   processed tokens; `deepseek-v4.1-flash` night/day = 198/96 responses and
@@ -51,12 +52,17 @@ or retry semantics and does not add a clock-driven automation.
   'test_ccr_fallback_policy.py' -v` — 29 tests, OK.
 - `python3 scripts/quality.py` — PASS for format, clippy, rust-tests,
   no-default-features, python-helpers, and vendored-gp-routing; receipt:
-  `build/reports/quality/receipt.json`.
+  `build/reports/quality/receipt.json`. Re-ran after the review repairs at
+  the final head.
 - `jq empty config.example.json` — exit 0.
 - `CCR_CLIENT_API_KEY=dummy DEEPSEEK_API_KEY=dummy MINIMAX_API_KEY=dummy
   OPENROUTER_API_KEY=dummy CCR_QWEN_API_KEY=dummy ccr-rust --config
   config.example.json validate` — valid; 5 providers, 10 Qwen models, and 4
   tiers including `qwen,qwen3.8-flash`.
+- Review repair: extracted the standalone Qwen runbook sample with
+  `Router.default`, then `CCR_QWEN_API_KEY=dummy ccr-rust --config
+  /tmp/qwen-token-plan-example.json validate` — valid; 1 provider, 10
+  models, 1 tier. Re-ran the 29 policy tests — OK.
 - `git diff --check` — clean.
 
 ## Non-claims
@@ -70,3 +76,7 @@ or retry semantics and does not add a clock-driven automation.
 - CCR deliberately does not change routes automatically at a wall-clock
   boundary. The runbook operationalizes explicit route selection; it does not
   claim a scheduler.
+- The coefficient harness was noninteractive. It measures endpoint behavior
+  and token accounting, but is not a personal Token Plan terms-compliance
+  example or supported-tool acceptance run; operators should verify with an
+  interactive tool such as `codex-ccr --model qwen,qwen3.8-flash`.

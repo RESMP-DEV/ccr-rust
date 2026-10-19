@@ -42,6 +42,7 @@ required on the Anthropic-compatible base URL:
     }
   ],
   "Router": {
+    "default": "qwen,qwen3.8-flash",
     "tiers": ["qwen,qwen3.8-flash"]
   }
 }
@@ -62,25 +63,21 @@ worker chain: worker volume should not consume the judgment seat.
 ## Verification
 
 Reload the configuration with your normal idle-gated restart procedure, then
-send an OpenAI-compatible request through CCR. Thinking is on by default for
-the current Qwen flash models, so use at least 512 output tokens unless your
-client disables thinking:
+use a supported interactive coding or agent tool through CCR. For example,
+start Codex on the explicit Qwen route and send `Reply with QWEN_OK.`:
 
 ```bash
-curl -sS http://127.0.0.1:3456/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "qwen,qwen3.8-flash",
-    "max_tokens": 512,
-    "messages": [{"role": "user", "content": "Reply with QWEN_OK."}]
-  }'
+codex-ccr --model qwen,qwen3.8-flash
 ```
 
-Check three fields, not merely the HTTP status: the response `model` must be
-the requested served model, `usage.prompt_tokens` and
-`usage.completion_tokens` must be present, and the router log must show the
-`qwen` tier rather than a fallback. Repeat with
-`qwen,deepseek-v4.1-flash` if that lane is configured.
+The current flash models think by default; keep any client output cap at 512
+tokens or above unless thinking is explicitly disabled.
+
+Confirm the tool round trip completed and inspect the router log or metrics
+to prove the `qwen` tier served it rather than a fallback. Repeat with
+`qwen,deepseek-v4.1-flash` if that lane is configured. Development-only
+protocol diagnostics with standalone HTTP clients must use a PAYG credential,
+not a personal Token Plan `sk-sp-` key.
 
 ## Timezone and lane rules
 
@@ -113,16 +110,19 @@ console reads are entered.
 | Workload | Winning lane |
 |---|---|
 | Hot, cache-heavy DeepSeek session with about 92% cache hit | Native DeepSeek off-peak when available; its $0.003-0.006/M cache-hit input remains the strongest cache lane. |
-| Cold batch or low-cache long context | Qwen plan `deepseek-v4.1-flash`: listed $0.08/$0.32 per M day and $0.04/$0.16 night, better than native off-peak $0.15/$0.60 on uncached tokens. |
-| Broad Qwen flash volume | Qwen plan `qwen3.8-flash`, especially in the night window; listed blended credit cost is about $0.047/M day and $0.019/M night. |
+| Interactive coding or agent session with cold, low-cache long context | Qwen plan `deepseek-v4.1-flash`: listed $0.08/$0.32 per M day and $0.04/$0.16 night, better than native off-peak $0.15/$0.60 on uncached tokens. |
+| Broad interactive Qwen flash use | Qwen plan `qwen3.8-flash`, especially in the night window; listed blended credit cost is about $0.047/M day and $0.019/M night. |
 | Judgment prompt | Choose the model first and preserve its quota; price is secondary. Keep GLM-5.3 out of worker fallback chains. |
 
-The 2026-10-18/19 qualification passed both Qwen routes through CCR in both
-windows: 306 night and 96 day responses for `qwen3.8-flash`, and 198 night
-and 96 day responses for `deepseek-v4.1-flash`; every response was HTTP 200
-with the expected served model and usage fields. The raw logs and token
-ledger live outside the repository in the operator's private measurement
-directory; the source receipt is `evidence/qwen-token-plan-20261019.md`.
+The 2026-10-18/19 noninteractive wire measurement passed both Qwen routes
+through CCR in both windows: 306 night and 96 day responses for
+`qwen3.8-flash`, and 198 night and 96 day responses for
+`deepseek-v4.1-flash`; every response was HTTP 200 with the expected served
+model and usage fields. It characterizes the endpoint and token accounting,
+but is not a personal-plan terms-compliance example or supported-tool
+acceptance run. The raw logs and token ledger live outside the repository in
+the operator's private measurement directory; the source receipt is
+`evidence/qwen-token-plan-20261019.md`.
 
 ## Troubleshooting
 
