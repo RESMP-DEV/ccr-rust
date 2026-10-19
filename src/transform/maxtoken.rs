@@ -5,6 +5,7 @@
 //! Supports:
 //! - Setting a specific max_tokens value
 //! - Conditionally overriding only if the new value is higher than existing
+//! - Injecting a value only when the request omits max_tokens
 
 use crate::transformer::Transformer;
 use anyhow::Result;
@@ -16,10 +17,12 @@ use tracing::debug;
 /// Options:
 /// - `max_tokens: u32` (required) - The value to set
 /// - `override_if_higher: bool` (default: true) - Only set if higher than existing
+/// - `only_if_missing: bool` (default: false) - Never replace an existing value
 #[derive(Debug, Clone)]
 pub struct MaxTokenTransformer {
     max_tokens: u32,
     override_if_higher: bool,
+    only_if_missing: bool,
 }
 
 impl MaxTokenTransformer {
@@ -32,6 +35,7 @@ impl MaxTokenTransformer {
         Self {
             max_tokens,
             override_if_higher,
+            only_if_missing: false,
         }
     }
 
@@ -55,8 +59,16 @@ impl MaxTokenTransformer {
             .get("override_if_higher")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        let only_if_missing = options
+            .get("only_if_missing")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        Ok(Self::new(max_tokens, override_if_higher))
+        Ok(Self {
+            max_tokens,
+            override_if_higher,
+            only_if_missing,
+        })
     }
 }
 
@@ -68,6 +80,13 @@ impl Transformer for MaxTokenTransformer {
     fn transform_request(&self, mut request: Value) -> Result<Value> {
         if let Some(request_obj) = request.as_object_mut() {
             if let Some(existing) = request_obj.get("max_tokens") {
+                if self.only_if_missing {
+                    debug!(
+                        configured = self.max_tokens,
+                        "keeping existing max_tokens (only_if_missing)"
+                    );
+                    return Ok(request);
+                }
                 if let Some(current) = existing.as_u64() {
                     if self.override_if_higher {
                         // Only override if our limit is higher
@@ -207,6 +226,21 @@ mod tests {
         let transformer = MaxTokenTransformer::from_options(&options).unwrap();
         assert_eq!(transformer.max_tokens, 65536);
         assert!(!transformer.override_if_higher);
+    }
+
+    #[test]
+    fn from_options_only_if_missing_preserves_existing_limit() {
+        let options = serde_json::json!({
+            "max_tokens": 32768,
+            "only_if_missing": true
+        });
+        let transformer = MaxTokenTransformer::from_options(&options).unwrap();
+        let mut request = test_request();
+        request["max_tokens"] = serde_json::json!(512);
+
+        let result = transformer.transform_request(request).unwrap();
+
+        assert_eq!(result["max_tokens"], 512);
     }
 
     #[test]

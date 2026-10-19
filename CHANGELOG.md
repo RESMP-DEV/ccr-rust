@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Hardened the Qwen Token Plan lane for Codex: Qwen requires Anthropic's
+  `max_tokens` field, while Codex can omit it. The `maxtoken` transformer now
+  supports `only_if_missing`, and the governed Qwen provider injects a 32,768
+  output limit without changing a client's explicit lower cap. The shared chain
+  also adds Qwen's stronger `qwen3.8-max` seat immediately after GLM-5.3 on
+  main/auth, keeps Qwen Flash as the worker volume lane, and places Qwen
+  `deepseek-v4.1-flash` after MiniMax as the last general fallback. MiniMax
+  M3-family dispatch now canonicalizes legacy aliases and preview pins to the
+  officially launched `MiniMax-M3.1-Flash` ID after live catalog and
+  served-model checks.
 - Added Qwen Token Plan routing as a governed credit lane. The provider uses
   the live-tested Anthropic-compatible `token-plan.maas.qwencloudapi.com`
   endpoint with an `sk-sp-` plan key, exposes the verified current model IDs,

@@ -35,19 +35,20 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # calls after that probe read 0%, and the ZCode app kept serving GLM on
     # the same plan. The observed completion limits are the rolling 5-hour
     # prompt window and concurrency caps.
-    # Worker order approved 2026-10-18: Flash handles subscription volume,
-    # Qwen's fresh credit pool is the next inexpensive tier, and MiniMax is
-    # the final fallback. GLM-5.3 remains the main/auth primary but is not a
-    # worker fallback, so volume work cannot consume the judgment seat.
+    # Worker order: Flash handles subscription volume, Qwen Flash is the
+    # inexpensive credit tier, MiniMax remains the general fallback, and Qwen
+    # DeepSeek is the last resort when MiniMax is exhausted. GLM-5.3 remains
+    # the main/auth primary but is not a worker fallback.
     "zai,glm-5.3-flash",
     "qwen,qwen3.8-flash",
     # Also removed from the chain 2026-10-11, providers kept registered
     # below for re-adding after fixing: "gmi,Qwen/Qwen3.8-Max-0902"
     # (user: not working reliably) and "deepseek,deepseek-flash" (PAYG
     # balance exhausted, preflight 402). Re-add with a dated approval.
-    # User-approved 2026-10-07 final tier. Do not shorten this id: the alias
-    # "MiniMax-M3.1-Flash" is accepted upstream but serves MiniMax-M3.
-    "minimax,MiniMax-M3.1-Flash-Preview",
+    "minimax,MiniMax-M3.1-Flash",
+    # Last general fallback for a MiniMax exhaustion window. This is Qwen's
+    # DeepSeek lane, not the native PAYG provider registered above.
+    "qwen,deepseek-v4.1-flash",
 )
 MACHINE_CONSUMERS: dict[str, str] = {
     # Primaries returned to their pre-cordon tiers with the 2026-10-18
@@ -57,6 +58,12 @@ MACHINE_CONSUMERS: dict[str, str] = {
     "glm-workers.json": "zai,glm-5.3-flash",
     # OCR keeps its distinct local primary; shared fallback remains governed.
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
+}
+MACHINE_CONSUMER_ADDITIONAL_ROUTES: dict[str, tuple[str, ...]] = {
+    # Main/auth gets the stronger Qwen Max seat immediately after GLM-5.3 and
+    # before GLM Flash/Qwen Flash. Other consumers use the shared volume chain.
+    "config.json": ("qwen,qwen3.8-max",),
+    "config-auth.json": ("qwen,qwen3.8-max",),
 }
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
     "zai": {
@@ -114,6 +121,11 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
             "glm-5.2",
             "auto",
         ],
+        # Qwen enforces Anthropic's required max_tokens even when Codex omits
+        # it. Inject a generous default without raising a client's lower cap.
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]
+        },
     },
     "minimax": {
         "name": "minimax",
@@ -121,7 +133,7 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "api_key": "${CCR_MINIMAX_API_KEY}",
         "protocol": "anthropic",
         "auth_header": "authorization",
-        "models": ["MiniMax-M3.1-Flash-Preview"],
+        "models": ["MiniMax-M3.1-Flash"],
         # Required for MiniMax M3/M3.1 compatibility: adaptive thinking
         # injection and malformed-output sanitization live in the transformer.
         # Without this the registry builds an empty chain and neither runs.
@@ -197,9 +209,10 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
                 raise ValueError(
                     f"Consumer {name} primary must remain {expected_primary}"
                 )
-            if consumers[name].get("additional_routes", []) != []:
+            expected_extras = list(MACHINE_CONSUMER_ADDITIONAL_ROUTES.get(name, ()))
+            if consumers[name].get("additional_routes", []) != expected_extras:
                 raise ValueError(
-                    f"Consumer {name} cannot add routes outside the approved chain"
+                    f"Consumer {name} additional routes must remain {expected_extras}"
                 )
         shared = {
             provider["name"]: provider
@@ -225,8 +238,8 @@ def derive(
         raise ValueError("The final fallback cannot also be a consumer primary")
     candidates = [
         primary,
-        *chain[:-1],
         *settings.get("additional_routes", []),
+        *chain[:-1],
         chain[-1],
     ]
     tiers = list(dict.fromkeys(candidates))

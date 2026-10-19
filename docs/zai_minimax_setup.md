@@ -121,7 +121,7 @@ The short version is:
   "api_key": "${MINIMAX_API_KEY}",
   "protocol": "anthropic",
   "auth_header": "authorization",
-  "models": ["MiniMax-M3.1-Flash-Preview"],
+  "models": ["MiniMax-M3.1-Flash"],
   "transformer": {"use": ["minimax"]}
 }
 ```

@@ -22,9 +22,7 @@ use crate::metrics::{
 };
 use crate::ratelimit::RateLimitTracker;
 use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
-use crate::transform::minimax::{
-    is_m3_model, is_minimax_provider_name, MINIMAX_M3_1_FLASH_PREVIEW,
-};
+use crate::transform::minimax::{is_m3_model, is_minimax_provider_name, MINIMAX_M3_1_FLASH};
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
 use futures::StreamExt;
@@ -318,16 +316,18 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) render_refusal_as_anthropic_text: bool,
 }
 
-/// Pin every MiniMax M3-family request to the exact preview model ID.
+/// Pin every MiniMax M3-family request to the official M3.1 Flash ID.
 ///
-/// The shorter `MiniMax-M3.1-Flash` alias is accepted upstream but serves
-/// `MiniMax-M3`, so the alias cannot be forwarded as-is.
+/// MiniMax originally returned the older M3 model for the shorter M3.1 alias.
+/// On 2026-10-19 its catalog lists `MiniMax-M3.1-Flash` and both M3.1 IDs
+/// self-report distinctly. Canonicalize legacy M3 aliases and preview pins to
+/// the official non-preview deployment so existing routes follow the launch.
 fn canonical_model_name<'a>(
     provider: &crate::config::Provider,
     model_name: &'a str,
 ) -> Cow<'a, str> {
     if is_minimax_provider_name(&provider.name, &provider.api_base_url) && is_m3_model(model_name) {
-        Cow::Borrowed(MINIMAX_M3_1_FLASH_PREVIEW)
+        Cow::Borrowed(MINIMAX_M3_1_FLASH)
     } else {
         Cow::Borrowed(model_name)
     }
@@ -354,8 +354,8 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
     })?;
 
     // Extract the actual model name from the tier (format: "provider,model"),
-    // then pin the historical MiniMax M3 family to the qualified M3.1 preview
-    // ID. The shorter aliases have served different MiniMax generations.
+    // then pin the historical MiniMax M3 family to the official M3.1 Flash
+    // ID. MiniMax aliases have served different generations.
     let requested_model_name = tier.split(',').nth(1).unwrap_or(tier);
     let model_name = canonical_model_name(provider, requested_model_name);
 
@@ -1636,20 +1636,24 @@ mod tests {
 
         assert_eq!(
             canonical_model_name(&minimax, "MiniMax-M3"),
-            "MiniMax-M3.1-Flash-Preview"
+            "MiniMax-M3.1-Flash"
         );
         assert_eq!(
             canonical_model_name(&minimax, "minimax-m3.1-flash"),
-            "MiniMax-M3.1-Flash-Preview"
+            "MiniMax-M3.1-Flash"
         );
         assert_eq!(canonical_model_name(&other, "MiniMax-M3"), "MiniMax-M3");
         assert_eq!(
             canonical_model_name(&aliased, "MiniMax-M3.1-Flash"),
-            "MiniMax-M3.1-Flash-Preview"
+            "MiniMax-M3.1-Flash"
         );
         assert_eq!(
             canonical_model_name(&by_url, "MiniMax-M3"),
-            "MiniMax-M3.1-Flash-Preview"
+            "MiniMax-M3.1-Flash"
+        );
+        assert_eq!(
+            canonical_model_name(&minimax, "MiniMax-M3.1-Flash-Preview"),
+            "MiniMax-M3.1-Flash"
         );
         assert_eq!(
             canonical_model_name(&minimax, "MiniMax-M2.7"),
@@ -1688,9 +1692,9 @@ mod tests {
             "name": "minimax",
             "api_base_url": "https://api.minimax.example/anthropic/v1",
             "api_key": "test",
-            "models": ["MiniMax-M3.1-Flash-Preview"],
+            "models": ["MiniMax-M3.1-Flash"],
             "model_pricing": {
-                "MiniMax-M3.1-Flash-Preview": {
+                "MiniMax-M3.1-Flash": {
                     "input_per_million_tokens": 1.0,
                     "output_per_million_tokens": 2.0
                 }
@@ -1714,7 +1718,7 @@ mod tests {
             "api_key": "test",
             "models": ["MiniMax-M3"],
             "model_pricing": {
-                "MiniMax-M3.1-Flash-Preview": {
+                "MiniMax-M3.1-Flash": {
                     "input_per_million_tokens": 3.0,
                     "output_per_million_tokens": 6.0
                 }
