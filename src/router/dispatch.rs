@@ -322,7 +322,7 @@ pub(super) struct TryRequestArgs<'a> {
 /// On 2026-10-19 its catalog lists `MiniMax-M3.1-Flash` and both M3.1 IDs
 /// self-report distinctly. Canonicalize legacy M3 aliases and preview pins to
 /// the official non-preview deployment so existing routes follow the launch.
-fn canonical_model_name<'a>(
+pub(crate) fn canonical_model_name<'a>(
     provider: &crate::config::Provider,
     model_name: &'a str,
 ) -> Cow<'a, str> {

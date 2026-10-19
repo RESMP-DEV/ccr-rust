@@ -77,7 +77,11 @@ syntax only) and `status` (liveness only), `doctor` contacts each provider's
 model-listing endpoint with the same auth headers the dispatch path uses and
 flags any configured model id that the live catalog no longer lists, so a
 rotated or unlisted id (for example a vendor dropping a `-Preview` suffix) is
-surfaced before a request silently serves a different deployment.
+surfaced before a request silently serves a different deployment. Catalog
+matching honors dispatch model canonicalization (including legacy MiniMax M3
+aliases), provider `extra_headers` such as a required `User-Agent` are
+preserved, and configuration checks include feature-dependent GP routing
+support.
 
 ```bash
 ccr-rust doctor                    # probe default listener on 127.0.0.1:3456
@@ -97,10 +101,13 @@ ccr-rust doctor -p 3457            # probe a specific listener port
 Each provider reports `ok` (credential authenticated and catalog compared),
 `no_catalog` (provider has no listing endpoint, e.g. HTTP 404/405, credential
 not exercised), or `error` (rejected or unreachable). Stale models are a
-warning, not a hard failure; `ok=false` is reserved for credential errors,
-unresolved tiers, or a listener whose in-memory tier order is stale (restart
-pending). `doctor` never issues a completion and never prints credentials or
-response bodies. Exit code is 0 when healthy and 1 when problems are found.
+warning, not a hard failure. An absent listener is also a warning so offline
+config/provider diagnosis remains useful; `ok=false` is reserved for
+credential errors, unsupported or invalid configuration, unresolved tiers, a
+listener that answers `/health` with an HTTP error, or a listener whose
+in-memory tier order is stale (restart pending). `doctor` never issues a
+completion and never prints credentials or response bodies. Exit code is 0
+when healthy and 1 when problems are found.
 
 ### `dashboard`
 Launch the interactive TUI dashboard (requires the default `dashboard` feature).
@@ -256,7 +263,7 @@ Once running, the server exposes the following endpoints:
 | `/v1/token-audit` | GET | Recent pre-request token audit entries |
 | `/v1/throughput` | GET | Throughput statistics |
 | `/v1/frontend-metrics` | GET | Per-frontend request/latency metrics |
-| `/health` | GET | Health check |
+| `/health` | GET | Content-free liveness check; `?details=1` returns JSON default/tier state |
 | `/metrics` | GET | Prometheus-style metrics |
 
 ## Signals

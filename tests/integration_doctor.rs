@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use serde_json::json;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ccr_rust::doctor::{self, ProviderStatus};
@@ -169,4 +169,151 @@ async fn doctor_reports_unresolved_tier_without_network() {
     assert_eq!(report.unresolved_tiers, vec!["probe,m-missing".to_string()]);
     assert!(!report.ok);
     assert!(report.providers.is_empty());
+}
+
+#[tokio::test]
+async fn doctor_preserves_provider_user_agent_requirements() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("user-agent", "required-agent/1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "m-stable"}]})),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = json!({
+        "Providers": [{
+            "name": "probe",
+            "api_base_url": server.uri(),
+            "api_key": "sk-test",
+            "protocol": "openai",
+            "models": ["m-stable"],
+            "extra_headers": {"User-Agent": "required-agent/1"},
+        }],
+        "Router": {"default": "probe,m-stable", "tiers": ["probe,m-stable"]},
+        "PORT": 39999,
+        "HOST": "127.0.0.1",
+    });
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, config.to_string()).unwrap();
+
+    let report = doctor::run(
+        path.to_str().unwrap(),
+        "127.0.0.1",
+        39999,
+        Duration::from_secs(5),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.providers[0].status, ProviderStatus::Ok);
+}
+
+#[tokio::test]
+async fn doctor_detects_listener_tier_drift() {
+    let listener = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/health"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "ok",
+            "default": "probe,m-old",
+            "tiers": ["probe,m-old"],
+        })))
+        .mount(&listener)
+        .await;
+    let address = listener.address();
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = write_config(dir.path(), "http://127.0.0.1:1/v1", &["m-new"]);
+    let report = doctor::run(
+        &cfg,
+        &address.ip().to_string(),
+        address.port(),
+        Duration::from_secs(5),
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(report.listener.reachable);
+    assert!(report.listener.healthy);
+    assert_eq!(report.listener.tier_order_matches, Some(false));
+    assert!(!report.ok);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("tier order is stale")));
+}
+
+#[tokio::test]
+async fn doctor_fails_listener_health_http_error() {
+    let listener = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/health"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&listener)
+        .await;
+    let address = listener.address();
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = write_config(dir.path(), "http://127.0.0.1:1/v1", &["m-stable"]);
+    let report = doctor::run(
+        &cfg,
+        &address.ip().to_string(),
+        address.port(),
+        Duration::from_secs(5),
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(report.listener.reachable);
+    assert_eq!(report.listener.http_status, Some(503));
+    assert!(!report.listener.healthy);
+    assert!(!report.ok);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("listener health probe failed")));
+}
+
+#[cfg(feature = "gp")]
+#[tokio::test]
+async fn doctor_reports_gp_runtime_configuration_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = json!({
+        "Providers": [{
+            "name": "probe",
+            "api_base_url": "http://127.0.0.1:1/v1",
+            "api_key": "sk-test",
+            "protocol": "openai",
+            "models": ["m-stable"],
+        }],
+        "Router": {
+            "default": "probe,m-stable",
+            "tiers": ["probe,m-stable"],
+            "gpRouting": {"enabled": true, "kplsDim": 0},
+        },
+        "PORT": 39999,
+        "HOST": "127.0.0.1",
+    });
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, config.to_string()).unwrap();
+
+    let report = doctor::run(
+        path.to_str().unwrap(),
+        "127.0.0.1",
+        39999,
+        Duration::from_secs(2),
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(!report.config_valid);
+    assert!(!report.ok);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("kplsDim")));
 }

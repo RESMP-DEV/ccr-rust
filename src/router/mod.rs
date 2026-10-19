@@ -12,7 +12,9 @@ mod translate_response;
 
 mod dispatch;
 use dispatch::*;
-pub(crate) use dispatch::{build_anthropic_headers, build_openai_headers, provider_endpoint_url};
+pub(crate) use dispatch::{
+    build_anthropic_headers, build_openai_headers, canonical_model_name, provider_endpoint_url,
+};
 
 mod streaming;
 pub use streaming::{
@@ -34,6 +36,24 @@ const RESPONSES_RESPONSE_PASSTHROUGH_KEY: &str = "__ccr_responses_response";
 
 #[derive(Clone, Debug)]
 struct TrustedResponsesResponse(serde_json::Value);
+
+/// Content-free liveness by default; opt in to routing details for doctor.
+pub async fn health(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    if query.contains_key("details") {
+        let router = state.config.router();
+        Json(serde_json::json!({
+            "status": "ok",
+            "tiers": state.config.backend_tiers(),
+            "default": router.default,
+        }))
+        .into_response()
+    } else {
+        "ok".into_response()
+    }
+}
 
 use axum::{
     extract::{Path, State},

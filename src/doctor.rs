@@ -27,7 +27,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{Config, Provider, ProviderProtocol};
-use crate::router::{build_anthropic_headers, build_openai_headers, provider_endpoint_url};
+use crate::router::{
+    build_anthropic_headers, build_openai_headers, canonical_model_name, provider_endpoint_url,
+};
 
 /// Per-provider probe outcome.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,8 +66,14 @@ pub struct ProviderReport {
 /// A running listener's diagnosis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenerReport {
+    /// Whether the health endpoint transport answered, even with an HTTP error.
     pub reachable: bool,
     pub url: String,
+    /// HTTP status when the endpoint answered; absent on transport failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Whether `/health` itself returned a success response.
+    pub healthy: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,6 +139,14 @@ fn extract_catalog_ids(body: &Value) -> Vec<String> {
     ids
 }
 
+/// Match both the configured identity and the ID dispatch would send upstream.
+fn model_is_live(provider: &Provider, model: &str, catalog: &[String]) -> bool {
+    let wire_model = canonical_model_name(provider, model);
+    catalog
+        .iter()
+        .any(|catalog_model| catalog_model == model || catalog_model == wire_model.as_ref())
+}
+
 /// Probe one provider's credential and compare its catalog to the pinned
 /// models. Never issues a completion; uses the catalog `GET` only.
 pub async fn probe_provider(
@@ -169,14 +185,11 @@ pub async fn probe_provider(
     // than a credential failure, because the credential itself is unproven
     // either way and doctor must not fabricate a completion to check it.
     let url = provider_endpoint_url(provider, "models");
-    let response = client
-        .get(&url)
-        .headers(headers)
-        .header("accept", "application/json")
-        .header("user-agent", "ccr-rust-doctor/1")
-        .timeout(timeout)
-        .send()
-        .await;
+    let mut request = client.get(&url).header("accept", "application/json");
+    if !headers.contains_key(reqwest::header::USER_AGENT) {
+        request = request.header("user-agent", "ccr-rust-doctor/1");
+    }
+    let response = request.headers(headers).timeout(timeout).send().await;
 
     match response {
         Ok(resp) => {
@@ -199,7 +212,7 @@ pub async fn probe_provider(
                     .models
                     .iter()
                     .cloned()
-                    .partition(|m| catalog.iter().any(|c| c == m));
+                    .partition(|m| model_is_live(provider, m, &catalog));
                 ProviderReport {
                     status: ProviderStatus::Ok,
                     http_status: Some(code),
@@ -242,11 +255,18 @@ pub async fn probe_listener(
     expected_tiers: &[String],
     timeout: Duration,
 ) -> ListenerReport {
-    let url = format!("http://{host}:{port}/health");
+    let url = format!("http://{host}:{port}/health?details=1");
     match client.get(&url).timeout(timeout).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let body = resp.json::<Value>().await.unwrap_or(Value::Null);
-            // /health is plain "ok" on older builds and JSON on current ones.
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            let healthy = resp.status().is_success();
+            let body = if healthy {
+                resp.json::<Value>().await.unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+            // Plain "ok" is the stable liveness contract; current listeners
+            // add tier details only when doctor opts in with ?details=1.
             let default_tier = body
                 .get("default")
                 .and_then(Value::as_str)
@@ -259,7 +279,9 @@ pub async fn probe_listener(
             let tier_order_matches = live_tiers
                 .as_ref()
                 .map(|live| live.as_slice() == expected_tiers);
-            let detail = if tier_order_matches == Some(false) {
+            let detail = if !healthy {
+                format!("/health returned HTTP {code}")
+            } else if tier_order_matches == Some(false) {
                 "listener is up but its in-memory tier order differs from the config file; a restart is pending".into()
             } else if live_tiers.is_none() {
                 "listener is up; /health did not expose a tier list (older build)".into()
@@ -269,23 +291,19 @@ pub async fn probe_listener(
             ListenerReport {
                 reachable: true,
                 url,
+                http_status: Some(code),
+                healthy,
                 default_tier,
                 live_tiers,
                 tier_order_matches,
                 detail,
             }
         }
-        Ok(resp) => ListenerReport {
-            reachable: false,
-            url,
-            default_tier: None,
-            live_tiers: None,
-            tier_order_matches: None,
-            detail: format!("/health returned HTTP {}", resp.status().as_u16()),
-        },
         Err(e) => ListenerReport {
             reachable: false,
             url,
+            http_status: None,
+            healthy: false,
             default_tier: None,
             live_tiers: None,
             tier_order_matches: None,
@@ -319,6 +337,8 @@ pub async fn run(
     skip_providers: bool,
 ) -> Result<DoctorReport> {
     let config = Config::from_file(config_path)?;
+    let build_support_error = config.validate_build_support().err().map(|e| e.to_string());
+    let config_valid = build_support_error.is_none();
     let expected_tiers: Vec<String> = config.backend_tiers();
     let unresolved = unresolved_tiers(&config);
 
@@ -350,7 +370,19 @@ pub async fn run(
             "tier '{tier}' does not name a configured provider/model pair"
         ));
     }
-    if listener.reachable && listener.tier_order_matches == Some(false) {
+    if let Some(error) = &build_support_error {
+        warnings.push(format!(
+            "configuration is not supported by this build: {error}"
+        ));
+    }
+    if !listener.reachable {
+        warnings.push(format!(
+            "listener not reachable; provider/config checks are still valid: {}",
+            listener.detail
+        ));
+    } else if !listener.healthy {
+        warnings.push(format!("listener health probe failed: {}", listener.detail));
+    } else if listener.tier_order_matches == Some(false) {
         warnings
             .push("listener tier order is stale; restart to activate the current config".into());
     }
@@ -358,24 +390,19 @@ pub async fn run(
     let providers_ok = providers
         .iter()
         .all(|p| !matches!(p.status, ProviderStatus::Error));
-    let listener_ok = !listener.reachable || listener.tier_order_matches != Some(false);
-    let ok = config_valid(&config) && unresolved.is_empty() && providers_ok && listener_ok;
+    let listener_ok =
+        !listener.reachable || (listener.healthy && listener.tier_order_matches != Some(false));
+    let ok = config_valid && unresolved.is_empty() && providers_ok && listener_ok;
 
     Ok(DoctorReport {
         config_path: config_path.to_string(),
-        config_valid: config_valid(&config),
+        config_valid,
         unresolved_tiers: unresolved,
         providers,
         listener,
         ok,
         warnings,
     })
-}
-
-/// A config that reached this point parsed and passed `Config::from_file`'s
-/// own invariants; this helper exists so the verdict reads explicitly.
-fn config_valid(_config: &Config) -> bool {
-    true
 }
 
 #[cfg(test)]
@@ -423,6 +450,23 @@ mod tests {
             .partition(|m| ids.iter().any(|c| c == m));
         assert_eq!(live, vec!["m-stable".to_string()]);
         assert_eq!(stale, vec!["m-preview".to_string()]);
+    }
+
+    #[test]
+    fn minimax_alias_matches_dispatch_canonical_catalog_id() {
+        let p = provider(ProviderProtocol::Openai, &["MiniMax-M3"]);
+        // The helper keeps the provider neutral; recognition follows the same
+        // dispatch rule as production, including the MiniMax provider name.
+        let minimax: Provider = serde_json::from_value(json!({
+            "name": "minimax",
+            "api_base_url": "https://api.minimax.chat/v1",
+            "api_key": "k",
+            "models": ["MiniMax-M3"],
+        }))
+        .unwrap();
+        let catalog = vec!["MiniMax-M3.1-Flash".to_string()];
+        assert!(model_is_live(&minimax, &p.models[0], &catalog));
+        assert!(!model_is_live(&p, &p.models[0], &catalog));
     }
 
     #[tokio::test]

@@ -506,6 +506,33 @@ impl Config {
     pub fn preset_names(&self) -> Vec<&str> {
         self.presets.keys().map(|s| s.as_str()).collect()
     }
+
+    /// Validate configuration that depends on the compiled feature set.
+    ///
+    /// Keep this method in library code so `start`, `validate`, and `doctor`
+    /// apply the same GP build contract rather than duplicating it in the CLI.
+    pub fn validate_build_support(&self) -> Result<()> {
+        #[cfg(not(feature = "gp"))]
+        if self.router().gp_routing.enabled {
+            anyhow::bail!(
+                "Router.gpRouting.enabled=true requires a CCR-Rust build with the `gp` feature"
+            );
+        }
+
+        #[cfg(feature = "gp")]
+        if self.router().gp_routing.enabled {
+            if let Some(kpls_dim) = self.router().gp_routing.kpls_dim {
+                let feature_dim = gp_routing::features::FEATURE_DIM;
+                if kpls_dim == 0 || kpls_dim > feature_dim {
+                    anyhow::bail!(
+                        "Router.gpRouting.kplsDim must be between 1 and {feature_dim}; got {kpls_dim}"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Config {

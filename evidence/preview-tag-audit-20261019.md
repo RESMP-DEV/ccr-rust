@@ -41,7 +41,7 @@ Our stale MiniMax suffix:
 
 ## Landmine (action required before committing recovery work)
 
-The primary checkout `/Users/kearm/ccr-rust` is dirty at OLD main `bfb525e`,
+The primary checkout is dirty at OLD main `bfb525e`,
 which predates the MiniMax fix. Its working-tree
 `scripts/ccr_fallback_policy.py` still pins `MiniMax-M3.1-Flash-Preview` in
 both `MACHINE_ROUTE_CHAIN` and the provider `models` list. That file must be

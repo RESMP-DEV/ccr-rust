@@ -437,7 +437,7 @@ async fn run_server(
     telemetry_enabled: bool,
 ) -> anyhow::Result<()> {
     let config = Config::from_file(config_path)?;
-    ensure_gp_build_support(&config)?;
+    config.validate_build_support()?;
     tracing::info!("Loaded config from {}", config_path);
     tracing::info!("Tier order: {:?}", config.backend_tiers());
     tracing::info!("Max concurrent streams: {}", max_streams);
@@ -571,7 +571,7 @@ fn build_router(
             "/v1/frontend-metrics",
             get(metrics::frontend_metrics_handler),
         )
-        .route("/health", get(health))
+        .route("/health", get(router::health))
         .route("/metrics", get(metrics::metrics_handler));
     let app = if authenticated {
         app.route_layer(axum::middleware::from_fn_with_state(
@@ -599,7 +599,7 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     println!("Validating: {}", config_path);
 
     let config = Config::from_file(config_path)?;
-    ensure_gp_build_support(&config)?;
+    config.validate_build_support()?;
 
     let providers = config.providers();
     println!("✓ {} provider(s)", providers.len());
@@ -690,10 +690,12 @@ fn render_doctor(report: &ccr_rust::doctor::DoctorReport) {
     println!("Listener: {}", report.listener.url);
     println!(
         "  {} {}",
-        if report.listener.reachable {
+        if report.listener.healthy {
             "\u{2713}"
-        } else {
+        } else if !report.listener.reachable {
             "\u{25cb}"
+        } else {
+            "\u{2717}"
         },
         report.listener.detail
     );
@@ -712,36 +714,6 @@ fn render_doctor(report: &ccr_rust::doctor::DoctorReport) {
             "found problems"
         }
     );
-}
-
-fn ensure_gp_build_support(config: &Config) -> anyhow::Result<()> {
-    #[cfg(not(feature = "gp"))]
-    if config.router().gp_routing.enabled {
-        anyhow::bail!(
-            "Router.gpRouting.enabled=true requires a CCR-Rust build with the `gp` feature"
-        );
-    }
-
-    #[cfg(feature = "gp")]
-    if config.router().gp_routing.enabled {
-        validate_gp_runtime_config(&config.router().gp_routing)?;
-    }
-
-    let _ = config;
-    Ok(())
-}
-
-#[cfg(feature = "gp")]
-fn validate_gp_runtime_config(config: &config::GpRoutingRuntimeConfig) -> anyhow::Result<()> {
-    if let Some(kpls_dim) = config.kpls_dim {
-        let feature_dim = gp_routing::features::FEATURE_DIM;
-        if kpls_dim == 0 || kpls_dim > feature_dim {
-            anyhow::bail!(
-                "Router.gpRouting.kplsDim must be between 1 and {feature_dim}; got {kpls_dim}"
-            );
-        }
-    }
-    Ok(())
 }
 
 async fn check_status(host: &str, port: u16) -> anyhow::Result<()> {
@@ -939,6 +911,32 @@ async fn main() -> Result<()> {
     }
 }
 
+async fn shutdown_signal(timeout: u64) {
+    let ctrl_c = async { ctrl_c().await.expect("failed to listen for ctrl+c") };
+    #[cfg(unix)]
+    let terminate = async {
+        signal(SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received SIGINT"),
+        _ = terminate => tracing::info!("Received SIGTERM"),
+    }
+    tracing::info!(
+        "Received shutdown signal, draining connections (timeout {}s)...",
+        timeout
+    );
+}
+
+async fn latencies_handler(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    axum::Json(metrics::get_latency_entries(&state.ewma_tracker))
+}
+
 #[cfg(test)]
 mod client_listener_tests {
     use super::*;
@@ -994,57 +992,5 @@ mod client_listener_tests {
             .await
             .unwrap();
         assert_eq!(authenticated.status(), StatusCode::UNAUTHORIZED);
-    }
-}
-
-async fn shutdown_signal(timeout: u64) {
-    let ctrl_c = async { ctrl_c().await.expect("failed to listen for ctrl+c") };
-    #[cfg(unix)]
-    let terminate = async {
-        signal(SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => tracing::info!("Received SIGINT"),
-        _ = terminate => tracing::info!("Received SIGTERM"),
-    }
-    tracing::info!(
-        "Received shutdown signal, draining connections (timeout {}s)...",
-        timeout
-    );
-}
-
-async fn latencies_handler(State(state): State<AppState>) -> impl axum::response::IntoResponse {
-    axum::Json(metrics::get_latency_entries(&state.ewma_tracker))
-}
-
-async fn health() -> &'static str {
-    "ok"
-}
-
-#[cfg(all(test, feature = "gp"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn gp_runtime_validation_rejects_invalid_kpls_dimensions() {
-        for kpls_dim in [0, gp_routing::features::FEATURE_DIM + 1] {
-            let config = config::GpRoutingRuntimeConfig {
-                kpls_dim: Some(kpls_dim),
-                ..Default::default()
-            };
-            assert!(validate_gp_runtime_config(&config).is_err());
-        }
-
-        let config = config::GpRoutingRuntimeConfig {
-            kpls_dim: Some(gp_routing::features::FEATURE_DIM),
-            ..Default::default()
-        };
-        assert!(validate_gp_runtime_config(&config).is_ok());
     }
 }
