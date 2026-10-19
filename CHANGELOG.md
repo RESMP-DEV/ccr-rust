@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added `ccr-recovery`, a governed snapshot/restore surface for consumer
+  configs, credentials, launchd jobs, operator wrappers, tunnels, and Codex
+  route metadata. Snapshots are hash-verified, restore defaults to dry run and
+  writes atomically before re-parsing configs, restarts are idle-gated, and
+  sanitized replication copies omit secret-bearing files entirely.
+- Added `ccr-catalog-sync` to derive Codex metadata for the governed primary,
+  Flash, Qwen, MiniMax non-preview, and dual Qwen DeepSeek routes, reject
+  duplicate slugs, and snapshot before writes. Policy `sync` and governed
+  launchers also take a pre-write recovery snapshot.
+- Added a whole-body SHA-256 integrity pin to the machine fallback policy so a
+  direct JSON edit cannot change an unconstrained field without a reviewed
+  source change.
+- Fixed `/metrics` returning an empty Prometheus exposition immediately after
+  startup by materializing the idle request/stream gauges, keeping fresh
+  listeners safe for `ccr-wait-idle`.
 - Added `ccr-rust doctor`, a single read-only runtime diagnosis: it validates
   config including feature-dependent GP routing support, probes each provider's
   credential against its live model catalog using the same auth headers and

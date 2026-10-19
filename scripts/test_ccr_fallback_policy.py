@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import os
 import tempfile
@@ -44,6 +45,15 @@ class PolicyTests(unittest.TestCase):
 
     def write_policy(self) -> None:
         policy.atomic_json(self.root / "fallback-policy.json", self.policy)
+
+    def test_sync_takes_pre_write_recovery_snapshot_only_when_writing(self) -> None:
+        with unittest.mock.patch("ccr_recovery.pre_snapshot") as pre:
+            policy.sync(self.root)
+        self.assertTrue(pre.called)
+        self.assertEqual(pre.call_args.kwargs.get("label"), "pre-sync")
+        pre.reset_mock()
+        policy.sync(self.root, check=True)
+        self.assertFalse(pre.called)
 
     def test_shared_edit_reaches_all_consumers_without_losing_primary_or_limits(
         self,
@@ -228,6 +238,10 @@ class PolicyTests(unittest.TestCase):
                 for name, primary in policy.MACHINE_CONSUMERS.items()
             },
         }
+        expected_pin = hashlib.sha256(
+            json.dumps(machine_policy, sort_keys=True).encode()
+        ).hexdigest()
+        self.assertEqual(expected_pin, policy.MACHINE_POLICY_INTEGRITY_SHA256)
         self.policy = machine_policy
         self.write_policy()
         with unittest.mock.patch.object(policy, "MACHINE_ROOT", self.root):
@@ -247,18 +261,45 @@ class PolicyTests(unittest.TestCase):
                 policy.load_policy(self.root)
             self.policy["consumers"][missing] = original_settings
 
-            original_extras = self.policy["consumers"]["config.json"]["additional_routes"]
+            original_extras = self.policy["consumers"]["config.json"][
+                "additional_routes"
+            ]
             self.policy["consumers"]["config.json"]["additional_routes"] = [
                 "azure,gpt-6-astra"
             ]
             self.write_policy()
             with self.assertRaisesRegex(ValueError, "additional routes must remain"):
                 policy.load_policy(self.root)
-            self.policy["consumers"]["config.json"]["additional_routes"] = original_extras
+            self.policy["consumers"]["config.json"]["additional_routes"] = (
+                original_extras
+            )
 
             self.policy["providers"][0]["api_base_url"] = "https://tampered.invalid/v1"
             self.write_policy()
             with self.assertRaisesRegex(ValueError, "shared provider definitions"):
+                policy.load_policy(self.root)
+
+    def test_machine_policy_rejects_unconstrained_whole_body_edits(self) -> None:
+        self.policy = {
+            "version": 1,
+            "routes": list(policy.MACHINE_ROUTE_CHAIN),
+            "providers": copy.deepcopy(list(policy.MACHINE_SHARED_PROVIDERS.values())),
+            "consumers": {
+                name: {
+                    "primary": primary,
+                    "additional_routes": list(
+                        policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.get(name, ())
+                    ),
+                }
+                for name, primary in policy.MACHINE_CONSUMERS.items()
+            },
+        }
+        self.write_policy()
+        with unittest.mock.patch.object(policy, "MACHINE_ROOT", self.root):
+            policy.load_policy(self.root)
+            self.policy["unconstrained"] = {"route": "unapproved,model"}
+            self.write_policy()
+            with self.assertRaisesRegex(ValueError, "approved integrity pin"):
                 policy.load_policy(self.root)
 
     def test_minimax_general_fallback_uses_the_official_non_preview_model(self) -> None:
@@ -302,7 +343,9 @@ class PolicyTests(unittest.TestCase):
             policy.MACHINE_SHARED_PROVIDERS["gmi"]["api_base_url"],
             "https://api.gmi-serving.com/v1",
         )
-        self.assertIn("User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"])
+        self.assertIn(
+            "User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"]
+        )
 
     def test_restored_glm_chain_leads_with_entitled_primaries(self) -> None:
         # 2026-10-18 user-directed restore: the monthly tool quota does not
@@ -375,9 +418,7 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(qwen["protocol"], "anthropic")
         self.assertEqual(
             qwen["transformer"],
-            {
-                "use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]
-            },
+            {"use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]},
         )
         self.assertIn("qwen3.8-flash", qwen["models"])
         self.assertIn("deepseek-v4.1-flash-1017", qwen["models"])
@@ -495,6 +536,7 @@ class PolicyTests(unittest.TestCase):
         with (
             unittest.mock.patch.dict(os.environ, {"LAST_KEY": "inherited"}),
             unittest.mock.patch.object(policy, "installed_binary", lambda: fake),
+            unittest.mock.patch("ccr_recovery.pre_snapshot") as pre_snapshot,
             unittest.mock.patch(
                 "os.execve", side_effect=lambda *args: execve.append(args)
             ),
@@ -505,6 +547,8 @@ class PolicyTests(unittest.TestCase):
             policy.serve(self.root / "worker.json", ["start"], root=self.root)
             self.assertEqual(execve[1][2]["LAST_KEY"], "private-example")
             self.assertNotEqual((self.root / "worker.json").read_bytes(), before)
+        self.assertTrue(pre_snapshot.called)
+        self.assertEqual(pre_snapshot.call_args.kwargs.get("label"), "pre-serve")
         with (
             unittest.mock.patch.object(policy, "installed_binary", lambda: None),
             self.assertRaises(FileNotFoundError),
@@ -724,7 +768,9 @@ class PreflightTests(unittest.TestCase):
         result = policy.preflight(self.root)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["registered_not_routed"], ["dormant"])
-        self.assertEqual([entry["provider"] for entry in result["providers"]], ["fixture"])
+        self.assertEqual(
+            [entry["provider"] for entry in result["providers"]], ["fixture"]
+        )
 
     def test_unresolved_credential_is_reported_before_any_network_call(self) -> None:
         policy.atomic_json(

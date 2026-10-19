@@ -151,6 +151,14 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
 UMASK = os.umask(0)
 os.umask(UMASK)
 
+# Whole-body integrity pin for the machine policy JSON. The structural gate
+# below checks routes, listener registrations, and provider definitions, but an
+# editor could still change an unconstrained field. Any change to the approved
+# policy body must update this pin in the same reviewed source change.
+MACHINE_POLICY_INTEGRITY_SHA256 = (
+    "46054a630a4a9d61e45b64e2b27dbcfade666716c4cc61dc6940b10905c61b82"
+)
+
 
 def read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
@@ -228,6 +236,14 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
             raise ValueError(
                 "Machine shared provider definitions do not match the approved"
                 f" source policy: expected {sorted(MACHINE_SHARED_PROVIDERS)}"
+            )
+        policy_body = json.dumps(policy, sort_keys=True)
+        observed = hashlib.sha256(policy_body.encode()).hexdigest()
+        if observed != MACHINE_POLICY_INTEGRITY_SHA256:
+            raise ValueError(
+                "Machine policy body does not match the approved integrity pin:"
+                f" expected {MACHINE_POLICY_INTEGRITY_SHA256}, got {observed}."
+                " Update the reviewed source pin, not the JSON."
             )
     return policy
 
@@ -433,6 +449,13 @@ def sync(root: Path = ROOT, check: bool = False) -> dict[str, Any]:
         name for name, (on_disk, derived) in snapshots.items() if on_disk != derived
     ]
     if not check:
+        if changed:
+            from ccr_recovery import pre_snapshot
+
+            # The snapshot root and this policy root are distinct concepts;
+            # use the keyword so a future signature change cannot silently
+            # point a snapshot at the live config directory.
+            pre_snapshot(label="pre-sync")
         for name in changed:
             atomic_json(root / name, snapshots[name][1])
     return {
@@ -656,13 +679,10 @@ def preflight(root: Path = ROOT, timeout: float = 15.0) -> dict[str, Any]:
     for settings in policy["consumers"].values():
         routed.add(settings["primary"].split(",", 1)[0])
         routed |= {
-            route.split(",", 1)[0]
-            for route in settings.get("additional_routes", [])
+            route.split(",", 1)[0] for route in settings.get("additional_routes", [])
         }
     shared = [
-        provider
-        for provider in policy["providers"]
-        if provider.get("name") in routed
+        provider for provider in policy["providers"] if provider.get("name") in routed
     ]
     env = credential_environment(
         {"probe": json.dumps(shared)}, credentials if credentials.is_file() else None
@@ -726,6 +746,9 @@ def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
             config, credentials if credentials.is_file() else None
         )
         if config != on_disk:
+            from ccr_recovery import pre_snapshot
+
+            pre_snapshot(label="pre-serve")
             atomic_json(config_path, config)
     else:
         env = os.environ.copy()
