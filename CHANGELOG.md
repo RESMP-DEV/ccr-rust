@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Split the Qwen DeepSeek fallback by exact served ID. Qwen's published
+  current checkpoint is `deepseek-v4.1-flash-1017`, while the undated
+  `deepseek-v4.1-flash` ID also remains live and self-reports separately.
+  The governed chain now tries the dated checkpoint first and retains the
+  undated deployment as its final fallback; both remain explicit catalog
+  routes rather than silently aliasing one to the other.
 - Hardened the Qwen Token Plan lane for Codex: Qwen requires Anthropic's
   `max_tokens` field, while Codex can omit it. The `maxtoken` transformer now
   supports `only_if_missing`, and the governed Qwen provider injects a 32,768

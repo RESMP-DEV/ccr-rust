@@ -32,6 +32,7 @@ required on the Anthropic-compatible base URL:
         "qwen3.7-max",
         "qwen3.7-plus",
         "qwen3.6-flash",
+        "deepseek-v4.1-flash-1017",
         "deepseek-v4.1-flash",
         "deepseek-v4-pro",
         "glm-5.3",
@@ -58,6 +59,7 @@ the final fallback. The governed workstation uses:
 zai,glm-5.3-flash
 qwen,qwen3.8-flash
 minimax,MiniMax-M3.1-Flash
+qwen,deepseek-v4.1-flash-1017
 qwen,deepseek-v4.1-flash
 ```
 
@@ -65,6 +67,11 @@ GLM-5.3 remains the main/auth primary but is deliberately absent from this
 worker chain: worker volume should not consume the judgment seat.
 Main/auth additionally place `qwen,qwen3.8-max` immediately after GLM-5.3 and
 before the Flash/Qwen volume fallbacks.
+
+Qwen serves `deepseek-v4.1-flash-1017` and `deepseek-v4.1-flash` as distinct
+IDs: each request echoes the exact ID named. The dated `1017` ID is Qwen's
+published current iteration, so CCR tries it first; the undated ID remains an
+explicit final fallback rather than being silently rewritten.
 
 ## Verification
 
@@ -85,8 +92,9 @@ affected client.
 
 Confirm the tool round trip completed and inspect the router log or metrics
 to prove the `qwen` tier served it rather than a fallback. Repeat with
-`qwen,deepseek-v4.1-flash` if that lane is configured. Development-only
-protocol diagnostics with standalone HTTP clients must use a PAYG credential,
+`qwen,deepseek-v4.1-flash-1017` or `qwen,deepseek-v4.1-flash` if those lanes
+are configured. Development-only protocol diagnostics with standalone HTTP
+clients must use a PAYG credential,
 not a personal Token Plan `sk-sp-` key.
 
 ## Timezone and lane rules
@@ -120,7 +128,7 @@ console reads are entered.
 | Workload | Winning lane |
 |---|---|
 | Hot, cache-heavy DeepSeek session with about 92% cache hit | Native DeepSeek off-peak when available; its $0.003-0.006/M cache-hit input remains the strongest cache lane. |
-| Interactive coding or agent session with cold, low-cache long context | Qwen plan `deepseek-v4.1-flash`: listed $0.08/$0.32 per M day and $0.04/$0.16 night, better than native off-peak $0.15/$0.60 on uncached tokens. |
+| Interactive coding or agent session with cold, low-cache long context | Prefer Qwen plan `deepseek-v4.1-flash-1017`, the dated current checkpoint; the undated ID remains an explicit fallback. Both are listed at $0.08/$0.32 per M day and $0.04/$0.16 night, better than native off-peak $0.15/$0.60 on uncached tokens. |
 | Broad interactive Qwen flash use | Qwen plan `qwen3.8-flash`, especially in the night window; listed blended credit cost is about $0.047/M day and $0.019/M night. |
 | Judgment prompt | Choose the model first and preserve its quota; price is secondary. Keep GLM-5.3 out of worker fallback chains. |
 
