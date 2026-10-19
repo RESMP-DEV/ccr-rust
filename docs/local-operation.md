@@ -8,6 +8,8 @@ See [Switching plans](switching-plans.md) for Kimi/GLM commands and the
 configuration needed for Codex tool calls through Kimi.
 Use [Shared fallback policy](shared-fallback-policy.md) when several local
 listeners should reuse one approved fallback chain.
+Use [Configuration recovery](config-recovery.md) before and after changing the
+routing surface, launchd jobs, or Codex model catalog.
 Use [Qwen Token Plan](qwen-token-plan.md) when adding the live `sk-sp-`
 credit-plan provider or choosing its day/night lane.
 Use [Worker inspection](worker-inspection.md) for bounded, offline summaries
@@ -32,18 +34,19 @@ ccr-local validate
 | `ccr-local start` / `stop` / `restart` / `restart-now` | Control the launchd service; `restart` waits for idle, `restart-now` is the emergency override |
 | `ccr-local status` / `validate` | Check the listener or load and validate its configuration |
 | `ccr-wait-idle` | Require two consecutive samples with zero active requests and streams |
+| `ccr-recovery` | Snapshot, verify, restore, and detect file or in-memory route drift |
+| `ccr-recovery activate --listener <name>` | Idle-gate and restart main, worker, auth, or OCR |
+| `ccr-catalog-sync` | Align Codex CCR route metadata with the approved primary and fallback routes |
 
 The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
-Ordinary Claude and Codex sessions start at GLM-5.3 and fall back in order
-to GLM-5.3-Flash, then MiniMax. Worker sessions lead with GLM-5.3-Flash;
-OCR retains its distinct OpenRouter primary. The GLM tiers were restored
-2026-10-18, the same day they were cordoned, after the cordon's premise was
-disproved (Z.AI meters usage without distinguishing model sessions from
-tool use; the observed limits are the 5-hour prompt window and
-concurrency). FlashX remains absent after its coding-plan trial expired.
-Inspect the active config and live route counters before claiming which
-backend served a request.
+Main/auth sessions start at GLM-5.3, receive Qwen 3.8 Max next, and then use
+the shared worker chain. Worker sessions lead with GLM-5.3-Flash, followed by
+Qwen 3.8 Flash, MiniMax M3.1 Flash, Qwen's dated DeepSeek V4.1 Flash 1017
+checkpoint, and finally Qwen's undated DeepSeek V4.1 Flash lane. OCR retains
+its distinct OpenRouter primary. FlashX remains absent after its coding-plan
+trial expired. Inspect the active config and live route counters before
+claiming which backend served a request.
 
 For MiniMax, follow [MiniMax setup and operations](minimax.md). Its transformer
 must be explicitly configured, source-policy changes must also update the
@@ -58,6 +61,7 @@ installed launcher module, and busy listeners must wait for an idle restart.
 | `~/.claude-code-router/logs/` | Service logs; inspect locally, redact before sharing |
 | `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers |
 | `~/.codex/ccr.config.toml` | CCR provider profile for the installed Codex fork |
+| `~/.codex/ccr-live-model-catalog.json` | Codex model metadata; an unlisted slug falls back to generic metadata |
 | `~/.claude-code-router/LOCAL_SETUP.md` | Machine-specific setup and acceptance receipt |
 
 The service loads `runtime-credentials.json`, not older `.env` files. Changes
