@@ -322,7 +322,7 @@ pub(super) struct TryRequestArgs<'a> {
 /// On 2026-10-19 its catalog lists `MiniMax-M3.1-Flash` and both M3.1 IDs
 /// self-report distinctly. Canonicalize legacy M3 aliases and preview pins to
 /// the official non-preview deployment so existing routes follow the launch.
-fn canonical_model_name<'a>(
+pub(crate) fn canonical_model_name<'a>(
     provider: &crate::config::Provider,
     model_name: &'a str,
 ) -> Cow<'a, str> {
@@ -472,9 +472,9 @@ pub(super) struct TryRequestProtocolArgs<'a> {
     pub(super) render_refusal_as_anthropic_text: bool,
 }
 
-pub(super) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(crate) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 
-pub(super) fn provider_endpoint_url(provider: &crate::config::Provider, endpoint: &str) -> String {
+pub(crate) fn provider_endpoint_url(provider: &crate::config::Provider, endpoint: &str) -> String {
     let base = provider.api_base_url.trim_end_matches('/');
     let endpoint = endpoint.trim_start_matches('/');
     if base.ends_with(endpoint) {
@@ -520,7 +520,7 @@ fn apply_provider_request_overrides(
     Ok(())
 }
 
-pub(super) fn provider_anthropic_messages_url(provider: &crate::config::Provider) -> String {
+pub(crate) fn provider_anthropic_messages_url(provider: &crate::config::Provider) -> String {
     provider_endpoint_url(provider, "messages")
 }
 
@@ -537,7 +537,7 @@ pub(super) fn insert_ccr_tier_header(response: &mut Response, tier_name: &str) {
     );
 }
 
-pub(super) fn build_openai_headers(
+pub(crate) fn build_openai_headers(
     provider: &crate::config::Provider,
 ) -> Result<reqwest::header::HeaderMap, TryRequestError> {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -596,7 +596,7 @@ pub(super) fn build_openai_headers(
     Ok(headers)
 }
 
-pub(super) fn build_anthropic_headers(
+pub(crate) fn build_anthropic_headers(
     provider: &crate::config::Provider,
 ) -> Result<reqwest::header::HeaderMap, TryRequestError> {
     let mut headers = reqwest::header::HeaderMap::new();

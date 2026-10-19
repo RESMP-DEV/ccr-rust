@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added `ccr-rust doctor`, a single read-only runtime diagnosis: it validates
+  config including feature-dependent GP routing support, probes each provider's
+  credential against its live model catalog using the same auth headers and
+  canonical model ID the dispatch path sends, flags any configured model id
+  the catalog no longer lists (catching a rotated or unlisted id such as a
+  dropped `-Preview` suffix before it silently serves another deployment), and
+  reports listener health and whether its in-memory tier order is stale versus
+  the config file. Providers are classified `ok`/`no_catalog`/`error`; stale
+  models warn without failing the run. The listener exposes routing details
+  only through `/health?details=1`, preserving the content-free `/health`
+  liveness contract.
+  `--json`, `--skip-providers`, and `--timeout` are supported. The command
+  issues no completions and never prints credentials or response bodies.
+
 - Added a current OpenRouter free-inference example and operator guide. The
   catalog-checked routes include OpenRouter's free router, MiniMax M3.1 Flash,
   XingChen Xing4.0, NVIDIA Nemotron 3.5 Super VL/Lightning, Cohere North Mini

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 use serde_json::json;
 use tower::ServiceExt;
@@ -573,6 +573,7 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
     };
     Router::new()
         .route("/v1/messages", post(ccr_rust::router::handle_messages))
+        .route("/health", get(ccr_rust::router::health))
         .with_state(state)
 }
 
@@ -2046,4 +2047,48 @@ fn strict_tier_order_with_top_k_rejected_at_config_load() {
         err.to_string().contains("cannot be combined"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn health_endpoint_preserves_liveness_and_adds_opt_in_details() {
+    if skip_if_localhost_bind_unavailable(
+        "health_endpoint_preserves_liveness_and_adds_opt_in_details",
+    ) {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+    let config_json = make_test_config(&mock_server.uri(), HashMap::new());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let plain_resp = app
+        .clone()
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(plain_resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(plain_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(bytes, "ok");
+
+    let details_resp = app
+        .oneshot(
+            Request::get("/health?details=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(details_resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(details_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["default"], "mock,test-model");
+    assert_eq!(body["tiers"], json!(["mock,test-model"]));
 }
