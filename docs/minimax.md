@@ -136,7 +136,8 @@ curl --fail --silent http://127.0.0.1:3456/v1/models
 catalog is exposed, not that the account can complete a request. Finish with a
 representative client tool round trip as described in
 [Local operation](local-operation.md#prove-the-selected-path). For MiniMax,
-also confirm that a non-streaming response echoes the exact preview model ID.
+also confirm that a non-streaming response echoes `MiniMax-M3.1-Flash`,
+including when the route uses an M3-family alias or the legacy preview ID.
 
 ## Governed fallback runbook
 
