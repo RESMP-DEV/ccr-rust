@@ -8,6 +8,8 @@ See [Switching plans](switching-plans.md) for Kimi/GLM commands and the
 configuration needed for Codex tool calls through Kimi.
 Use [Shared fallback policy](shared-fallback-policy.md) when several local
 listeners should reuse one approved fallback chain.
+Use [Qwen Token Plan](qwen-token-plan.md) when adding the live `sk-sp-`
+credit-plan provider or choosing its day/night lane.
 Use [Worker inspection](worker-inspection.md) for bounded, offline summaries
 and incremental event inspection instead of loading full subagent transcripts.
 

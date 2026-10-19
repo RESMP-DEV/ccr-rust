@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added Qwen Token Plan routing as a governed credit lane. The provider uses
+  the live-tested Anthropic-compatible `token-plan.maas.qwencloudapi.com`
+  endpoint with an `sk-sp-` plan key, exposes the verified current model IDs,
+  and slots `qwen,qwen3.8-flash` between the Flash volume tier and MiniMax
+  final fallback so worker traffic no longer consumes the GLM-5.3 judgment
+  seat. Replaced the stale request-quota Coding Plan guide with a Token Plan
+  runbook covering the required `/v1`, response verification, thinking budget,
+  authoritative `Asia/Shanghai`/UTC off-peak windows, Pacific-Time DST
+  conversion, and cold versus cache-heavy lane selection.
 - Restored the GLM-5.3-Flash and GLM-5.3 chain tiers and their consumer
   primaries (main/auth GLM-5.3, workers GLM-5.3-Flash), reversing the
   2026-10-18 quota cordon after its premise was disproved: the Z.AI monthly
