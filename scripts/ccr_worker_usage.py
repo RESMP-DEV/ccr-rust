@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
+import socket
 import sys
 import urllib.parse
 import urllib.request
@@ -60,8 +62,26 @@ def parse_listener_metrics(metrics: str, url: str) -> ListenerUsage:
 
 def validate_local_http_url(url: str) -> None:
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         raise ValueError("--url must be an HTTP loopback listener URL")
+    try:
+        port = parsed.port
+        addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except (OSError, ValueError) as error:
+        raise ValueError("--url must resolve to an HTTP loopback listener") from error
+    try:
+        loopback = all(
+            ipaddress.ip_address(address[4][0]).is_loopback for address in addresses
+        )
+    except ValueError as error:
+        raise ValueError("--url must resolve to an HTTP loopback listener") from error
+    if not addresses or not loopback:
+        raise ValueError("--url must resolve to an HTTP loopback listener")
 
 
 def read_listener_usage(url: str, timeout: float) -> ListenerUsage:

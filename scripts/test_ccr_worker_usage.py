@@ -8,6 +8,7 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import ccr_worker_usage as usage
 
@@ -25,9 +26,30 @@ ccr_requests_total{tier="zai"} 4
         self.assertEqual(result.tier_requests, {"minimax": 1, "zai": 4})
 
     def test_nonloopback_listener_is_rejected(self) -> None:
-        for url in ("https://127.0.0.1/metrics", "http://example.test/metrics"):
+        for url in (
+            "https://127.0.0.1/metrics",
+            "http://example.com@127.0.0.1/metrics",
+        ):
             with self.assertRaises(ValueError):
                 usage.validate_local_http_url(url)
+
+    def test_listener_hostname_must_resolve_only_to_loopback(self) -> None:
+        with (
+            patch.object(
+                usage.socket,
+                "getaddrinfo",
+                return_value=[(None, None, None, None, ("10.0.0.1", 0))],
+            ),
+            self.assertRaisesRegex(ValueError, "loopback"),
+        ):
+            usage.validate_local_http_url("http://localhost/metrics")
+
+        with patch.object(
+            usage.socket,
+            "getaddrinfo",
+            return_value=[(None, None, None, None, ("::1", 0))],
+        ):
+            usage.validate_local_http_url("http://localhost/metrics")
 
     def test_run_summary_counts_only_requested_local_dates(self) -> None:
         with TemporaryDirectory() as directory:
