@@ -441,8 +441,13 @@ right trade for long-lived agent sessions.
 
 `Router.retryBudgetPercent` (default 20, range 0..100) bounds global retry
 attempts to a percentage of active client requests, with a floor of three.
-Zero disables retries after each request's first upstream attempt. Rejected
-retries increment `ccr_retry_budget_overflow_total`.
+The budget applies to retries of a tier that already attempted; the first
+attempt on each fallback tier is not charged, so budget saturation cannot end
+the cascade before a later tier is tried. Once the budget rejects a retry,
+CCR completes the current cascade but does not start additional retry sweeps.
+Tail-latency hedges remain budget-controlled because they intentionally add a
+parallel upstream attempt. Zero disables same-tier retries. Rejected retries
+increment `ccr_retry_budget_overflow_total`.
 
 ### Conversation stickiness
 

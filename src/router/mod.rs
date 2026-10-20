@@ -373,15 +373,48 @@ fn strip_search_tags(request: &mut AnthropicRequest) {
     }
 }
 
+/// One route observed rate-limited by this request, with the configured
+/// display name used by `x-ccr-tier` and the route's own retry hint.
+type RateLimitedRoute = (String, String, Option<std::time::Duration>);
+
+/// Record that one route was rate-limited, keeping the first observation of
+/// each full `provider,model` route. The terminal 429 reports this list, so a
+/// client-visible failure names every exhausted candidate without conflating
+/// sibling models on one provider. The configured `tier_name` travels with the
+/// route because that display name, not the provider prefix, is the documented
+/// `x-ccr-tier` contract.
+fn note_rate_limited_tier(
+    tiers: &mut Vec<RateLimitedRoute>,
+    route: &str,
+    tier_name: &str,
+    retry_after: Option<std::time::Duration>,
+) {
+    if tiers.iter().any(|(tier, _, _)| tier == route) {
+        return;
+    }
+    tiers.push((route.to_string(), tier_name.to_string(), retry_after));
+}
+
 fn rate_limit_exhausted_response(
     retry_after: Option<std::time::Duration>,
-    tier_name: Option<&str>,
+    rate_limited_tiers: &[RateLimitedRoute],
 ) -> Response {
+    let details: Vec<_> = rate_limited_tiers
+        .iter()
+        .map(|(tier, _, tier_retry_after)| {
+            serde_json::json!({
+                "tier": tier,
+                "reason": "rate_limited",
+                "retry_after_ms": tier_retry_after.map(|duration| duration.as_millis() as u64),
+            })
+        })
+        .collect();
     let error_resp = serde_json::json!({
         "error": {
             "type": "rate_limit_error",
             "message": "All candidate backend tiers are currently rate limited",
-            "code": "rate_limited"
+            "code": "rate_limited",
+            "details": details
         }
     });
 
@@ -391,10 +424,23 @@ fn rate_limit_exhausted_response(
             response.headers_mut().insert("retry-after", value);
         }
     }
-    if let Some(tier_name) = tier_name {
+    // `x-ccr-tier` carries the same configured display name dispatch uses, so
+    // a provider with a custom `tier_name` keeps its established value. The
+    // dedicated provenance header below carries the unambiguous full route.
+    if let Some((_, tier_name, _)) = rate_limited_tiers.last() {
         if let Ok(value) = tier_name.parse() {
             response.headers_mut().insert("x-ccr-tier", value);
         }
+    }
+    let provenance = rate_limited_tiers
+        .iter()
+        .map(|(route, _, _)| route.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    if let Ok(value) = provenance.parse::<axum::http::HeaderValue>() {
+        response
+            .headers_mut()
+            .insert("x-ccr-rate-limited-tiers", value);
     }
     response
 }
@@ -540,7 +586,11 @@ pub async fn handle_messages(
     // deterministic rejections; only these justify another retry sweep.
     let mut saw_retryable_failure;
     let mut retry_after_hint: Option<std::time::Duration> = None;
-    let mut last_rate_limited_tier: Option<String> = None;
+    // Every route this request saw rate-limited, with the reason it was
+    // unavailable. The synthesized terminal 429 reports this list so a
+    // client-visible failure explains which candidates were exhausted and
+    // why, instead of a bare "all candidates rate limited".
+    let mut rate_limited_tiers: Vec<RateLimitedRoute> = Vec::new();
 
     // Serialize messages to JSON values once for pre-request token audit
     let msg_values: Vec<serde_json::Value> = request
@@ -588,7 +638,7 @@ pub async fn handle_messages(
         saw_non_rate_limit_failure = false;
         saw_retryable_failure = false;
         retry_after_hint = None;
-        last_rate_limited_tier = None;
+        rate_limited_tiers.clear();
         let mut retry_budget_exhausted = false;
 
         // A tier at its AIMD limit is deferred to the end of this pass. This
@@ -615,7 +665,7 @@ pub async fn handle_messages(
             .collect();
 
         // Try each tier with retries.
-        'tier_pass: for (pass_index, (tier, tier_name)) in pass_order.iter().enumerate() {
+        for (pass_index, (tier, tier_name)) in pass_order.iter().enumerate() {
             if rejected_tiers.contains(tier) {
                 tracing::debug!(tier = %tier_name, "Skipping deterministically rejected tier");
                 continue;
@@ -631,7 +681,12 @@ pub async fn handle_messages(
                 .should_skip_tier(tier.as_str(), honor_remaining)
             {
                 saw_rate_limit = true;
-                last_rate_limited_tier = Some(tier_name.to_string());
+                note_rate_limited_tier(
+                    &mut rate_limited_tiers,
+                    tier,
+                    tier_name,
+                    state.ratelimit_tracker.backoff_remaining(tier.as_str()),
+                );
                 // Carry the tracker's live backoff window into this sweep's
                 // Retry-After hint so an all-skipped sweep still cools down
                 // for the actual recovery time (and the terminal 429 keeps
@@ -668,21 +723,27 @@ pub async fn handle_messages(
             };
 
             for attempt in 0..=max_retries {
-                let retry_permit = if total_attempts > 0 {
+                // The retry budget bounds retry amplification, which is the
+                // repeated attempt on a tier that already failed. A cascade
+                // to a different tier is not amplification: it is the
+                // failover contract, and charging it here meant a saturated
+                // budget abandoned the request before a healthy later tier
+                // was ever tried, turning a recoverable 429 into a terminal
+                // one. Only a retry of the same tier draws from the budget.
+                let retry_permit = if attempt > 0 {
                     match state
                         .retry_budget
                         .acquire_retry(config.router().retry_budget_percent)
                     {
                         Some(permit) => Some(permit),
                         None => {
-                            // Budget exhaustion is a cascade-level stop, not a
-                            // tier failure. Recording it as a non-rate-limit
-                            // failure would turn a purely 429 sweep into a
-                            // synthesized 503 below, so only the terminal
-                            // synthesis decides between 429 and 503 from the
-                            // sweep's actual failure mix.
+                            // Stop retrying this tier, continue through the
+                            // remaining tiers' first attempts, and then stop
+                            // additional sweeps. The budget limits retry
+                            // amplification without hiding an eligible
+                            // fallback in the current cascade.
                             retry_budget_exhausted = true;
-                            break 'tier_pass;
+                            break;
                         }
                     }
                 } else {
@@ -769,7 +830,12 @@ pub async fn handle_messages(
                             crate::metrics::record_rate_limit_hit(tier);
                             crate::metrics::record_rate_limit_backoff(tier);
                             saw_rate_limit = true;
-                            last_rate_limited_tier = Some(tier_name.to_string());
+                            note_rate_limited_tier(
+                                &mut rate_limited_tiers,
+                                tier,
+                                tier_name,
+                                retry_after,
+                            );
                             retry_after_hint = match (retry_after_hint, retry_after) {
                                 (Some(current), Some(candidate)) => Some(current.max(candidate)),
                                 (None, some) => some,
@@ -840,7 +906,12 @@ pub async fn handle_messages(
                             gp_router.record_attempt(plan, tier, attempt, None, config);
                         }
                         saw_rate_limit = true;
-                        last_rate_limited_tier = Some(tier_name.to_string());
+                        note_rate_limited_tier(
+                            &mut rate_limited_tiers,
+                            tier,
+                            tier_name,
+                            retry_after,
+                        );
                         retry_after_hint = match (retry_after_hint, retry_after) {
                             (Some(current), Some(candidate)) => Some(current.max(candidate)),
                             (None, some) => some,
@@ -920,10 +991,11 @@ pub async fn handle_messages(
         // hold the request open and cascade again (retrySweeps) or fall
         // through to the synthesized terminal response below.
         if !sweeps.enabled || retry_budget_exhausted || !(saw_rate_limit || saw_retryable_failure) {
-            // Sweeps disabled, the retry budget is spent, or every tier
-            // failed deterministically (401/402/403/404): another sweep
-            // cannot change that outcome. The terminal response still
-            // reflects this sweep's own failure mix (429 vs 503).
+            // Sweeps disabled, the retry budget is spent after completing
+            // this cascade, or every tier failed deterministically
+            // (401/402/403/404): another sweep cannot change that outcome.
+            // The terminal response still reflects this sweep's own failure
+            // mix (429 vs 503).
             break;
         }
         if sweeps.max_sweeps > 0 && sweep >= sweeps.max_sweeps {
@@ -980,7 +1052,7 @@ pub async fn handle_messages(
             retry_after = ?retry_after_hint,
             "All candidate tiers exhausted due to rate limits"
         );
-        return rate_limit_exhausted_response(retry_after_hint, last_rate_limited_tier.as_deref());
+        return rate_limit_exhausted_response(retry_after_hint, &rate_limited_tiers);
     }
 
     // All tiers exhausted due to non-rate-limit failures (5xx, timeouts, etc.).

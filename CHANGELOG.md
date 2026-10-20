@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Removed the Qwen token-plan lane from every governed fallback chain and
+  from the main/auth private seat, because the plan's monthly utilization
+  window was exhausted and each dispatch paid a guaranteed refusal before a
+  tier that could still serve. The provider, credential, endpoint, and
+  `maxtoken` transformer stay registered so a dated re-approval restores the
+  lane without rewiring; preflight reports it as `registered_not_routed`.
+
+- Fixed retry-budget saturation synthesizing a terminal 429 before later
+  fallback tiers were attempted. The budget now bounds retries of a tier,
+  while each tier's initial failover attempt remains eligible; overflow stops
+  retrying that tier, completes the current cascade, and suppresses further
+  retry sweeps. Synthesized terminal 429s also include an `error.details`
+  array and an `x-ccr-rate-limited-tiers` header naming every rate-limited
+  route and its retry hint, while `x-ccr-tier` keeps its provider-name
+  contract. Hedged parallel attempts remain budget-controlled.
+
 - Documented that Claude Code through CCR stays opt-in per machine. The
   maintainer's Mac retired `claude-ccr` on October 19, 2026 because Claude Code
   there runs as a native Anthropic subscription client, so the guides now

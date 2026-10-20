@@ -35,24 +35,19 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # calls after that probe read 0%, and the ZCode app kept serving GLM on
     # the same plan. The observed completion limits are the rolling 5-hour
     # prompt window and concurrency caps.
-    # Worker order: Flash handles subscription volume, Qwen Flash is the
-    # inexpensive credit tier, MiniMax remains the general fallback, and Qwen
-    # DeepSeek is the last resort when MiniMax is exhausted. GLM-5.3 remains
-    # the main/auth primary but is not a worker fallback.
+    # Worker order: Flash handles subscription volume and MiniMax remains the
+    # general fallback. GLM-5.3 stays the main/auth primary but is not a
+    # worker fallback. The MiniMax ID below is the reviewed one in this source
+    # tree and is what the live listeners already serve; legacy `-Preview`
+    # aliases are canonicalized on dispatch rather than pinned here.
+    # Qwen was removed 2026-10-19 by user direction: the token plan's monthly
+    # utilization window was exhausted, so every dispatch paid a guaranteed
+    # refusal before reaching a tier that could still serve. The provider and
+    # its credential stay registered below so a dated re-approval restores it
+    # without rewiring keys. Live utilization at removal is not re-checked here
+    # on purpose: an exhausted window cannot be optimized around, only skipped.
     "zai,glm-5.3-flash",
-    "qwen,qwen3.8-flash",
-    # Also removed from the chain 2026-10-11, providers kept registered
-    # below for re-adding after fixing: "gmi,Qwen/Qwen3.8-Max-0902"
-    # (user: not working reliably) and "deepseek,deepseek-flash" (PAYG
-    # balance exhausted, preflight 402). Re-add with a dated approval.
     "minimax,MiniMax-M3.1-Flash",
-    # Qwen serves the dated 1017 refresh and the undated V4.1 Flash ID as
-    # distinct deployments. Prefer the current dated checkpoint, then retain
-    # the undated lane as the last resort if 1017 is unavailable.
-    "qwen,deepseek-v4.1-flash-1017",
-    # Last general fallback for a MiniMax exhaustion window. This is Qwen's
-    # undated DeepSeek lane, not the native PAYG provider registered above.
-    "qwen,deepseek-v4.1-flash",
 )
 MACHINE_CONSUMERS: dict[str, str] = {
     # Primaries returned to their pre-cordon tiers with the 2026-10-18
@@ -63,12 +58,10 @@ MACHINE_CONSUMERS: dict[str, str] = {
     # OCR keeps its distinct local primary; shared fallback remains governed.
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
 }
-MACHINE_CONSUMER_ADDITIONAL_ROUTES: dict[str, tuple[str, ...]] = {
-    # Main/auth gets the stronger Qwen Max seat immediately after GLM-5.3 and
-    # before GLM Flash/Qwen Flash. Other consumers use the shared volume chain.
-    "config.json": ("qwen,qwen3.8-max",),
-    "config-auth.json": ("qwen,qwen3.8-max",),
-}
+# No consumer holds a private route seat. The 2026-10-19 Qwen removal took
+# the main/auth `qwen,qwen3.8-max` seat out with it; every consumer now uses the
+# shared chain, and a new private seat needs a dated approval here.
+MACHINE_CONSUMER_ADDITIONAL_ROUTES: dict[str, tuple[str, ...]] = {}
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
     "zai": {
         "name": "zai",
@@ -156,7 +149,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "46054a630a4a9d61e45b64e2b27dbcfade666716c4cc61dc6940b10905c61b82"
+    "4f72219c40a00a7d3e304a01cccfe87ffcbe8d5390dbaf84eb34a07d879f2d6b"
 )
 
 
