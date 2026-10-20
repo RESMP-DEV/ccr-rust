@@ -82,15 +82,38 @@ normalization rather than a model change. Both IDs still carry the required
 - Source, deployed module, and symlinked copy all hash to `3fcedb0a84e590ac`.
 - Snapshot `20261019T210445-0700`, label `pre-qwen-source-policy-deploy`,
   verified clean, taken before the live policy write.
-- Auth (3461) and worker (3457) passed idle gates and restarted on the new
-  configs. Main (3456, PID 32148, 3600-second window) and OCR (3458, PID
-  32149, 900-second window) have detached idle-gated activations running.
+- Every listener activation completed through an idle gate: auth and worker
+  immediately, main after 133 seconds, OCR after 473 seconds. No in-flight
+  turn was interrupted.
+- Post-merge, the freshly built binary was reinstalled
+  (`69678f54f69a40150ec0927e2c3f3a47621bee0c731cb3ac7cea6ccbb8a601ca`) so the
+  deployed code includes the merged `x-ccr-tier` display-name fix, and
+  auth restarted again on it. Main and OCR restart onto that same binary
+  through detached idle-gated activators.
+- `ccr-recovery doctor`: `ok: true`, `runtime_ok: true`, no drift, all four
+  listeners reporting in-memory tiers identical to their configs.
+- Snapshot `20261019T212308-0700`, label `post-merge-main-7bb3ba0`, verified
+  clean.
+- The primary checkout is fast-forwarded to `7bb3ba0` and clean against
+  `origin/main`. The reconcile stash is retained.
 
 ## Pull request
 
-PR #65, `fix/retry-budget-failover`, head `bb3bcca62def512c4dcae38af70bc2014447a6d7`.
-Two commits: the retry-budget and provenance fix, then the exhausted-lane
-policy removal. Mergeable; review state is tracked in the PR.
+PR #65, `fix/retry-budget-failover`, merged 2026-10-20T04:21:05Z as
+`7bb3ba0e758c3cfcf803aef33383710a322389d3`.
+
+Reviewer classification at the final head `a2b57bd`:
+
+- **Kilo Code Review**: completed with no issues on `0c022c0` and `bb3bcca`,
+  recommendation merge. Its re-run on `a2b57bd` stayed `pending` through a
+  bounded wait and is recorded as incomplete for that head, not as approval.
+- **CodeRabbit**: completed with 4 minor findings on `0c022c0`. All four were
+  valid and were fixed in `a2b57bd`, replied to with evidence, and resolved.
+  Its re-review returned `Review rate limited`, a provider-side quota
+  response, so it was not invoked again.
+
+`main` carries no branch protection, so no required checks or approvals were
+outstanding. All four review threads are resolved.
 
 ## Non-claims
 
