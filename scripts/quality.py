@@ -158,6 +158,7 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
             Check(
                 "debug-binary",
                 ("cargo", "build", "--all-features", "--locked"),
+                env=(("CARGO_TARGET_DIR", str(ROOT / "target")),),
             ),
             Check(
                 "python-helpers",
@@ -171,7 +172,13 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
                     "-p",
                     "test_*.py",
                 ),
-                env=(("CCR_TEST_BINARY", str(ROOT / "target" / "debug" / "ccr-rust")),),
+                env=(
+                    (
+                        "CCR_TEST_BINARY",
+                        str(ROOT / "target" / "debug" / "ccr-rust"),
+                    ),
+                    ("CARGO_TARGET_DIR", str(ROOT / "target")),
+                ),
             ),
             Check(
                 "vendored-gp-routing",

@@ -29,8 +29,7 @@ The default owns these boundaries:
 | Rust unit and mocked integration tests | `cargo test --all-features --locked` |
 | Portable feature boundary | `cargo check --no-default-features --locked` |
 | Checkout debug binary | `cargo build --all-features --locked` |
-| Python policy/runtime helpers | `python3 -m unittest discover` with
-  `CCR_TEST_BINARY=$PWD/target/debug/ccr-rust` |
+| Python policy/runtime helpers | `CCR_TEST_BINARY=$PWD/target/debug/ccr-rust python3 -m unittest discover` |
 | Vendored GP surrogate | `cargo test --manifest-path vendor/gp-routing/Cargo.toml --locked` |
 
 The Rust ratchet caps total nonblank `src/**/*.rs` lines at the measured

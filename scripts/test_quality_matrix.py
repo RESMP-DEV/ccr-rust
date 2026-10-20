@@ -49,9 +49,20 @@ class QualityMatrixTests(unittest.TestCase):
         by_name = {check.name: check for check in checks}
         self.assertIn("debug-binary", by_name)
         self.assertIn("python-helpers", by_name)
+        helpers_env = dict(by_name["python-helpers"].env)
         self.assertEqual(
-            dict(by_name["python-helpers"].env).get("CCR_TEST_BINARY"),
+            helpers_env.get("CCR_TEST_BINARY"),
             str(quality.ROOT / "target" / "debug" / "ccr-rust"),
+        )
+        # The helper must use the same target directory the debug build
+        # writes to, or a caller-provided CARGO_TARGET_DIR would leave the
+        # tests pointing at a stale or missing binary.
+        self.assertEqual(
+            helpers_env.get("CARGO_TARGET_DIR"), str(quality.ROOT / "target")
+        )
+        self.assertEqual(
+            dict(by_name["debug-binary"].env).get("CARGO_TARGET_DIR"),
+            str(quality.ROOT / "target"),
         )
 
     def test_optional_modes_replace_or_add_expensive_checks(self) -> None:
