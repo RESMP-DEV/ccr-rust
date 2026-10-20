@@ -36,4 +36,5 @@ ignore = ["TRY003", "TRY301"]
 # always comes from the operator's own configuration.
 "scripts/ccr_fallback_policy.py" = ["S310"]
 "scripts/ccr_wait_idle.py" = ["S310"]
+"scripts/ccr_worker_usage.py" = ["S310"]
 "scripts/test_ccr_fallback_runtime.py" = ["S310"]

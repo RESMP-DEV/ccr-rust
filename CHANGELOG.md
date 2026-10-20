@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Made bounded worker delegation the documented default for broad or
+  multi-file audit, research, implementation, and test diagnosis. The worker
+  guide now gives a parent-side delegation trigger, a compact XML brief
+  contract, and a foreground-session launch pattern that keeps independent
+  runs independently tracked without raising the 12-worker ceiling.
+- Added `scripts/ccr_worker_usage.py`, a read-only adoption summary that joins
+  the worker listener's active-request and per-tier request metrics with local
+  launcher receipt outcomes, timeout profiles, permissions, requested routes,
+  and elapsed-time totals. It accepts `--runs-only` and `--listener-only` for
+  partial-live diagnostics and never treats a requested route as served-route
+  proof.
 - Changed how a streaming response reports route health. A truncated
   upstream stream is no longer recorded as a clean route success, so a
   provider disconnect can no longer grow the AIMD admission limit or clear a

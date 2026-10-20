@@ -7,9 +7,30 @@ local helper; this feature does not install or modify it.
 
 ## Agent workflow
 
+Decide delegation before exploring. Independent broad search, review,
+implementation, test diagnosis, or cross-repository work belongs in a bounded
+worker order when the parent task authorizes that scope. Keep only tiny exact
+lookups, decomposition, integration, irreversible actions, and final
+acceptance in the parent turn.
+
 Keep the launcher's verbose relay out of the parent agent's context. Redirect
 it to a private directory; the launcher still retains its original trace and
 receipt under `~/.cache/ccr-worker-runs`.
+
+In Codex, launch independent workers as separate foreground tool sessions
+rather than backgrounding them in one shell; this keeps the harness tracking
+each process and avoids the known zero-byte/background-exit failure mode.
+Use one worker per bounded concern, not one broad worker per task.
+
+Use a compact lowercase-XML brief with one finish line and explicit
+non-goals:
+
+```text
+<task>State one bounded outcome and the exact files or symbols owned.</task>
+<context>Give only the route, repository state, and relevant facts.</context>
+<instructions>State read/write scope, required commands, stop conditions, and evidence to report.</instructions>
+<report>Ask for changes, checks with exit codes, unresolved failures, and non-claims.</report>
+```
 
 ```bash
 run=$(mktemp -d "${TMPDIR:-/tmp}/ccr-task.XXXXXX")
@@ -40,6 +61,24 @@ the next command when using shell automation. The inspector never retries or
 resumes workers, changes providers, executes transcript commands, marks tasks
 verified, or modifies artifacts. Use the launcher's existing resume and
 cooldown policies when a worker needs follow-up.
+
+Measure adoption without replaying transcripts:
+
+```bash
+ccr-worker-usage --days 7
+```
+
+On the maintainer's workstation this is a cataloged wrapper over
+`scripts/ccr_worker_usage.py`; in a standalone checkout, invoke that script
+with `python3` directly.
+
+The command combines the worker listener's active-request gauge and per-tier
+request counters with local launcher receipt counts, outcomes, timeout
+profiles, permission choices, requested routes, and elapsed-time totals.
+`--runs-only` works when the listener is down; `--listener-only` works when
+receipt directories are unavailable. Listener counters are in-memory and reset
+on restart, while receipt history remains local and private. A requested route
+is still not proof of the served upstream route.
 
 ## Commands and output budgets
 
