@@ -333,7 +333,15 @@ def write_receipt(
     receipt = {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "agent": os.environ.get("QUALITY_AGENT", "Codex"),
-        "mode": "fast" if fast else "default",
+        "mode": (
+            "fast"
+            if fast
+            else "coverage"
+            if coverage
+            else "coverage+mutation"
+            if mutation
+            else "default"
+        ),
         "coverage": coverage,
         "mutation": mutation,
         "platform": platform.platform(),
