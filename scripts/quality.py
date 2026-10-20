@@ -340,15 +340,18 @@ def write_receipt(
     receipt = {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "agent": os.environ.get("QUALITY_AGENT", "Codex"),
-        "mode": (
-            "fast"
-            if fast
-            else "coverage"
-            if coverage
-            else "coverage+mutation"
-            if mutation
-            else "default"
-        ),
+        "mode": "+".join(
+            [
+                name
+                for name, enabled in (
+                    ("fast", fast),
+                    ("coverage", coverage),
+                    ("mutation", mutation),
+                )
+                if enabled
+            ]
+        )
+        or "default",
         "coverage": coverage,
         "mutation": mutation,
         "platform": platform.platform(),

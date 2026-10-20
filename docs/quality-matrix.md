@@ -38,7 +38,10 @@ five existing largest hotspot files individual ceilings. Lower a ceiling when
 a refactor shrinks the measured baseline; do not raise one to admit new code.
 
 `ruff.toml` is the single source of truth for the Python rules, so a new
-helper inherits the same standard instead of drifting. The benchmark and
+helper inherits the same standard instead of drifting. The rule set is pinned
+explicitly rather than inherited from Ruff's defaults, so a default change
+cannot silently weaken the boundary. Each per-file exception names the
+deliberate pattern it permits and why. The benchmark and
 provider-validation directories are included because they are executable code
 shipped with the repository, not scratch files. `ty` is scoped to `scripts`,
 which is the only Python tree that runs in CI-equivalent local validation and
