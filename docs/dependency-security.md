@@ -73,8 +73,19 @@ cargo audit --file Cargo.lock \
   --ignore RUSTSEC-2026-0368 \
   --ignore RUSTSEC-2026-0369
 cargo deny check
+cargo deny --manifest-path vendor/gp-routing/Cargo.toml check
 osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
+osv-scanner scan source --config osv-scanner.toml --lockfile vendor/gp-routing/Cargo.lock
 ```
+
+`deny.toml` declares the same dated exceptions as `osv-scanner.toml`, because
+cargo-deny does not read the OSV Scanner configuration. The vendored GP
+surrogate has its own lockfile and is checked separately.
+
+cargo-deny 0.20 has no expiry field for advisory ignores, so the dated
+expiry is enforced by the OSV Scanner configuration alone. A matching
+`deny.toml` entry must be removed by hand when that date passes; the OSV
+Scanner fails first and names the expired entry.
 
 Historical enforcement note from 2026-09-17: OSV-Scanner 2.6.0 honored
 `IgnoredVulns.ignoreUntil`, and a probe with an already-expired `paste`

@@ -76,8 +76,15 @@ cargo audit --file Cargo.lock \
   --ignore RUSTSEC-2026-0368 \
   --ignore RUSTSEC-2026-0369
 cargo deny check
+cargo deny --manifest-path vendor/gp-routing/Cargo.toml check
 osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
+osv-scanner scan source --config osv-scanner.toml --lockfile vendor/gp-routing/Cargo.lock
 ```
+
+The vendored GP surrogate has its own tracked lockfile and its own dependency
+graph, so it is scanned and denied separately. `deny.toml` and
+`osv-scanner.toml` carry the same dated exceptions because cargo-deny does not
+read the OSV Scanner configuration.
 
 Every exception in `osv-scanner.toml` carries an expiry date, and
 `docs/dependency-security.md` records the reason, owner, and follow-up for

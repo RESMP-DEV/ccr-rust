@@ -1,0 +1,78 @@
+# Supply chain security policy for CCR-Rust
+# Run: cargo deny check (requires: cargo install cargo-deny)
+
+[graph]
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+
+[advisories]
+# Vulnerabilities are denied by default. Limit unmaintained advisories to
+# workspace crates; cargo-audit reports transitive maintenance warnings.
+unmaintained = "workspace"
+# Fetch advisory databases with the Git CLI instead of gix
+git-fetch-with-cli = true
+
+# Temporary, dated risk decisions. cargo-deny does not read the OSV
+# Scanner exception file, so the same reviewed exceptions are declared here
+# as well. Each entry mirrors a dated entry in osv-scanner.toml and
+# docs/dependency-security.md; keep the two files and this list in step.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0367"
+reason = "zip 2.4.2 is reached only through ndarray-npy, whose NPZ path uses ZipArchive and ZipWriter but never ZipArchive.extract or ZipStreamReader.extract. Reviewed 2026-10-19; recheck by 2026-11-19."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0368"
+reason = "zip 2.4.2 is reached only through ndarray-npy, whose NPZ path uses ZipArchive and ZipWriter but never ZipArchive.extract or ZipStreamReader.extract. Reviewed 2026-10-19; recheck by 2026-11-19."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0369"
+reason = "zip 2.4.2 is reached only through ndarray-npy, whose NPZ path uses ZipArchive and ZipWriter but never ZipArchive.extract or ZipStreamReader.extract. Reviewed 2026-10-19; recheck by 2026-11-19."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0253"
+reason = "Tantivy still requires lru 0.16; its reachable keys do not have panicking Drop implementations. Reviewed 2026-10-19; recheck by 2026-11-19."
+
+[licenses]
+# Allow only these licenses
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "AGPL-3.0-or-later",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "OpenSSL",
+    "BSL-1.0",
+]
+
+[bans]
+# Deny multiple versions of the same crate
+multiple-versions = "warn"
+wildcards = "deny"
+# Ban known-malicious crates
+deny = [
+    # TeamPCP time utility campaign (Feb-Mar 2026)
+    { crate = "chrono_anchor", wrappers = [] },
+    { crate = "dnp3times", wrappers = [] },
+    { crate = "time_calibrator", wrappers = [] },
+    { crate = "time_calibrators", wrappers = [] },
+    { crate = "time-sync", wrappers = [] },
+    # Crypto wallet stealers
+    { crate = "faster_log", wrappers = [] },
+    { crate = "async_println", wrappers = [] },
+    # Dependency confusion examples
+    { crate = "finch-rust", wrappers = [] },
+    { crate = "sha-rust", wrappers = [] },
+]
+
+[sources]
+# Only allow crates from crates.io
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/RESMP-DEV/rust_sindexer.git"]

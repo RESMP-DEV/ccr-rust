@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed how a streaming response reports route health. A truncated
+  upstream stream is no longer recorded as a clean route success, so a
+  provider disconnect can no longer grow the AIMD admission limit or clear a
+  route's rate-limit backoff. An OpenAI stream now requires `[DONE]` or a
+  `finish_reason`, and an Anthropic stream requires `message_stop`.
+- Changed active-stream accounting to an RAII guard, so the gauge is
+  decremented exactly once on every exit path, including idle timeout and
+  client disconnect.
+- Fixed a provider-controlled `x-ratelimit-reset` value being able to
+  overflow the reset-time computation and abort dispatch. An impossible
+  horizon is now ignored.
+- Fixed provider base-URL matching so a URL that merely ends with the
+  endpoint text no longer suppresses the required path, and invalid
+  configured `extra_headers` now fail at config load instead of being
+  silently dropped.
+- Changed the reported attempt count so an admission deferral, which
+  launches no upstream request, is no longer counted as an attempt.
+- Bounded the buffered bytes of one incomplete SSE frame, and made the
+  decoder discard bytes through the next frame boundary after an oversized
+  frame so a malformed frame tail is never forwarded as a new frame.
+
 - Raised the repository quality standard and made it enforceable. The
   offline dispatcher now also runs Ruff format and lint over the shipped
   Python trees, `ty` type checks the helper scripts, and ShellCheck covers

@@ -64,6 +64,15 @@ create per-route admission entries; and no general module-splitting refactor
 was performed in this pass. The new ratchet prevents growth while those
 follow-ups happen.
 
+The branch was also reviewed after the fact by an independent read-only audit
+and by the configured review services. Their findings were folded back into
+this branch: the SSE pending-frame limit originally discarded a whole chunk of
+valid frames and could resume parsing mid-frame, the Python helper could use a
+stale binary when a custom target directory was set, the documented
+`cargo deny check` release command could not pass, the vendored lockfile was
+never scanned, and the changelog did not record the routing behavior changes
+the same commit introduced.
+
 ## Commands actually run
 
 - Expanded default matrix, final result: all 12 checks passed.
@@ -73,8 +82,16 @@ follow-ups happen.
 - `cargo audit` passed with the three documented, dated `zip` extraction
   exceptions; remaining `lru` and `paste` warnings are accepted under OSV's
   dated exception policy.
-- `cargo deny --workspace --all-features check bans licenses sources`: passed.
-- OSV Scanner: no issues with reviewed dated exceptions.
+- `cargo deny --workspace --all-features check`: passed, including advisories,
+  because `deny.toml` now declares the same reviewed exceptions that
+  `osv-scanner.toml` does. cargo-deny does not read the OSV Scanner
+  configuration, so without that the documented release command failed on
+  this lockfile.
+- `cargo deny --manifest-path vendor/gp-routing/Cargo.toml check`: passed. The
+  vendored surrogate has its own tracked lockfile and was previously never
+  scanned.
+- OSV Scanner, root and vendored lockfiles: no issues with the reviewed dated
+  exceptions.
 - `ccr-rust --config examples/config.followers.json validate`: passed with
   the corrected MiniMax contract.
 - Receipt: `build/reports/quality/receipt.json`; coverage report:
