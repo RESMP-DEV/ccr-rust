@@ -18,7 +18,10 @@ from pathlib import Path
 
 DEFAULT_METRICS_URL = "http://127.0.0.1:3457/metrics"
 DEFAULT_RUNS_DIR = Path.home() / ".cache" / "ccr-worker-runs"
-REQUEST_METRIC = re.compile(r'^ccr_requests_total\{tier="([^"]+)"\}\s+([0-9.]+)')
+PROMETHEUS_NUMBER = r"[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
+REQUEST_METRIC = re.compile(
+    rf'^ccr_requests_total\{{tier="([^"]+)"\}}\s+({PROMETHEUS_NUMBER})'
+)
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -98,12 +101,17 @@ def run_date(run_dir: Path) -> date | None:
     match = re.match(r"(\d{8})-\d{6}-", run_dir.name)
     if match is None:
         return None
-    return datetime.strptime(match.group(1), "%Y%m%d").date()
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
 
 
 def summarize_runs(runs_dir: Path, days: int) -> RunUsage:
     if days < 1:
         raise ValueError("--days must be positive")
+    if not runs_dir.is_dir():
+        raise ValueError("--runs-dir must be an existing directory")
     cutoff = datetime.now().date() - timedelta(days=days - 1)
     outcomes: Counter[str] = Counter()
     profiles: Counter[str] = Counter()

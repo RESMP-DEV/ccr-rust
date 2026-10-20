@@ -63,13 +63,16 @@ installed, and made the live `codex-ccr-worker` entrypoint.
   `20261020-071943-yb2bkw51` (thread
   `01a159ae-b393-7302-8b67-749cbbcecd72`, requested route
   `zai,glm-5.3-flash`, 192.221 seconds, 6 successful commands, exit 0). Its
-  durable output is
-  `build/reports/delegation-audit/instructions.txt`. The launcher-ergonomics
+  private audit output is `build/reports/delegation-audit/instructions.txt`
+  (SHA-256
+  `56a8c975135be6d37301bd3e1b55ceface904dbbb0601ecd408b9dd4c7f883a4`). The launcher-ergonomics
   audit completed in run `20261020-071951-fitwg3e2` (thread
   `01a159ae-d2ca-7512-b9bb-07577eb4a212`, requested route
   `zai,glm-5.3-flash`, 699.298 seconds, 13 observed commands including one
   expected read-only sandbox failure, exit 0). Its durable output is
-  `/Users/kearm/ccr-worker-launcher/build/reports/delegation-ergonomics.txt`.
+  `/Users/kearm/ccr-worker-launcher/build/reports/delegation-ergonomics.txt`
+  (private ignored-build output; SHA-256
+  `c638597ab29fb6e75003af43149d486b5f130ae1602f2b32ec757c72a4d3baca`).
 - `ccr-worker-usage --days 3 --json` exit 0 reported 101 local worker runs:
   77 completed, 12 timed out, 9 cancelled, and 3 failed; 95 were read-only,
   47 allowed network, and 81 requested the current GLM Flash route. The
@@ -91,6 +94,15 @@ installed, and made the live `codex-ccr-worker` entrypoint.
   request. The first post-fix full matrix failed `ty` on an incompatible
   override signature; the parameter names were corrected and the full matrix
   passed again.
+- Independent bounded review run `20261020-075417-yab2ly8r` (thread
+  `01a159ce-5816-7473-a0c9-ddf5633d458c`, requested GLM Flash route,
+  566.401 seconds, exit 0) found no
+  blocking defects and independently found the userinfo hostname bypass. Its
+  non-blocking robustness findings for invalid run dates, scientific-notation
+  counters, and missing receipt directories were also fixed before merge. The
+  private report is
+  `build/reports/delegation-audit/pr67-independent.txt` (SHA-256
+  `a3cd6194b29e40a0a577749c5e5a9244fd5203e28939bd40bf79c72e25c1bb27`).
 - Historical launcher receipts showed the pattern this change targets: bursts
   of delegation followed by idle days, including 63 runs on 2026-10-19 and no
   completed-status run dated 2026-10-20 before this audit.

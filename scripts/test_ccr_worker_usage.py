@@ -19,11 +19,14 @@ class WorkerUsageTests(unittest.TestCase):
 ccr_active_requests 2
 ccr_requests_total{tier="zai"} 28
 ccr_requests_total{tier="minimax"} 1
+ccr_requests_total{tier="other"} 1e+06
 ccr_requests_total{tier="zai"} 4
 """
         result = usage.parse_listener_metrics(metrics, "http://127.0.0.1:3457/metrics")
         self.assertEqual(result.active_requests, 2)
-        self.assertEqual(result.tier_requests, {"minimax": 1, "zai": 4})
+        self.assertEqual(
+            result.tier_requests, {"minimax": 1, "other": 1000000, "zai": 4}
+        )
 
     def test_nonloopback_listener_is_rejected(self) -> None:
         for url in (
@@ -43,6 +46,19 @@ ccr_requests_total{tier="zai"} 4
             self.assertRaisesRegex(ValueError, "loopback"),
         ):
             usage.validate_local_http_url("http://localhost/metrics")
+
+    def test_metrics_opener_never_follows_redirects(self) -> None:
+        handler = usage.NoRedirectHandler()
+        self.assertIsNone(
+            handler.redirect_request(
+                req=None,
+                fp=None,
+                code=302,
+                msg="Found",
+                headers=None,
+                newurl="http://example.test/metrics",
+            )
+        )
 
         with patch.object(
             usage.socket,
@@ -90,6 +106,10 @@ ccr_requests_total{tier="zai"} 4
                     date.today().strftime("%Y%m%d") + "-040304-bad-elapsed",
                     {"outcome": "completed", "elapsed_seconds": "not-a-number"},
                 ),
+                (
+                    "99999999-050305-invalid-date",
+                    {"outcome": "completed"},
+                ),
             ]
             for name, status in records:
                 run_dir = root / name
@@ -109,6 +129,13 @@ ccr_requests_total{tier="zai"} 4
         self.assertEqual(result.requested_routes, {"zai,glm-5.3-flash": 2})
         self.assertEqual((result.read_only, result.network_allowed), (2, 1))
         self.assertEqual(result.elapsed_seconds_total, 15.0)
+
+    def test_missing_runs_directory_is_not_reported_as_zero_runs(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            self.assertRaisesRegex(ValueError, "--runs-dir must be an existing"),
+        ):
+            usage.summarize_runs(Path(directory) / "missing", days=1)
 
     def test_mutuallyExclusiveModesAreRejected(self) -> None:
         with self.assertRaises(SystemExit):
