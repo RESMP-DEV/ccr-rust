@@ -19,7 +19,7 @@ use tracing::error;
 
 use crate::frontend::codex::CodexFrontend;
 use crate::frontend::Frontend;
-use crate::metrics::increment_active_streams;
+use crate::metrics::ActiveStreamGuard;
 use crate::sse::SseFrameDecoder;
 use crate::transform::anthropic_to_openai::AnthropicToOpenAiResponseTransformer;
 use crate::transformer::Transformer;
@@ -321,9 +321,8 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
     // Create a channel for streaming response
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(100);
 
-    increment_active_streams(1);
-
     tokio::spawn(async move {
+        let _active_stream_guard = ActiveStreamGuard::new();
         let mut stream = body.into_data_stream();
         let mut decoder = SseFrameDecoder::new();
         let transformer = AnthropicToOpenAiResponseTransformer;
@@ -485,8 +484,6 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         if !sent_done {
             let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
         }
-
-        increment_active_streams(-1);
     });
 
     Response::from_parts(parts, Body::from_stream(ReceiverStream::new(rx)))

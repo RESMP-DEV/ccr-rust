@@ -13,6 +13,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Changed how a streaming response reports route health. A truncated
+  upstream stream is no longer recorded as a clean route success, so a
+  provider disconnect can no longer grow the AIMD admission limit or clear a
+  route's rate-limit backoff. An OpenAI stream now requires `[DONE]` or a
+  `finish_reason`, and an Anthropic stream requires `message_stop`.
+- Changed active-stream accounting to an RAII guard, so the gauge is
+  decremented exactly once on every exit path, including idle timeout and
+  client disconnect.
+- Fixed a provider-controlled `x-ratelimit-reset` value being able to
+  overflow the reset-time computation and abort dispatch. An impossible
+  horizon is now ignored.
+- Fixed provider base-URL matching so a URL that merely ends with the
+  endpoint text no longer suppresses the required path, and invalid
+  configured `extra_headers` now fail at config load instead of being
+  silently dropped.
+- Changed the reported attempt count so an admission deferral, which
+  launches no upstream request, is no longer counted as an attempt.
+- Bounded the buffered bytes of one incomplete SSE frame, and made the
+  decoder discard bytes through the next frame boundary after an oversized
+  frame so a malformed frame tail is never forwarded as a new frame.
+
+- Raised the repository quality standard and made it enforceable. The
+  offline dispatcher now also runs Ruff format and lint over the shipped
+  Python trees, `ty` type checks the helper scripts, and ShellCheck covers
+  the tracked shell entry points; `ruff.toml` is the single source of truth
+  for the Python rules. Dependency advisories are documented as a release
+  gate with their own commands, since they need advisory-database access.
+- Removed the GitHub Actions release workflow. The organization's Actions
+  billing is intentionally unresolved, so CI and verification run locally
+  and the release commands are documented in
+  `docs/dependency-security.md`.
+- Repaired the defects the wider checks exposed: unquoted shell expansion in
+  the stress-test orchestrator, an unused `cleanup` handler warning, blind
+  exception handling and formatting drift in the benchmark and provider
+  validation helpers, missing explicit `check=False` on subprocess calls, and
+  three type errors in the helper test suite.
+- Updated the locked dependency graph to `rustls` 0.23.46 and `quinn-proto`
+  0.11.19, clearing the RUSTSEC-2026-0346 through RUSTSEC-2026-0349 and
+  RUSTSEC-2026-0338 through RUSTSEC-2026-0342 advisories.
+
 - Removed the Qwen token-plan lane from every governed fallback chain and
   from the main/auth private seat, because the plan's monthly utilization
   window was exhausted and each dispatch paid a guaranteed refusal before a

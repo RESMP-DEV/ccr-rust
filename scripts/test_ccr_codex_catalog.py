@@ -26,7 +26,7 @@ class CodexCatalogTests(unittest.TestCase):
         }
         self.write_catalog([self.source])
 
-    def write_catalog(self, models: list[dict]) -> None:
+    def write_catalog(self, models: list[object]) -> None:
         self.path.write_text(json.dumps({"models": models}))
 
     def test_sync_adds_routes_and_removes_retired_entries(self) -> None:

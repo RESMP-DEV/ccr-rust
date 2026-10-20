@@ -5,7 +5,7 @@
 # tears everything down. All processes are killed on exit (including Ctrl-C).
 #
 # Usage:
-#   cd contrib/ccr-rust
+#   cd /path/to/ccr-rust
 #   ./benchmarks/run_stress_test.sh [--streams 100] [--chunks 20] [--delay-ms 50]
 #
 # Requirements:
@@ -16,7 +16,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$PROJECT_DIR/../.." && pwd)"
+REPO_ROOT="$PROJECT_DIR"
 
 # Defaults
 STREAMS=100
@@ -44,6 +44,7 @@ done
 # PIDs to clean up
 PIDS=()
 
+# shellcheck disable=SC2329 # Invoked indirectly by the trap below.
 cleanup() {
     echo ""
     echo "Cleaning up..."
@@ -130,9 +131,9 @@ echo "  ccr-rust ready."
 echo "[3/3] Running stress test..."
 echo ""
 
-JSON_ARGS=""
+JSON_ARGS=()
 if [[ -n "$JSON_OUT" ]]; then
-    JSON_ARGS="--json-out $JSON_OUT"
+    JSON_ARGS=(--json-out "$JSON_OUT")
 fi
 
 (cd "$REPO_ROOT" && uv run python "$SCRIPT_DIR/stress_sse_streams.py" \
@@ -140,7 +141,7 @@ fi
     --streams "$STREAMS" \
     --ramp-ms "$RAMP_MS" \
     --model "mock,mock-model" \
-    $JSON_ARGS)
+    ${JSON_ARGS[@]+"${JSON_ARGS[@]}"})
 
 EXIT_CODE=$?
 

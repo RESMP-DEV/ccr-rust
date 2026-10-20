@@ -548,8 +548,7 @@ def plan_restore(snapshot: Path) -> dict[str, Any]:
     for name, record in sorted(captured.items()):
         symlink = False
         retired = (
-            name.startswith("local-bin/")
-            or name.startswith("local-bin-targets/")
+            name.startswith(("local-bin/", "local-bin-targets/"))
         ) and name.split("/", 1)[1] in RETIRED_BIN_FILES
         if retired:
             # A retired wrapper captured by an older snapshot, as a regular file
@@ -971,9 +970,8 @@ def doctor(root: Path = SNAPSHOT_ROOT, max_age_hours: float = 24.0) -> dict[str,
         if name in symlinked:
             # Hashing a symlink follows it and hashes the target's content,
             # which never equals the stored link path. Compare the link itself.
-            if (
-                not live.is_symlink()
-                or (snapshot_path := snapshots[-1] / name).is_file()
+            if not live.is_symlink() or (
+                (snapshot_path := snapshots[-1] / name).is_file()
                 and os.readlink(live) != snapshot_path.read_text().strip()
             ):
                 changed.append(name)

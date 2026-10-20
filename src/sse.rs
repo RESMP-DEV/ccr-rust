@@ -60,7 +60,16 @@ impl SseFrame {
 #[derive(Debug, Default)]
 pub struct SseFrameDecoder {
     buf: Vec<u8>,
+    /// Set after an oversized frame was discarded. The decoder then skips
+    /// bytes through the next frame boundary so the tail of a malformed
+    /// frame is never parsed or forwarded as if it were a new frame.
+    discard_until_boundary: bool,
 }
+
+/// Maximum bytes retained while waiting for one SSE frame boundary. This
+/// matches the first-event peek limit and prevents a provider that emits an
+/// unterminated frame from growing router memory until stream idle timeout.
+const MAX_PENDING_BYTES: usize = 1024 * 1024;
 
 impl SseFrameDecoder {
     pub fn new() -> Self {
@@ -71,6 +80,26 @@ impl SseFrameDecoder {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SseFrame> {
         if !chunk.is_empty() {
             self.buf.extend_from_slice(chunk);
+        }
+
+        if self.discard_until_boundary {
+            // Resume only at a frame boundary. A trailing carriage return may
+            // be the first half of a CRLF pair, so it is kept for the next
+            // chunk instead of being dropped mid-boundary.
+            match find_frame_boundary(&self.buf, 0) {
+                Some((_, next_start)) => {
+                    self.buf.drain(..next_start);
+                    self.discard_until_boundary = false;
+                }
+                None => {
+                    let keep_carriage_return = self.buf.last().copied() == Some(b'\r');
+                    self.buf.clear();
+                    if keep_carriage_return {
+                        self.buf.push(b'\r');
+                    }
+                    return Vec::new();
+                }
+            }
         }
 
         let mut frames = Vec::new();
@@ -87,7 +116,25 @@ impl SseFrameDecoder {
             self.buf.drain(..frame_start);
         }
 
+        // The limit applies to the incomplete frame still buffered, never to
+        // a batch of already complete frames: parsing happens first so a
+        // large chunk of valid frames is never discarded.
+        if self.buf.len() > MAX_PENDING_BYTES {
+            let discarded = self.buf.len();
+            self.buf.clear();
+            self.discard_until_boundary = true;
+            tracing::warn!(
+                discarded_bytes = discarded,
+                limit_bytes = MAX_PENDING_BYTES,
+                "Discarding malformed SSE frame with no boundary"
+            );
+        }
+
         frames
+    }
+
+    pub fn pending_bytes(&self) -> usize {
+        self.buf.len()
     }
 }
 
@@ -174,6 +221,53 @@ mod tests {
     fn bare_carriage_return_bounds_a_line_without_entering_its_value() {
         assert_eq!(read_next_line(b"first\rsecond", 0), Some((5, 6)));
         assert_eq!(read_next_line(b"first\r", 0), None);
+    }
+
+    #[test]
+    fn malformed_unterminated_frame_is_bounded() {
+        let mut decoder = SseFrameDecoder::new();
+
+        let malformed = vec![b'x'; MAX_PENDING_BYTES + 1];
+        assert!(decoder.push(&malformed).is_empty());
+        assert_eq!(decoder.pending_bytes(), 0);
+    }
+
+    #[test]
+    fn oversized_chunk_of_valid_frames_keeps_every_frame() {
+        let mut decoder = SseFrameDecoder::new();
+
+        // Many individually small frames delivered in one chunk larger than
+        // the pending-frame limit must all survive: the limit bounds one
+        // incomplete frame, not a batch of complete ones.
+        let frame_count = 65_536;
+        let mut chunk = Vec::new();
+        for index in 0..frame_count {
+            chunk.extend_from_slice(format!("data: frame-{index}\n\n").as_bytes());
+        }
+        assert!(chunk.len() > MAX_PENDING_BYTES);
+        let frames = decoder.push(&chunk);
+        assert_eq!(frames.len(), frame_count);
+        assert_eq!(frames[0].data, "frame-0");
+        assert_eq!(frames[frame_count - 1].data, "frame-65535");
+        assert_eq!(decoder.pending_bytes(), 0);
+    }
+
+    #[test]
+    fn discarded_oversized_frame_does_not_resume_mid_frame() {
+        let mut decoder = SseFrameDecoder::new();
+
+        let malformed = vec![b'x'; MAX_PENDING_BYTES + 1];
+        assert!(decoder.push(&malformed).is_empty());
+
+        // The tail of the discarded frame must not be parsed as a new frame.
+        assert!(decoder.push(b"data: tail\n\n").is_empty());
+        assert_eq!(decoder.pending_bytes(), 0);
+
+        // Parsing resumes at the next boundary, and the frame after the
+        // discarded one is delivered intact.
+        let frames = decoder.push(b"data: recovered\n\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "recovered");
     }
 
     #[test]

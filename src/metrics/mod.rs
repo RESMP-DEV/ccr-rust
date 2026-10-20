@@ -527,6 +527,33 @@ pub fn increment_active_streams(delta: i64) {
     }
 }
 
+/// RAII active-stream marker.
+///
+/// Creating the guard increments the gauge once; dropping it on any early
+/// return, timeout, client disconnect, or task completion decrements exactly
+/// once. Streaming tasks must create it inside the spawned task so the gauge
+/// covers the actual producer lifetime rather than only response construction.
+#[derive(Debug)]
+pub struct ActiveStreamGuard {
+    _private: (),
+}
+
+impl ActiveStreamGuard {
+    // `Default` must not create an active-stream guard implicitly because
+    // construction has an observable metrics side effect.
+    #[expect(clippy::new_without_default)]
+    pub fn new() -> Self {
+        increment_active_streams(1);
+        Self { _private: () }
+    }
+}
+
+impl Drop for ActiveStreamGuard {
+    fn drop(&mut self) {
+        increment_active_streams(-1);
+    }
+}
+
 /// Record that an SSE producer hit a full channel buffer (backpressure event).
 pub fn record_stream_backpressure() {
     STREAM_BACKPRESSURE.inc();

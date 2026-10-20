@@ -69,6 +69,40 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
     checks = [
         Check("format", ("cargo", "fmt", "--check")),
         Check(
+            "python-format",
+            (
+                "ruff",
+                "format",
+                "--check",
+                "benchmarks",
+                "scripts",
+                "tests/provider_validation",
+            ),
+        ),
+        Check(
+            "python-lint",
+            (
+                "ruff",
+                "check",
+                "benchmarks",
+                "scripts",
+                "tests/provider_validation",
+            ),
+        ),
+        Check("python-typecheck", ("ty", "check", "scripts")),
+        Check(
+            "rust-sloc-ratchet",
+            (sys.executable, "scripts/check_sloc.py", "--json"),
+        ),
+        Check(
+            "shellcheck",
+            (
+                "shellcheck",
+                "benchmarks/run_stress_test.sh",
+                "examples/smoke-test.sh",
+            ),
+        ),
+        Check(
             "clippy",
             (
                 "cargo",
@@ -122,6 +156,11 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
                 ("cargo", "check", "--no-default-features", "--locked"),
             ),
             Check(
+                "debug-binary",
+                ("cargo", "build", "--all-features", "--locked"),
+                env=(("CARGO_TARGET_DIR", str(ROOT / "target")),),
+            ),
+            Check(
                 "python-helpers",
                 (
                     sys.executable,
@@ -132,6 +171,13 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
                     "scripts",
                     "-p",
                     "test_*.py",
+                ),
+                env=(
+                    (
+                        "CCR_TEST_BINARY",
+                        str(ROOT / "target" / "debug" / "ccr-rust"),
+                    ),
+                    ("CARGO_TARGET_DIR", str(ROOT / "target")),
                 ),
             ),
             Check(
@@ -294,7 +340,18 @@ def write_receipt(
     receipt = {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "agent": os.environ.get("QUALITY_AGENT", "Codex"),
-        "mode": "fast" if fast else "default",
+        "mode": "+".join(
+            [
+                name
+                for name, enabled in (
+                    ("fast", fast),
+                    ("coverage", coverage),
+                    ("mutation", mutation),
+                )
+                if enabled
+            ]
+        )
+        or "default",
         "coverage": coverage,
         "mutation": mutation,
         "platform": platform.platform(),

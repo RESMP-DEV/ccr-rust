@@ -54,9 +54,29 @@ def build_app(chunks: int, delay_ms: int) -> Starlette:
 
     delay_s = delay_ms / 1000.0
     words = [
-        "The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog.",
-        "Pack", "my", "box", "with", "five", "dozen", "liquor", "jugs.",
-        "How", "vexingly", "quick", "daft", "zebras", "jump.",
+        "The",
+        "quick",
+        "brown",
+        "fox",
+        "jumps",
+        "over",
+        "the",
+        "lazy",
+        "dog.",
+        "Pack",
+        "my",
+        "box",
+        "with",
+        "five",
+        "dozen",
+        "liquor",
+        "jugs.",
+        "How",
+        "vexingly",
+        "quick",
+        "daft",
+        "zebras",
+        "jump.",
     ]
 
     async def chat_completions(request: Request) -> StreamingResponse:
@@ -73,7 +93,10 @@ def build_app(chunks: int, delay_ms: int) -> Starlette:
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "Hello from mock backend."},
+                        "message": {
+                            "role": "assistant",
+                            "content": "Hello from mock backend.",
+                        },
                         "finish_reason": "stop",
                     }
                 ],
@@ -121,10 +144,19 @@ def build_app(chunks: int, delay_ms: int) -> Starlette:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Mock SSE backend for ccr-rust benchmarks")
+    parser = argparse.ArgumentParser(
+        description="Mock SSE backend for ccr-rust benchmarks"
+    )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Listen port")
-    parser.add_argument("--chunks", type=int, default=DEFAULT_CHUNKS, help="SSE chunks per response")
-    parser.add_argument("--delay-ms", type=int, default=DEFAULT_DELAY_MS, help="Delay between chunks (ms)")
+    parser.add_argument(
+        "--chunks", type=int, default=DEFAULT_CHUNKS, help="SSE chunks per response"
+    )
+    parser.add_argument(
+        "--delay-ms",
+        type=int,
+        default=DEFAULT_DELAY_MS,
+        help="Delay between chunks (ms)",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Listen address")
     args = parser.parse_args()
 

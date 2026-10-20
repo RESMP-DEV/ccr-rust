@@ -41,7 +41,7 @@ a guaranteed-refusal round trip before reaching a tier that worked.
 - `docs/configuration.md`, `docs/failover_architecture.md`, `CHANGELOG.md`:
   the retry-budget contract and the terminal-response shape are documented.
 - The Qwen lane was removed from every governed chain earlier the same day
-  (receipt: `evidence/qwen-removal-20261019.md`).
+  (receipt: `evidence/github-reconcile-20261019.md`).
 
 ## Regressions added
 

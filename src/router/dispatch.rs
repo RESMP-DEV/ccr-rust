@@ -283,19 +283,19 @@ pub(super) fn extract_rate_limit_headers(
         .get("x-ratelimit-reset")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok())
-        .map(|ts| {
-            std::time::Instant::now()
-                + std::time::Duration::from_secs(
-                    ts.saturating_sub(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    ),
-                )
-        });
+        .and_then(reset_at_from_unix_timestamp);
 
     (remaining, reset_at)
+}
+
+fn reset_at_from_unix_timestamp(timestamp: u64) -> Option<std::time::Instant> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    std::time::Instant::now().checked_add(std::time::Duration::from_secs(
+        timestamp.saturating_sub(now),
+    ))
 }
 
 pub(super) struct TryRequestArgs<'a> {
@@ -477,7 +477,8 @@ pub(crate) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 pub(crate) fn provider_endpoint_url(provider: &crate::config::Provider, endpoint: &str) -> String {
     let base = provider.api_base_url.trim_end_matches('/');
     let endpoint = endpoint.trim_start_matches('/');
-    if base.ends_with(endpoint) {
+    let endpoint_path = format!("/{endpoint}");
+    if base == endpoint || base.ends_with(&endpoint_path) {
         base.to_string()
     } else {
         format!("{}/{}", base, endpoint)
@@ -1818,6 +1819,28 @@ mod tests {
         assert_retryable(
             422,
             r#"{"error":"This model has a maximum context length of 100 tokens"}"#,
+        );
+    }
+
+    #[test]
+    fn hostile_reset_timestamp_does_not_panic_dispatch() {
+        assert_eq!(reset_at_from_unix_timestamp(u64::MAX), None);
+    }
+
+    #[test]
+    fn provider_endpoint_suffix_requires_a_path_boundary() {
+        let provider: crate::config::Provider = serde_json::from_value(serde_json::json!({
+            "name": "suffix",
+            "api_base_url": "https://example.test/fooresponses",
+            "api_key": "test",
+            "protocol": "responses",
+            "models": []
+        }))
+        .unwrap();
+
+        assert_eq!(
+            provider_endpoint_url(&provider, "responses"),
+            "https://example.test/fooresponses/responses"
         );
     }
 
