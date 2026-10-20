@@ -543,7 +543,7 @@ fn build_router(
             "/v1/frontend-metrics",
             get(metrics::frontend_metrics_handler),
         )
-        .route("/health", get(health))
+        .route("/health", get(router::health))
         .route("/metrics", get(metrics::metrics_handler));
     let app = if authenticated {
         app.route_layer(axum::middleware::from_fn_with_state(
@@ -885,10 +885,6 @@ async fn shutdown_signal(timeout: u64) {
 
 async fn latencies_handler(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     axum::Json(metrics::get_latency_entries(&state.ewma_tracker))
-}
-
-async fn health() -> &'static str {
-    "ok"
 }
 
 #[cfg(all(test, feature = "gp"))]

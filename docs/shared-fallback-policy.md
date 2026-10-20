@@ -97,21 +97,18 @@ ids that the router otherwise silently dispatches to `Router.default` (a
 requested `MiniMax-M3.1-Flash-Preview` was measured serving `zai,glm-5.3`
 before the alias existed). An operator alias entry is never overridden, and a
 model name offered by two providers stays unaliased rather than guessing.
-The approved main-machine shared chain is GLM-5.3-Flash, GLM-5.3, then
-MiniMax-M3.1-Flash-Preview. Both GLM tiers were cordoned 2026-10-18 after the
-Z.AI monthly tool quota reported 4000/4000 used, then restored the same day
-by user direction once that premise was disproved: Z.AI meters usage without
-distinguishing model sessions from tool use, the router kept completing GLM
-calls (by the thousand) after the probe read zero, as did the ZCode app on
-the same plan, and the observed completion limits are the rolling 5-hour
-prompt window and concurrency caps, so the cordon's guaranteed-refusal
-rationale did not apply. The main listener's chain is GLM-5.3, then
-GLM-5.3-Flash, then MiniMax, so interactive Codex and Claude sessions always
-start on GLM-5.3 and cascade only on actual tier failure. The former
-FlashX head remains removed after
-its coding-plan trial expired, FlashX is also absent from the Z.AI provider
-catalog, and GMI and DeepSeek stay registered but unrouted pending dated
-re-approval. The explicit preview model ID is required:
+The approved main-machine shared chain is GLM-5.3-Flash then
+MiniMax-M3.1-Flash-Preview; GLM-5.3 remains the main/auth primary but is not
+a volume fallback, and the worker primary is GLM-5.3-Flash. Both GLM tiers
+were cordoned 2026-10-18 after the Z.AI monthly tool quota reported 4000/4000
+used, then restored the same day by user direction once that premise was
+disproved: the observed completion limits are the rolling 5-hour prompt
+window and concurrency caps, not the monthly tool meter. Qwen was routed
+2026-10-18 but moved to registered-but-unrouted on 2026-10-19 after monthly
+utilization was exhausted. The former FlashX head remains removed after its
+coding-plan trial expired, FlashX is also absent from the Z.AI provider
+catalog, and Qwen, GMI, and DeepSeek stay registered but unrouted pending
+dated re-approval. The explicit preview model ID is required:
 the shorter `MiniMax-M3.1-Flash` alias was observed upstream returning
 `MiniMax-M3`, so status-code-only validation cannot distinguish it.
 

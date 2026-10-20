@@ -13,6 +13,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed retry-budget saturation synthesizing a terminal 429 before later
+  fallback tiers were attempted. The budget now bounds retries of a tier,
+  while each tier's initial failover attempt remains eligible; overflow moves
+  to the next tier instead of abandoning the cascade. Synthesized terminal
+  429s also now include an `error.details` array and
+  `x-ccr-rate-limited-tiers` header naming every rate-limited candidate and
+  its retry hint, rather than identifying only the last tier. The exempt
+  attempt is the normal cascade attempt; tail-latency hedges remain
+  budget-controlled parallel amplification.
+- Removed the Qwen token-plan lane from every governed fallback chain after
+  live 429 reset hints showed its monthly utilization window was exhausted.
+  The provider and credential stay registered but unrouted, so preflight
+  reports it as `registered_not_routed`; re-entry requires a dated approval
+  after the monthly window recovers.
+- Added a configuration recovery tool (`scripts/ccr_recovery.py`, installed as
+  `ccr-recovery`) that snapshots, verifies, restores, and diffs the whole live
+  CCR surface: the four consumer configs, the policy JSON and its deployed
+  module, credential files, the seven CCR launchd plists, the operator wrappers
+  and the files behind their symlinks, the tunnel configs, and the Codex model
+  catalog with the active `config.toml`. Snapshots are staged then verified by
+  hash; restore is a dry run unless `--apply`, writes atomically, re-parses the
+  consumer configs before touching any listener, and gates restarts on
+  `ccr-wait-idle`. `doctor` reports newest-snapshot health and live drift, and
+  `sanitize` builds a verified replication copy that omits credential files
+  entirely rather than redacting them. The policy `sync` and `serve` paths now
+  take a pre-write snapshot, so an ordinary routing change is recoverable with
+  no operator step.
+- Closed a policy-integrity gap: `load_policy` gated the live policy on route
+  order, consumer registrations, and provider definitions, but a direct edit to
+  `fallback-policy.json` could still change an unconstrained field. A whole-body
+  SHA-256 pin now refuses such an edit, so changing the approved policy body
+  requires a source change with tests and review.
+- Fixed Codex sessions pinned to the `ccr-primary` alias falling back to generic
+  model metadata on every turn. The alias introduced by the 2026-10-18 route
+  restore had no entry in `~/.codex/ccr-live-model-catalog.json`, so Codex
+  warned and used fallback metadata (no tool, context-window, or compaction
+  tuning). The catalog now carries a `ccr-primary` entry cloned from the
+  verified GLM 5.3 metadata, and already-running threads were moved onto the
+  catalog-backed `glm-5.3` slug through `thread/settings/update`, which is the
+  same request the TUI uses to switch model in a live session.
+- Added `ccr-catalog-sync` to derive the `ccr-primary`, GLM Flash, and exact
+  MiniMax preview-route metadata from the cataloged GLM 5.3 source, remove the
+  retired FlashX metadata, reject duplicate slugs, and snapshot before writing.
+- Fixed `/metrics` returning an empty exposition immediately after listener
+  startup. The idle gauges are now forced into the Prometheus registry, so
+  `ccr-wait-idle` can gate a freshly restarted, genuinely idle listener.
+- Hardened recovery activation further: `/health` reports the listener's
+  in-memory default and ordered fallback tiers, `ccr-recovery doctor` compares
+  that runtime state with each consumer config, restore restarts OCR as well as
+  main/worker/auth, and snapshots capture launchd entrypoint scripts plus both
+  tool-registration manifest copies.
+
 - Restored the GLM-5.3-Flash and GLM-5.3 chain tiers and their consumer
   primaries (main/auth GLM-5.3, workers GLM-5.3-Flash), reversing the
   2026-10-18 quota cordon after its premise was disproved: the Z.AI monthly

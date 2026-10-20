@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import os
 import tempfile
@@ -44,6 +45,16 @@ class PolicyTests(unittest.TestCase):
 
     def write_policy(self) -> None:
         policy.atomic_json(self.root / "fallback-policy.json", self.policy)
+
+    def test_sync_takes_pre_write_recovery_snapshot_only_when_writing(self) -> None:
+        with unittest.mock.patch("ccr_recovery.pre_snapshot") as pre:
+            policy.sync(self.root)
+        self.assertTrue(pre.called)
+        self.assertEqual(pre.call_args.kwargs.get("label"), "pre-sync")
+        # check is documented read-only, so it must not capture a snapshot.
+        pre.reset_mock()
+        policy.sync(self.root, check=True)
+        self.assertFalse(pre.called)
 
     def test_shared_edit_reaches_all_consumers_without_losing_primary_or_limits(
         self,
@@ -220,10 +231,18 @@ class PolicyTests(unittest.TestCase):
             "routes": list(policy.MACHINE_ROUTE_CHAIN),
             "providers": copy.deepcopy(list(policy.MACHINE_SHARED_PROVIDERS.values())),
             "consumers": {
-                name: {"primary": primary}
+                name: {"primary": primary, "additional_routes": []}
                 for name, primary in policy.MACHINE_CONSUMERS.items()
             },
         }
+        # The gate is pinned to the whole policy body, so the synthetic fixture
+        # must hash to the approved pin, not merely pass the structural checks.
+        # Recomputing the expected digest here proves that the constant is in
+        # sync with the source route chain.
+        pin = hashlib.sha256(
+            json.dumps(machine_policy, sort_keys=True).encode()
+        ).hexdigest()
+        self.assertEqual(pin, policy.MACHINE_POLICY_INTEGRITY_SHA256)
         self.policy = machine_policy
         self.write_policy()
         with unittest.mock.patch.object(policy, "MACHINE_ROOT", self.root):
@@ -257,10 +276,9 @@ class PolicyTests(unittest.TestCase):
                 policy.load_policy(self.root)
 
     def test_minimax_final_tier_uses_the_disambiguated_preview_model(self) -> None:
-        self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[-1],
-            "minimax,MiniMax-M3.1-Flash-Preview",
-        )
+        # MiniMax leads during the 2026-10-18 quota cordon and the id stays
+        # exact: the shorter alias is accepted upstream but serves MiniMax-M3.
+        self.assertIn("minimax,MiniMax-M3.1-Flash-Preview", policy.MACHINE_ROUTE_CHAIN)
         minimax = policy.MACHINE_SHARED_PROVIDERS["minimax"]
         self.assertEqual(minimax["auth_header"], "authorization")
         self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash-Preview"])
@@ -282,32 +300,51 @@ class PolicyTests(unittest.TestCase):
             policy.MACHINE_ROUTE_CHAIN,
             (
                 "zai,glm-5.3-flash",
-                "zai,glm-5.3",
                 "minimax,MiniMax-M3.1-Flash-Preview",
             ),
         )
+        # 2026-10-18 user reorder: workers Flash-first and GLM-5.3 is NOT a
+        # worker tier at all — judgment quota is never burned by volume; it
+        # leads main/auth via their primary.
+        self.assertNotIn("zai,glm-5.3", policy.MACHINE_ROUTE_CHAIN)
+        self.assertEqual(
+            policy.MACHINE_CONSUMERS["glm-workers.json"], "zai,glm-5.3-flash"
+        )
         self.assertNotIn("gmi,Qwen/Qwen3.8-Max-0902", policy.MACHINE_ROUTE_CHAIN)
         self.assertNotIn("deepseek,deepseek-flash", policy.MACHINE_ROUTE_CHAIN)
+        # 2026-10-19: monthly Qwen utilization is exhausted, so the provider
+        # stays registered for recovery but no route can dispatch it.
+        self.assertNotIn(
+            "qwen", {route.split(",", 1)[0] for route in policy.MACHINE_ROUTE_CHAIN}
+        )
+        self.assertIn("qwen", policy.MACHINE_SHARED_PROVIDERS)
         self.assertIn("gmi", policy.MACHINE_SHARED_PROVIDERS)
         self.assertIn("deepseek", policy.MACHINE_SHARED_PROVIDERS)
         self.assertEqual(
             policy.MACHINE_SHARED_PROVIDERS["gmi"]["api_base_url"],
             "https://api.gmi-serving.com/v1",
         )
-        self.assertIn("User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"])
+        self.assertIn(
+            "User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"]
+        )
 
-    def test_restored_glm_chain_leads_with_entitled_primaries(self) -> None:
-        # 2026-10-18 user-directed restore: the monthly tool quota does not
-        # gate completions, so the GLM tiers lead again and every governed
-        # primary sits on a route the plan serves.
+    def test_worker_cordon_uses_a_distinct_final_fallback(self) -> None:
+        # Superseded 2026-10-18 (user reorder): the earlier MiniMax-first
+        # cordon conflated the exhausted monthly TOOL quota (a ZCode
+        # MCP-tool meter, resets 2026-10-28) with worker prompt volume.
+        # Workers now start on the Flash lane; GLM-5.3 is not a worker tier
+        # at all (judgment quota never burned by volume) and leads main/auth
+        # via their primary instead.
         self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
+        self.assertNotIn("zai,glm-5.3", policy.MACHINE_ROUTE_CHAIN)
+        self.assertEqual(policy.MACHINE_ROUTE_CHAIN[0], "zai,glm-5.3-flash")
+        # A primary cannot also be the shared final fallback; MiniMax holds
+        # the final-fallback seat and no consumer primary.
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[0],
-            "zai,glm-5.3-flash",
+            policy.MACHINE_ROUTE_CHAIN[-1], "minimax,MiniMax-M3.1-Flash-Preview"
         )
         self.assertEqual(
-            policy.MACHINE_CONSUMERS["glm-workers.json"],
-            "zai,glm-5.3-flash",
+            policy.MACHINE_CONSUMERS["glm-workers.json"], "zai,glm-5.3-flash"
         )
         self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
 
@@ -460,6 +497,25 @@ class PolicyTests(unittest.TestCase):
             policy.serve(self.root / "worker.json", ["start"], root=self.root)
         self.assertEqual(execve[-1][2]["LAST_KEY"], "inherited-only")
         self.assertNotEqual((self.root / "worker.json").read_bytes(), before)
+
+    def test_serve_takes_pre_write_snapshot_when_rewriting(self) -> None:
+        fake = self.root / "fake-ccr-rust"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        # {} resolves none of the referenced variables, so serve() falls back
+        # to the inherited environment, which must actually carry the value.
+        credentials = self.root / "runtime-credentials.json"
+        policy.atomic_json(credentials, {})
+        credentials.chmod(0o600)
+        with (
+            unittest.mock.patch.object(policy, "installed_binary", lambda: fake),
+            unittest.mock.patch.dict(os.environ, {"LAST_KEY": "inherited"}),
+            unittest.mock.patch("os.execve", side_effect=lambda *args: None),
+            unittest.mock.patch("ccr_recovery.pre_snapshot") as pre,
+        ):
+            policy.serve(self.root / "worker.json", ["start"], root=self.root)
+        self.assertTrue(pre.called)
+        self.assertEqual(pre.call_args.kwargs.get("label"), "pre-serve")
 
 
 if __name__ == "__main__":
@@ -645,7 +701,9 @@ class PreflightTests(unittest.TestCase):
         result = policy.preflight(self.root)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["registered_not_routed"], ["dormant"])
-        self.assertEqual([entry["provider"] for entry in result["providers"]], ["fixture"])
+        self.assertEqual(
+            [entry["provider"] for entry in result["providers"]], ["fixture"]
+        )
 
     def test_unresolved_credential_is_reported_before_any_network_call(self) -> None:
         policy.atomic_json(

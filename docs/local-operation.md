@@ -8,6 +8,8 @@ See [Switching plans](switching-plans.md) for Kimi/GLM commands and the
 configuration needed for Codex tool calls through Kimi.
 Use [Shared fallback policy](shared-fallback-policy.md) when several local
 listeners should reuse one approved fallback chain.
+Use [Configuration recovery](config-recovery.md) before and after changing the
+routing surface, launchd jobs, or Codex model catalog.
 Use [Worker inspection](worker-inspection.md) for bounded, offline summaries
 and incremental event inspection instead of loading full subagent transcripts.
 
@@ -30,6 +32,9 @@ ccr-local validate
 | `ccr-local start` / `stop` / `restart` / `restart-now` | Control the launchd service; `restart` waits for idle, `restart-now` is the emergency override |
 | `ccr-local status` / `validate` | Check the listener or load and validate its configuration |
 | `ccr-wait-idle` | Require two consecutive samples with zero active requests and streams |
+| `ccr-recovery` | Snapshot, verify, restore, and detect file or in-memory route drift |
+| `ccr-recovery activate --listener <name>` | Idle-gate and restart main, worker, auth, or OCR |
+| `ccr-catalog-sync` | Align Codex CCR route metadata with the approved primary and fallback routes |
 
 The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
@@ -56,6 +61,7 @@ installed launcher module, and busy listeners must wait for an idle restart.
 | `~/.claude-code-router/logs/` | Service logs; inspect locally, redact before sharing |
 | `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers |
 | `~/.codex/ccr.config.toml` | CCR provider profile for the installed Codex fork |
+| `~/.codex/ccr-live-model-catalog.json` | Codex model metadata; an unlisted slug falls back to generic metadata |
 | `~/.claude-code-router/LOCAL_SETUP.md` | Machine-specific setup and acceptance receipt |
 
 The service loads `runtime-credentials.json`, not older `.env` files. Changes

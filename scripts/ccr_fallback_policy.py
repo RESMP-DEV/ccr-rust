@@ -16,6 +16,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+# Imported lazily inside the pre-write hook so the policy module remains
+# importable in contexts (unit tests, preflight on a machine without the
+# recovery tool installed) where the recovery module is not on sys.path.
+
 ROOT = Path.home() / ".claude-code-router"
 ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # The live policy JSON is operator-editable state, not an approval authority.
@@ -24,30 +28,26 @@ ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # JSON. Route changes require a source change, tests, and live qualification.
 MACHINE_ROOT = ROOT
 MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
-    # User-approved 2026-10-11 removal of the former first tier
-    # "zai,glm-5.3-flashx": its coding-plan trial expired 2026-10-09
-    # (429 code 1311, "plan does not yet include access"), so leading
-    # with it made every dispatch pay one guaranteed-refusal round trip.
-    # Restored 2026-10-18 by user direction after the cordon's premise was
-    # disproved: the monthly counter (4000/4000, resets 2026-10-28) drew no
-    # enforcement wall. Z.AI meters usage without distinguishing model
-    # sessions from tool use, the router served thousands of successful GLM
-    # calls after that probe read 0%, and the ZCode app kept serving GLM on
-    # the same plan. The observed completion limits are the rolling 5-hour
-    # prompt window and concurrency caps.
+    # User-approved 2026-10-18 reorder: zai,glm-5.3-flash leads for workers —
+    # its prompt-counted volume does not share a currency with the GLM-5.3
+    # judgment seat, so burning Flash first preserves judgment quota (the
+    # earlier MiniMax-first cordon conflated the exhausted monthly TOOL
+    # quota — a ZCode MCP-tool meter, resets 2026-10-28 — with worker
+    # prompt volume). Prescription order: Flash (plan volume) -> MiniMax
+    # (held plan) -> GLM-5.3 (judgment reserve, recovery only). Qwen moved
+    # to registered/unrouted on 2026-10-19 after its monthly utilization
+    # window was exhausted; still registered, unrouted: qwen, flashx
+    # (trial expired 2026-10-09), gmi (unreliable), deepseek (402).
     "zai,glm-5.3-flash",
-    "zai,glm-5.3",
-    # Also removed from the chain 2026-10-11, providers kept registered
-    # below for re-adding after fixing: "gmi,Qwen/Qwen3.8-Max-0902"
-    # (user: not working reliably) and "deepseek,deepseek-flash" (PAYG
-    # balance exhausted, preflight 402). Re-add with a dated approval.
-    # User-approved 2026-10-07 final tier. Do not shorten this id: the alias
-    # "MiniMax-M3.1-Flash" is accepted upstream but serves MiniMax-M3.
     "minimax,MiniMax-M3.1-Flash-Preview",
+    # zai,glm-5.3 is deliberately NOT in the chain: workers must not burn
+    # judgment quota at all (user 2026-10-18); main/auth listeners keep it
+    # as their PRIMARY, and the final-fallback guard forbids a tier that is
+    # also a consumer primary.
 )
 MACHINE_CONSUMERS: dict[str, str] = {
-    # Primaries returned to their pre-cordon tiers with the 2026-10-18
-    # user-directed GLM restore.
+    # Workers are Flash-first (2026-10-18 user reorder): volume burns the
+    # Flash lane, preserving GLM-5.3 for judgment. Main/auth stay GLM-first.
     "config.json": "zai,glm-5.3",
     "config-auth.json": "zai,glm-5.3",
     "glm-workers.json": "zai,glm-5.3-flash",
@@ -89,6 +89,32 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "protocol": "anthropic",
         "models": ["deepseek-flash"],
     },
+    # Registered 2026-10-18: Qwen Token Plan (Standard tier, intl). Base
+    # REQUIRES the /v1 suffix (probed live 2026-10-18:
+    # /apps/anthropic/v1/messages -> 200; /apps/anthropic/messages -> 404).
+    # Unrouted since 2026-10-19 because monthly utilization is exhausted;
+    # re-add with a dated approval after the monthly window recovers. Key
+    # CCR_QWEN_API_KEY is sk-sp- prefixed (token-plan-only, must pair with
+    # these maas endpoints). Model list verified against the live /models
+    # endpoint.
+    "qwen": {
+        "name": "qwen",
+        "api_base_url": "https://token-plan.maas.qwencloudapi.com/apps/anthropic/v1",
+        "api_key": "${CCR_QWEN_API_KEY}",
+        "protocol": "anthropic",
+        "models": [
+            "qwen3.8-flash",
+            "qwen3.8-max",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-flash",
+            "deepseek-v4.1-flash",
+            "deepseek-v4-pro",
+            "glm-5.3",
+            "glm-5.2",
+            "auto",
+        ],
+    },
     "minimax": {
         "name": "minimax",
         "api_base_url": "https://api.minimax.io/anthropic/v1",
@@ -107,6 +133,22 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
 # Reading it once at import confines that window to interpreter startup.
 UMASK = os.umask(0)
 os.umask(UMASK)
+
+# Whole-body integrity pin for the live policy JSON. The structural gate below
+# checks routes, consumers, and provider definitions, but an agent editing
+# fallback-policy.json directly could change a field the structural gate does
+# not constrain (extra keys, provider extras) while every checked list still
+# matched. This pin closes that gap: any edit to the approved policy body,
+# including one made through a JSON editor rather than this module, is
+# refused until the source constant is updated with tests and review.
+#
+# Recompute after an approved policy change with:
+#   python3 -c "import json,hashlib,pathlib; d=json.loads((pathlib.Path.home()
+#     /'.claude-code-router'/'fallback-policy.json').read_text()); print(
+#     hashlib.sha256(json.dumps(d,sort_keys=True).encode()).hexdigest())"
+MACHINE_POLICY_INTEGRITY_SHA256 = (
+    "c02255205d846f7839568099d1fc6e267f24d010c84593dea42966808bab5f67"
+)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -184,6 +226,18 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
             raise ValueError(
                 "Machine shared provider definitions do not match the approved"
                 f" source policy: expected {sorted(MACHINE_SHARED_PROVIDERS)}"
+            )
+        # Structural checks pass, but a field the gate does not constrain (a
+        # provider extra, a stale consumer, a stray top-level key) could still
+        # differ. The whole-body pin closes that gap: any edit to the approved
+        # policy body that the structural checks do not catch is refused here.
+        policy_body = json.dumps(policy, sort_keys=True)
+        observed = hashlib.sha256(policy_body.encode()).hexdigest()
+        if observed != MACHINE_POLICY_INTEGRITY_SHA256:
+            raise ValueError(
+                "Live policy body does not match the approved integrity pin:"
+                f" expected {MACHINE_POLICY_INTEGRITY_SHA256}, got {observed}."
+                " Update the source pin with tests and review, not the JSON."
             )
     return policy
 
@@ -389,6 +443,12 @@ def sync(root: Path = ROOT, check: bool = False) -> dict[str, Any]:
         name for name, (on_disk, derived) in snapshots.items() if on_disk != derived
     ]
     if not check:
+        from ccr_recovery import pre_snapshot
+
+        # `root` in this function is the CCR config root. `pre_snapshot`'s
+        # parameter is the snapshot root; they are different concepts, so do
+        # not pass one into the other positionally.
+        pre_snapshot(label="pre-sync")
         for name in changed:
             atomic_json(root / name, snapshots[name][1])
     return {
@@ -612,13 +672,10 @@ def preflight(root: Path = ROOT, timeout: float = 15.0) -> dict[str, Any]:
     for settings in policy["consumers"].values():
         routed.add(settings["primary"].split(",", 1)[0])
         routed |= {
-            route.split(",", 1)[0]
-            for route in settings.get("additional_routes", [])
+            route.split(",", 1)[0] for route in settings.get("additional_routes", [])
         }
     shared = [
-        provider
-        for provider in policy["providers"]
-        if provider.get("name") in routed
+        provider for provider in policy["providers"] if provider.get("name") in routed
     ]
     env = credential_environment(
         {"probe": json.dumps(shared)}, credentials if credentials.is_file() else None
@@ -682,6 +739,9 @@ def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
             config, credentials if credentials.is_file() else None
         )
         if config != on_disk:
+            from ccr_recovery import pre_snapshot
+
+            pre_snapshot(label="pre-serve")
             atomic_json(config_path, config)
     else:
         env = os.environ.copy()
