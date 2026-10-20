@@ -11,15 +11,12 @@ installed, and made the live `codex-ccr-worker` entrypoint.
 
 ## Changes
 
-- Canonical global instructions (`~/AGENTS.md`) now tell parent agents to
-  decompose nontrivial implementation, review, research, and diagnostic work
-  into independently reportable worker orders before interactive exploration.
-  The default trigger is broad search/audit, multiple files, modules, or
-  repositories, isolated implementation/test diagnosis, or roughly five
-  parent tool calls/five minutes. The parent exception list covers dialogue,
-  decomposition/synthesis, tiny brief-preparation lookups, irreversible or
-  credential-facing work, live-service coordination, parent-only tools, and
-  final acceptance.
+- The initial canonical global instruction made bounded delegation a testable
+  default using broad search/audit, multiple files or repositories, isolated
+  implementation/test diagnosis, or roughly five parent tool calls/five minutes
+  as the trigger. That size heuristic was superseded later the same day by the
+  decomposition-first contract recorded below; the historical wording is kept
+  only to explain the progression.
 - Corrected the global active chain summary to the governed source/live state:
   GLM-5.3 Flash first, then MiniMax M3.1 Flash. The prior global paragraph
   still described three now-unrouted Qwen tiers as active.
@@ -142,6 +139,58 @@ was rate-limited until the next included window, so #6 was merged with the
 local deterministic gate and no unresolved review threads. No branch protection
 was available on this private repository.
 
+## Amendment: decomposition-first delegation rule (same day)
+
+User direction: a model given a new task should always see how many pieces it
+can cleanly decompose into verifiable results, and everything that decomposes
+that way should be sent off. The earlier rule used a size heuristic (broad
+search, multiple files, roughly five parent tool calls or five minutes), which
+left the delegation decision to judgment about effort rather than to the
+structure of the task.
+
+The global rule in `~/AGENTS.md` was replaced with a decomposition-first
+contract, propagated by `agent-instructions-sync --sync` to the Codex and ZCode
+copies. It requires enumerating a task's pieces before doing the work, reading
+only what the briefs themselves need, and judging each piece by one question:
+can it be stated as a bounded work order with its own acceptance evidence? Every
+piece that passes goes to a worker. Size, file count, elapsed time, and effort
+already spent are explicitly excluded as criteria.
+
+Two bounded read-only reviews ran against the change. Run
+`20261020-082658-x3loiy1v` (thread `01a159ec-4496-7c73-b93b-9a031212368f`,
+requested GLM Flash route, 305.678 seconds, exit 0) returned
+`VERDICT: REVISE` and found four semantic gaps: brief-writing reads were not
+carved out from "before touching the work", "parent-only tools" was
+self-referential, a single-delegable-piece task was ambiguous, and sunk parent
+effort was not named as a banned criterion. All four are fixed in the current
+wording. Its private report is
+`build/reports/delegation-decomposition/rule-review.txt` (SHA-256
+`32c82acb93e67d7012616f7c657a274080fc486a6d4f886c98b0661166830b60`).
+
+Run `20261020-082709-jctayew5` (thread
+`01a159ec-6e50-75e0-b0e9-2486f209ec3b`, 493.621 seconds, exit 0) produced no
+usable final report: it spent its budget tracking concurrent edits and
+self-referenced its own run. Its receipt is recorded as an incomplete review
+and is not treated as evidence. Its intermediate trace did contribute one
+verified finding, that the repository guide and runbook had not yet carried
+the pre-launch split, launch-before-parent-work ordering, and the
+do-not-collapse clauses; those were added. A pre-change global-instruction
+backup is in
+`~/.cache/alphaheng/instruction-backups/delegation-decomposition-20261020/`.
+The first relaunch attempt correctly failed before model dispatch because its
+output parent did not exist; the parent created the private directory and
+relaunched rather than disabling the launcher guard.
+
+Validation for this amendment: `ruff format scripts`, `ruff check scripts`,
+and `ty check scripts` exited 0; Python helper discovery ran 131 tests, all
+OK; `python3 scripts/quality.py --fast` passed; `agent-instructions-sync
+--sync` reported Codex, ZCode, Lean Context, and Claude parity OK; and
+`git diff --check` passed. Kilo review on PR #68 then found two evidence
+consistency warnings and four suggestions: the stale duplicate amendment, the
+old present-tense size trigger, missing amendment validation, no negative
+regression assertions, duplicated Unreleased defaults, and missing
+concurrency/no-permission clauses in the repository guide. All six were fixed,
+then the focused documentation test was updated and rerun.
 ## Non-claims
 
 - This does not prove future model obedience to the instruction; it changes

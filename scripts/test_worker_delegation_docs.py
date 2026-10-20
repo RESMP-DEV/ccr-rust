@@ -22,16 +22,42 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
     def test_repository_guide_defines_an_actionable_delegation_trigger(self) -> None:
         guide = self.read("AGENTS.md")
         self.assertIn("### Delegation-first triage", guide)
-        self.assertIn("Delegate by default", guide)
-        self.assertIn("five parent tool calls or five minutes", guide)
-        self.assertIn("final acceptance", guide)
+        self.assertIn("enumerate its pieces before touching the work", guide)
+        self.assertIn("reading only what the briefs need", guide)
+        self.assertIn("Send every piece", guide)
+        self.assertIn("a one-piece task is still delegated", guide)
+        self.assertIn("tools the worker infrastructure cannot reach", guide)
+        self.assertIn("own scope, owned files or surface, acceptance check", guide)
+        self.assertIn("State the split before launching", guide)
+        self.assertIn("Launch the workers before doing parent work", guide)
+        self.assertIn("send independent pieces concurrently", guide)
+        self.assertIn("do not ask permission to launch a worker", guide)
+        self.assertIn("Do not collapse several delegable pieces", guide)
+        self.assertNotIn("five parent tool calls or five minutes", guide)
+        self.assertNotIn("Delegate by default", guide)
+        self.assertIn("effort already spent are not the criterion", guide)
+        self.assertIn("final integration", guide)
         self.assertIn("ccr-rust workers list --limit 5", guide)
 
     def test_worker_guide_requires_bounded_briefs_and_low_context_inspection(
         self,
     ) -> None:
         guide = self.read("docs/worker-inspection.md")
-        self.assertIn("Decide delegation before exploring", guide)
+        self.assertIn("by decomposing before exploring", guide)
+        self.assertIn("reading only what the briefs need", guide)
+        self.assertIn("send every piece", guide)
+        self.assertIn("A one-piece task is still delegated", guide)
+        self.assertIn("tools the worker infrastructure cannot reach", guide)
+        self.assertIn("State the split before launching", guide)
+        self.assertIn("send independent pieces concurrently", guide)
+        self.assertIn("Do not collapse several delegable pieces", guide)
+        self.assertIn("do not ask permission to launch a worker", guide)
+        self.assertIn(
+            "Do not use size, file count, elapsed time, or effort already spent as the trigger",
+            guide,
+        )
+        self.assertNotIn("five parent tool calls or five minutes", guide)
+        self.assertNotIn("Delegate by default", guide)
         self.assertIn("one bounded outcome", guide)
         self.assertIn("<report>", guide)
         self.assertIn("separate foreground tool sessions", guide)
@@ -40,7 +66,9 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
 
     def test_changelog_records_the_operator_workflow_change(self) -> None:
         changelog = self.read("CHANGELOG.md")
-        self.assertIn("bounded worker delegation", changelog)
+        self.assertIn("decomposition first", changelog)
+        self.assertIn("including a one-piece task", changelog)
+        self.assertNotIn("five parent tool calls/five minutes", changelog)
         self.assertIn("12-worker ceiling", changelog)
         self.assertIn("scripts/ccr_worker_usage.py", changelog)
 

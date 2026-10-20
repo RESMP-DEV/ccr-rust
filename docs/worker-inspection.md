@@ -7,11 +7,21 @@ local helper; this feature does not install or modify it.
 
 ## Agent workflow
 
-Decide delegation before exploring. Independent broad search, review,
-implementation, test diagnosis, or cross-repository work belongs in a bounded
-worker order when the parent task authorizes that scope. Keep only tiny exact
-lookups, decomposition, integration, irreversible actions, and final
-acceptance in the parent turn.
+Decide delegation by decomposing before exploring. Enumerate the task's
+pieces, reading only what the briefs need, then send every piece that can be a
+bounded work order with its own scope, ownership, acceptance check, and finish
+line. A one-piece task is still delegated. Keep only live conversation,
+cross-piece judgment, credentials or other irreversible actions, live-service
+coordination, tools the worker infrastructure cannot reach, and final
+integration in the parent turn. Do not use size, file count, elapsed time, or
+effort already spent as the trigger.
+
+State the split before launching: which pieces are workers, which stay with
+the parent and under which parent-only condition, and why. Launch the workers
+before doing parent work, and send independent pieces concurrently. Do not
+collapse several delegable pieces into one broader interactive pass because
+they share a theme, and do not ask permission to launch a worker the user's
+task already authorizes.
 
 Keep the launcher's verbose relay out of the parent agent's context. Redirect
 it to a private directory; the launcher still retains its original trace and

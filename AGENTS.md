@@ -111,13 +111,21 @@ For new CLI commands:
 
 ### Delegation-first triage
 
-Before a nontrivial implementation, review, research, or diagnostic turn,
-split it into independently reportable `codex-ccr-worker` orders. Delegate by
-default for broad search or audit, work spanning multiple files, modules, or
-repositories, isolated implementation or test diagnosis, and work likely to
-take roughly five parent tool calls or five minutes. Reserve the parent for
-decomposition, synthesis, tiny exact lookups used to write a brief,
-credential/live-service coordination, and final acceptance.
+On a new task, enumerate its pieces before touching the work, reading only
+what the briefs need: owned paths, entry points, and acceptance commands.
+Send every piece that can be stated as a bounded `codex-ccr-worker` order with
+its own scope, owned files or surface, acceptance check, and finish line; a
+one-piece task is still delegated. Keep only live conversation, cross-piece
+judgment, credentials or other irreversible actions, live-service
+coordination, tools the worker infrastructure cannot reach, and final
+integration with the parent. Size, file count, elapsed time, and effort
+already spent are not the criterion.
+
+State the split before launching: which pieces are workers, which remain with
+the parent, and under which condition. Launch the workers before doing parent
+work, send independent pieces concurrently, and do not ask permission to
+launch a worker the user's task already authorizes. Do not collapse several
+delegable pieces into one broader interactive pass because they share a theme.
 
 <worker_inspection>
 Use `ccr-rust workers list --limit 5` and `ccr-rust workers show RUN --json`
