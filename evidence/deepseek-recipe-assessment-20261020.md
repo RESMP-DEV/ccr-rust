@@ -85,7 +85,7 @@ tree remained clean at the pinned revision.
 
 ## Worker evidence
 
-Four bounded reviews plus the follow-up validation completed through the GLM
+Three bounded reviews and two validation runs completed through the GLM
 Flash worker route:
 
 - Architecture map `20261020-090515-1vscxfzq`, 259.830 seconds, exit 0,
