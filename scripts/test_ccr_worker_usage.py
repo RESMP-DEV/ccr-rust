@@ -60,6 +60,14 @@ ccr_requests_total{tier="zai"} 4
                         "elapsed_seconds": 2.5,
                     },
                 ),
+                (
+                    date.today().strftime("%Y%m%d") + "-030303-bad",
+                    ["not", "an", "object"],
+                ),
+                (
+                    date.today().strftime("%Y%m%d") + "-040304-bad-elapsed",
+                    {"outcome": "completed", "elapsed_seconds": "not-a-number"},
+                ),
             ]
             for name, status in records:
                 run_dir = root / name
@@ -70,8 +78,11 @@ ccr_requests_total{tier="zai"} 4
 
             result = usage.summarize_runs(root, days=1)
 
-        self.assertEqual(result.runs, 2)
-        self.assertEqual(result.outcomes, {"completed": 1, "timed_out": 1})
+        self.assertEqual(result.runs, 4)
+        self.assertEqual(
+            result.outcomes,
+            {"completed": 1, "timed_out": 1, "unreadable": 2},
+        )
         self.assertEqual(result.timeout_profiles, {"review": 2})
         self.assertEqual(result.requested_routes, {"zai,glm-5.3-flash": 2})
         self.assertEqual((result.read_only, result.network_allowed), (2, 1))

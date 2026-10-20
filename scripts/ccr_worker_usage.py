@@ -19,6 +19,11 @@ DEFAULT_RUNS_DIR = Path.home() / ".cache" / "ccr-worker-runs"
 REQUEST_METRIC = re.compile(r'^ccr_requests_total\{tier="([^"]+)"\}\s+([0-9.]+)')
 
 
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 @dataclass(frozen=True)
 class ListenerUsage:
     url: str
@@ -62,7 +67,8 @@ def validate_local_http_url(url: str) -> None:
 def read_listener_usage(url: str, timeout: float) -> ListenerUsage:
     validate_local_http_url(url)
     request = urllib.request.Request(url, headers={"accept": "text/plain"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(NoRedirectHandler)
+    with opener.open(request, timeout=timeout) as response:
         if response.status != 200:
             raise ValueError(f"metrics endpoint returned HTTP {response.status}")
         return parse_listener_metrics(response.read().decode("utf-8"), url)
@@ -91,7 +97,10 @@ def summarize_runs(runs_dir: Path, days: int) -> RunUsage:
             continue
         try:
             status = json.loads(status_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            if not isinstance(status, dict):
+                raise TypeError("status JSON is not an object") from None
+            elapsed = float(status.get("elapsed_seconds") or 0)
+        except (OSError, TypeError, ValueError):
             outcomes["unreadable"] += 1
             count += 1
             continue
@@ -100,7 +109,7 @@ def summarize_runs(runs_dir: Path, days: int) -> RunUsage:
         routes[str(status.get("requested_route") or "unassigned")] += 1
         read_only += int(bool(status.get("read_only")))
         network_allowed += int(bool(status.get("network_allowed")))
-        elapsed_total += float(status.get("elapsed_seconds") or 0)
+        elapsed_total += elapsed
         count += 1
     return RunUsage(
         days=days,

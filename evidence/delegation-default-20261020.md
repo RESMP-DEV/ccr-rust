@@ -84,6 +84,13 @@ installed, and made the live `codex-ccr-worker` entrypoint.
   `model/requested_route=zai,glm-5.3-flash`, the governed GLM→MiniMax fallback
   list, read-only/offline permissions, `timeout_profile=quick`,
   `timeout_seconds=120`, and `timeout_explicit=true`.
+- CodeRabbit reviewed PR #67 with two actionable findings: the guide still
+  showed the known background-launch pattern, and one malformed receipt could
+  abort the whole usage summary. Both were fixed. Its low-risk redirect-bypass
+  nit was also closed by using a no-redirect opener for the loopback metrics
+  request. The first post-fix full matrix failed `ty` on an incompatible
+  override signature; the parameter names were corrected and the full matrix
+  passed again.
 - Historical launcher receipts showed the pattern this change targets: bursts
   of delegation followed by idle days, including 63 runs on 2026-10-19 and no
   completed-status run dated 2026-10-20 before this audit.
@@ -101,6 +108,8 @@ installed, and made the live `codex-ccr-worker` entrypoint.
   (format, Python format/lint/type, SLOC ratchet, ShellCheck, Clippy, Rust
   tests, no-default-features, debug build, 128 Python helper tests, and
   vendored GP tests).
+- Post-review `python3 scripts/quality.py` — after one repaired `ty` failure,
+  a fresh run passed all 12 checks.
 - Launcher validation on merged main `a39dc9b`: `uv run ruff check .` clean
   and `uv run pytest -q` with 18 tests passed. PR #5's pre-merge branch also
   passed 17 tests.

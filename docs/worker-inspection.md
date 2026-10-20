@@ -36,8 +36,7 @@ non-goals:
 run=$(mktemp -d "${TMPDIR:-/tmp}/ccr-task.XXXXXX")
 codex-ccr-worker --cwd "$PWD" --read-only --output "$run/result.txt" \
   'Inspect the assigned files; report findings and evidence, without edits.' \
-  >"$run/relay.jsonl" 2>"$run/launcher.stderr" &
-worker_pid=$!
+  >"$run/relay.jsonl" 2>"$run/launcher.stderr"
 
 ccr-rust workers list --limit 5
 ccr-rust workers show RUN
@@ -50,17 +49,18 @@ workers may start. `latest` is a discovery convenience, not a session handle.
 After completion, `result.txt.status.json` is also a valid selector:
 
 ```bash
-wait "$worker_pid"
 ccr-rust workers show "$run/result.txt.status.json" --json
 ccr-rust workers events RUN --after NEXT_CURSOR --limit 10 --json
 ccr-rust workers detail RUN EVENT_CURSOR --max-chars 2000 --json
 ```
 
-`wait` returns the launcher's status, not the inspector's. Capture it before
-the next command when using shell automation. The inspector never retries or
-resumes workers, changes providers, executes transcript commands, marks tasks
-verified, or modifies artifacts. Use the launcher's existing resume and
-cooldown policies when a worker needs follow-up.
+The foreground launcher invocation returns the launcher's status, not the
+inspector's. Capture it before the next command when using shell automation.
+For parallel workers, issue separate foreground harness sessions rather than
+shell background jobs. The inspector never retries or resumes workers, changes
+providers, executes transcript commands, marks tasks verified, or modifies
+artifacts. Use the launcher's existing resume and cooldown policies when a
+worker needs follow-up.
 
 Measure adoption without replaying transcripts:
 
