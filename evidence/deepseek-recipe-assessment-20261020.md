@@ -97,9 +97,10 @@ Flash worker route:
 - Adoption review `20261020-090544-hgy5c1ne`, 450.801 seconds, exit 0,
   private report SHA-256
   `c6898a0d7f84dbf36c3f5345a1ac4e9b6a6aa067900c5b286d8f075520c94d26`.
-- Initial offline validation `20261020-090601-t4patelc`, 345.377 seconds,
-  exit 0 as a task, with its validation result correctly classified FAILED for
-  environmental reasons.
+- Initial offline validation `20261020-090601-t4patelc`, 345.377 seconds.
+  The launcher process exited 0 after producing its receipt, but the recorded
+  validation aggregate was FAILED: formatting passed while compilation and test
+  gates were blocked by the missing pinned toolchain and locked crate cache.
 - Protocol validation `20261020-091403-fa00mj0t`, 424.277 seconds, exit 0;
   private report SHA-256
   `57b88fe9de0a896c93313701a5ab15703291c4c220c38eab21d784075b965d04`.
