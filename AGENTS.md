@@ -123,8 +123,9 @@ already spent are not the criterion.
 
 State the split before launching: which pieces are workers, which remain with
 the parent, and under which condition. Launch the workers before doing parent
-work. Do not collapse several delegable pieces into one broader interactive
-pass because they share a theme.
+work, send independent pieces concurrently, and do not ask permission to
+launch a worker the user's task already authorizes. Do not collapse several
+delegable pieces into one broader interactive pass because they share a theme.
 
 <worker_inspection>
 Use `ccr-rust workers list --limit 5` and `ccr-rust workers show RUN --json`

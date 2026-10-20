@@ -30,7 +30,11 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
         self.assertIn("own scope, owned files or surface, acceptance check", guide)
         self.assertIn("State the split before launching", guide)
         self.assertIn("Launch the workers before doing parent work", guide)
+        self.assertIn("send independent pieces concurrently", guide)
+        self.assertIn("do not ask permission to launch a worker", guide)
         self.assertIn("Do not collapse several delegable pieces", guide)
+        self.assertNotIn("five parent tool calls or five minutes", guide)
+        self.assertNotIn("Delegate by default", guide)
         self.assertIn("effort already spent are not the criterion", guide)
         self.assertIn("final integration", guide)
         self.assertIn("ccr-rust workers list --limit 5", guide)
@@ -47,10 +51,13 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
         self.assertIn("State the split before launching", guide)
         self.assertIn("send independent pieces concurrently", guide)
         self.assertIn("Do not collapse several delegable pieces", guide)
+        self.assertIn("do not ask permission to launch a worker", guide)
         self.assertIn(
             "Do not use size, file count, elapsed time, or effort already spent as the trigger",
             guide,
         )
+        self.assertNotIn("five parent tool calls or five minutes", guide)
+        self.assertNotIn("Delegate by default", guide)
         self.assertIn("one bounded outcome", guide)
         self.assertIn("<report>", guide)
         self.assertIn("separate foreground tool sessions", guide)
@@ -59,7 +66,9 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
 
     def test_changelog_records_the_operator_workflow_change(self) -> None:
         changelog = self.read("CHANGELOG.md")
-        self.assertIn("bounded worker delegation", changelog)
+        self.assertIn("decomposition first", changelog)
+        self.assertIn("including a one-piece task", changelog)
+        self.assertNotIn("five parent tool calls/five minutes", changelog)
         self.assertIn("12-worker ceiling", changelog)
         self.assertIn("scripts/ccr_worker_usage.py", changelog)
 

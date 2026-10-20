@@ -11,15 +11,12 @@ installed, and made the live `codex-ccr-worker` entrypoint.
 
 ## Changes
 
-- Canonical global instructions (`~/AGENTS.md`) now tell parent agents to
-  decompose nontrivial implementation, review, research, and diagnostic work
-  into independently reportable worker orders before interactive exploration.
-  The default trigger is broad search/audit, multiple files, modules, or
-  repositories, isolated implementation/test diagnosis, or roughly five
-  parent tool calls/five minutes. The parent exception list covers dialogue,
-  decomposition/synthesis, tiny brief-preparation lookups, irreversible or
-  credential-facing work, live-service coordination, parent-only tools, and
-  final acceptance.
+- The initial canonical global instruction made bounded delegation a testable
+  default using broad search/audit, multiple files or repositories, isolated
+  implementation/test diagnosis, or roughly five parent tool calls/five minutes
+  as the trigger. That size heuristic was superseded later the same day by the
+  decomposition-first contract recorded below; the historical wording is kept
+  only to explain the progression.
 - Corrected the global active chain summary to the governed source/live state:
   GLM-5.3 Flash first, then MiniMax M3.1 Flash. The prior global paragraph
   still described three now-unrouted Qwen tiers as active.
@@ -177,8 +174,23 @@ self-referenced its own run. Its receipt is recorded as an incomplete review
 and is not treated as evidence. Its intermediate trace did contribute one
 verified finding, that the repository guide and runbook had not yet carried
 the pre-launch split, launch-before-parent-work ordering, and the
-do-not-collapse clauses; those were added.
+do-not-collapse clauses; those were added. A pre-change global-instruction
+backup is in
+`~/.cache/alphaheng/instruction-backups/delegation-decomposition-20261020/`.
+The first relaunch attempt correctly failed before model dispatch because its
+output parent did not exist; the parent created the private directory and
+relaunched rather than disabling the launcher guard.
 
+Validation for this amendment: `ruff format scripts`, `ruff check scripts`,
+and `ty check scripts` exited 0; Python helper discovery ran 131 tests, all
+OK; `python3 scripts/quality.py --fast` passed; `agent-instructions-sync
+--sync` reported Codex, ZCode, Lean Context, and Claude parity OK; and
+`git diff --check` passed. Kilo review on PR #68 then found two evidence
+consistency warnings and four suggestions: the stale duplicate amendment, the
+old present-tense size trigger, missing amendment validation, no negative
+regression assertions, duplicated Unreleased defaults, and missing
+concurrency/no-permission clauses in the repository guide. All six were fixed,
+then the focused documentation test was updated and rerun.
 ## Non-claims
 
 - This does not prove future model obedience to the instruction; it changes
@@ -192,25 +204,3 @@ do-not-collapse clauses; those were added.
 - Worker receipts still report requested routes; they do not independently
   prove the upstream served route. Router metrics/logs remain the routing
   evidence.
-
-## Amendment: decomposition-first refinement (same day)
-
-User direction: a model receiving a new task should always ask how many
-pieces it can cleanly decompose into verifiable results, and every
-decomposable piece should be sent off. The canonical global rule was changed
-from a broad-work/five-tool-call/five-minute heuristic to an enumeration
-requirement: before touching the work, enumerate the pieces; every piece with
-its own bounded scope, ownership, acceptance check, and finish line goes to a
-worker. The parent keeps only conversation, cross-piece judgment, credentials
-and irreversible actions, live-service coordination, parent-only tools, and
-final integration. `agent-instructions-sync --sync` propagated the core block
-to Codex and ZCode with parity checks passing. A pre-change backup is in
-`~/.cache/alphaheng/instruction-backups/delegation-decomposition-20261020/`.
-
-The repository guide, worker runbook, focused documentation test, and
-changelog were updated to enforce the same enumeration-first contract. The
-first relaunch attempt correctly failed before model dispatch because its
-output parent did not exist; after creating that private directory, two
-read-only GLM workers reviewed rule semantics and repository propagation.
-Their completion receipts are
-`20261020-082658-x3loiy1v` and `20261020-082709-jctayew5`.

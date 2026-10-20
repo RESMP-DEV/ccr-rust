@@ -13,19 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Tightened the delegation default from a broad/size heuristic to decomposition
+- Replaced the initial broad/size delegation heuristic with decomposition
   first: enumerate every task piece before work and send every piece that can
   carry its own bounded scope, ownership, acceptance check, and finish line to
   a worker, including a one-piece task. The parent may read only what the
   briefs need and retains conversation, cross-piece judgment, credentials and
   other irreversible actions, live-service coordination, tools unreachable by
   worker infrastructure, and final integration; size, file count, elapsed
-  time, and effort already spent are not delegation criteria.
-- Made bounded worker delegation the documented default for broad or
-  multi-file audit, research, implementation, and test diagnosis. The worker
-  guide now gives a parent-side delegation trigger, a compact XML brief
-  contract, and a foreground-session launch pattern that keeps independent
-  runs independently tracked without raising the 12-worker ceiling.
+  time, and effort already spent are not delegation criteria. The worker guide
+  also records the compact XML brief contract and foreground-session launch
+  pattern without raising the 12-worker ceiling.
 - Added `scripts/ccr_worker_usage.py`, a read-only adoption summary that joins
   the worker listener's active-request and per-tier request metrics with local
   launcher receipt outcomes, timeout profiles, permissions, requested routes,
