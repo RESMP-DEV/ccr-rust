@@ -749,7 +749,6 @@ pub async fn handle_messages(
                 } else {
                     None
                 };
-                total_attempts += 1;
                 info!(
                     sweep,
                     "Trying {} ({}), attempt {}/{}",
@@ -784,10 +783,13 @@ pub async fn handle_messages(
                 )
                 .await
                 else {
+                    // Admission deferral launched no primary attempt, so it
+                    // must not be reported as an upstream attempt.
                     saw_non_rate_limit_failure = true;
                     saw_retryable_failure = true;
                     continue;
                 };
+                total_attempts += 1;
                 total_attempts += usize::from(hedge_launched);
                 let tier = tier.as_str();
                 let tier_name = tier_name.as_str();

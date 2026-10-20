@@ -19,12 +19,35 @@ The default owns these boundaries:
 
 | Boundary | Command owner |
 | --- | --- |
-| Formatting | `cargo fmt --check` |
-| Lint | `cargo clippy --all-features --all-targets --locked -- -D warnings` |
+| Rust formatting | `cargo fmt --check` |
+| Python formatting | `ruff format --check` over `benchmarks`, `scripts`, `tests/provider_validation` |
+| Python lint | `ruff check` over the same paths |
+| Python type check | `ty check scripts` |
+| Shell lint | `shellcheck` over the tracked shell entry points |
+| Rust file-growth ratchet | `python3 scripts/check_sloc.py --json` |
+| Rust lint | `cargo clippy --all-features --all-targets --locked -- -D warnings` |
 | Rust unit and mocked integration tests | `cargo test --all-features --locked` |
 | Portable feature boundary | `cargo check --no-default-features --locked` |
-| Python policy/runtime helpers | `python3 -m unittest discover` |
+| Checkout debug binary | `cargo build --all-features --locked` |
+| Python policy/runtime helpers | `python3 -m unittest discover` with
+  `CCR_TEST_BINARY=$PWD/target/debug/ccr-rust` |
 | Vendored GP surrogate | `cargo test --manifest-path vendor/gp-routing/Cargo.toml --locked` |
+
+The Rust ratchet caps total nonblank `src/**/*.rs` lines at the measured
+merged-main baseline, caps every file at 2,500 nonblank lines, and gives the
+five existing largest hotspot files individual ceilings. Lower a ceiling when
+a refactor shrinks the measured baseline; do not raise one to admit new code.
+
+`ruff.toml` is the single source of truth for the Python rules, so a new
+helper inherits the same standard instead of drifting. The benchmark and
+provider-validation directories are included because they are executable code
+shipped with the repository, not scratch files. `ty` is scoped to `scripts`,
+which is the only Python tree that runs in CI-equivalent local validation and
+has no third-party import requirements. Python runtime tests explicitly use
+the checkout-built debug binary, never an ambient installed CLI, and fail if
+that binary is absent. The benchmark and provider-validation trees import optional `aiohttp`, `starlette`, `uvicorn`, `openai`, and
+`anthropic` packages that are not installed in the validation environment, and
+their type check is therefore not part of the default matrix.
 
 Every invocation unlinks and then writes
 `build/reports/quality/receipt.json`. The receipt records source revision and
@@ -41,3 +64,19 @@ only prints the selected checks.
 
 The vendored GP package has its own tracked lockfile. Do not remove it: its
 tests choose dev-dependency versions independently from the root CCR lockfile.
+
+## Dependency security
+
+Dependency advisories are a release gate, not part of the default matrix,
+because the check needs network access to advisory databases. Run them before
+a release:
+
+```bash
+cargo audit --file Cargo.lock
+cargo deny check
+osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
+```
+
+Every exception in `osv-scanner.toml` carries an expiry date, and
+`docs/dependency-security.md` records the reason, owner, and follow-up for
+each accepted advisory. An expired exception is a finding, not a waiver.

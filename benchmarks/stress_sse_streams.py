@@ -117,30 +117,32 @@ async def consume_sse_stream(
 
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.post(
+        async with (
+            aiohttp.ClientSession(timeout=client_timeout) as session,
+            session.post(
                 url,
                 json=body,
                 headers={"Content-Type": "application/json"},
-            ) as resp:
-                result.status_code = resp.status
+            ) as resp,
+        ):
+            result.status_code = resp.status
 
-                if resp.status != 200:
-                    text = await resp.text()
-                    result.error = f"HTTP {resp.status}: {text[:200]}"
-                    return result
+            if resp.status != 200:
+                text = await resp.text()
+                result.error = f"HTTP {resp.status}: {text[:200]}"
+                return result
 
-                first_byte = True
-                async for chunk in resp.content.iter_any():
-                    now = time.monotonic()
-                    if first_byte:
-                        result.ttfb_ms = (now - t0) * 1000.0
-                        result.first_chunk_ts = now
-                        first_byte = False
+            first_byte = True
+            async for chunk in resp.content.iter_any():
+                now = time.monotonic()
+                if first_byte:
+                    result.ttfb_ms = (now - t0) * 1000.0
+                    result.first_chunk_ts = now
+                    first_byte = False
 
-                    result.chunks_received += 1
-                    result.bytes_received += len(chunk)
-                    result.last_chunk_ts = now
+                result.chunks_received += 1
+                result.bytes_received += len(chunk)
+                result.last_chunk_ts = now
 
     except TimeoutError:
         result.error = "timeout"
@@ -155,20 +157,23 @@ async def consume_sse_stream(
     return result
 
 
-async def poll_active_streams(ccr_url: str, peak: list[float], stop_event: asyncio.Event) -> None:
+async def poll_active_streams(
+    ccr_url: str, peak: list[float], stop_event: asyncio.Event
+) -> None:
     """Periodically poll ccr-rust /v1/usage to track peak active_streams gauge."""
     import aiohttp
 
     url = f"{ccr_url}/v1/usage"
     while not stop_event.is_set():
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        current = data.get("active_streams", 0)
-                        if current > peak[0]:
-                            peak[0] = current
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp,
+            ):
+                if resp.status == 200:
+                    data = await resp.json()
+                    current = data.get("active_streams", 0)
+                    peak[0] = max(peak[0], current)
         except Exception:
             pass
         try:
@@ -182,13 +187,15 @@ async def fetch_final_usage(ccr_url: str) -> dict | None:
     import aiohttp
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
                 f"{ccr_url}/v1/usage",
                 timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                if resp.status == 200:
-                    return await resp.json()
+            ) as resp,
+        ):
+            if resp.status == 200:
+                return await resp.json()
     except Exception:
         pass
     return None
@@ -209,7 +216,9 @@ async def run_stress_test(
     peak_active_streams: list[float] = [0.0]
 
     stop_poll = asyncio.Event()
-    poll_task = asyncio.create_task(poll_active_streams(ccr_url, peak_active_streams, stop_poll))
+    poll_task = asyncio.create_task(
+        poll_active_streams(ccr_url, peak_active_streams, stop_poll)
+    )
 
     ramp_delay = ramp_ms / 1000.0 / max(streams, 1)
 
@@ -222,8 +231,7 @@ async def run_stress_test(
             None, ccr_url, model, max_tokens, sid, timeout, concurrent_gauge
         )
         current = concurrent_gauge[0]
-        if current > peak_concurrent[0]:
-            peak_concurrent[0] = current
+        peak_concurrent[0] = max(peak_concurrent[0], current)
         return r
 
     wall_t0 = time.monotonic()
@@ -239,7 +247,9 @@ async def run_stress_test(
     processed: list[StreamResult] = []
     for i, r in enumerate(results):
         if isinstance(r, Exception):
-            processed.append(StreamResult(stream_id=i, error=f"{type(r).__name__}: {r}"))
+            processed.append(
+                StreamResult(stream_id=i, error=f"{type(r).__name__}: {r}")
+            )
         else:
             processed.append(r)
 
@@ -274,7 +284,9 @@ async def run_stress_test(
         report.total_chunks = sum(r.chunks_received for r in successes)
 
         if wall_elapsed > 0:
-            report.throughput_mbps = (report.total_bytes * 8) / (wall_elapsed * 1_000_000)
+            report.throughput_mbps = (report.total_bytes * 8) / (
+                wall_elapsed * 1_000_000
+            )
 
     report.peak_concurrent = peak_concurrent[0]
     report.ccr_active_streams_peak = peak_active_streams[0]
@@ -333,20 +345,36 @@ def print_report(report: StressReport) -> None:
     if report.failed == 0:
         print("  RESULT: PASS - all streams completed successfully")
     elif report.failed <= report.total_streams * 0.05:
-        print(f"  RESULT: WARN - {report.failed}/{report.total_streams} streams failed (<5%)")
+        print(
+            f"  RESULT: WARN - {report.failed}/{report.total_streams} streams failed (<5%)"
+        )
     else:
         print(f"  RESULT: FAIL - {report.failed}/{report.total_streams} streams failed")
     print("=" * 72 + "\n")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stress test: concurrent SSE streams through ccr-rust")
-    parser.add_argument("--ccr-url", default="http://127.0.0.1:3456", help="CCR proxy base URL")
-    parser.add_argument("--streams", type=int, default=100, help="Number of concurrent streams")
-    parser.add_argument("--ramp-ms", type=int, default=0, help="Ramp-up window in ms (0 = all at once)")
-    parser.add_argument("--timeout", type=float, default=120.0, help="Per-stream timeout in seconds")
-    parser.add_argument("--model", default="mock,mock-model", help="Model string for request")
-    parser.add_argument("--max-tokens", type=int, default=4096, help="max_tokens in request body")
+    parser = argparse.ArgumentParser(
+        description="Stress test: concurrent SSE streams through ccr-rust"
+    )
+    parser.add_argument(
+        "--ccr-url", default="http://127.0.0.1:3456", help="CCR proxy base URL"
+    )
+    parser.add_argument(
+        "--streams", type=int, default=100, help="Number of concurrent streams"
+    )
+    parser.add_argument(
+        "--ramp-ms", type=int, default=0, help="Ramp-up window in ms (0 = all at once)"
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=120.0, help="Per-stream timeout in seconds"
+    )
+    parser.add_argument(
+        "--model", default="mock,mock-model", help="Model string for request"
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=4096, help="max_tokens in request body"
+    )
     parser.add_argument("--json-out", default="", help="Write JSON results to file")
     args = parser.parse_args()
 
@@ -355,14 +383,16 @@ def main() -> None:
     print(f"  Model:  {args.model}")
     print(f"  Ramp:   {args.ramp_ms}ms | Timeout: {args.timeout}s")
 
-    results, report = asyncio.run(run_stress_test(
-        ccr_url=args.ccr_url,
-        streams=args.streams,
-        ramp_ms=args.ramp_ms,
-        timeout=args.timeout,
-        model=args.model,
-        max_tokens=args.max_tokens,
-    ))
+    results, report = asyncio.run(
+        run_stress_test(
+            ccr_url=args.ccr_url,
+            streams=args.streams,
+            ramp_ms=args.ramp_ms,
+            timeout=args.timeout,
+            model=args.model,
+            max_tokens=args.max_tokens,
+        )
+    )
 
     print_report(report)
 

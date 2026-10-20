@@ -6,6 +6,44 @@ must expire so the live graph is reviewed again. `cargo audit` and `cargo deny
 check` continue to report the graph, and newly actionable vulnerabilities
 remain release blockers.
 
+## 2026-10-19 review
+
+### `rustls` and QUIC advisories
+
+Resolved in `Cargo.lock`. `rustls` is pinned to 0.23.46, clearing
+RUSTSEC-2026-0346 through RUSTSEC-2026-0349. `quinn-proto` is pinned to
+0.11.19, clearing RUSTSEC-2026-0338 through RUSTSEC-2026-0342. The Sindexer
+revision remains unchanged.
+
+### `zip` RUSTSEC-2026-0367 through RUSTSEC-2026-0369
+
+Temporarily accepted until 2026-11-19. `zip` 2.4.2 is reached only through
+`ndarray-npy` 0.9.1 in `egobox-gp`; `ndarray-npy` uses `ZipArchive` and
+`ZipWriter` for NPZ I/O but does not call `ZipArchive::extract` or
+`ZipStreamReader::extract`. All three advisories require one of those
+extraction paths, so they are not reachable from CCR-Rust or the vendored GP
+surrogate. A compatible `ndarray-npy` update is still unavailable: 0.10.0 is
+a new semantic-version line and current `egobox-gp` releases, including
+0.37.1, continue to require 0.9.1 with `zip` 2.x.
+
+Owner: CCR-Rust maintainers. Follow-up: when `egobox-gp` or `ndarray-npy`
+publishes a compatible `zip` 9 graph, update and remove all three OSV
+exceptions. The exception expires immediately if CCR or the vendored GP
+package begins extracting an archive supplied by a request, model artifact,
+or untrusted file.
+
+### `lru` and `paste` recheck
+
+Ratatui Core was updated from 0.1.0 to 0.1.2 and now uses `lru` 0.18.5. The
+older affected `lru` 0.16.4 remains reachable through the pinned Sindexer's
+Tantivy 0.26.1, which requires exactly that release. The panic-safety
+preconditions remain outside CCR's reachable key and unwind behavior, and the
+exception is extended only to 2026-11-19.
+
+`egobox-gp` 0.37.1 and Linfa PLS still require the unmaintained `paste`
+procedural macro, and no patched `paste` release exists. The build-time-only
+risk decision therefore also expires on 2026-11-19.
+
 ## 2026-09-17 review
 
 ### `rustls` RUSTSEC-2026-0285
@@ -16,26 +54,24 @@ messages across encryption-level boundaries. The locked 0.23.39 release was
 affected; 0.23.45 is the advisory's fixed floor. Reqwest reaches this TLS stack
 through Sindexer. The reviewed Sindexer Git revision remains unchanged.
 
-### Automated exception enforcement
+### Local exception enforcement
 
-The tag-triggered release audit job installs OSV-Scanner 2.6.0 and runs:
+A release operator installs OSV-Scanner 2.6.0 or newer and runs the local
+command in the section above before building or publishing artifacts. The
+explicit lockfile input also works in checkouts beneath hidden directories.
+No GitHub Actions job performs this check.
 
-```bash
-osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
-```
-
-The explicit lockfile input also works in checkouts beneath hidden directories.
-The release build depends on this audit job. OSV complements the existing
-RustSec and cargo-deny checks; neither of those reads `osv-scanner.toml`.
-
-The GitHub push/pull-request CI workflow has been removed. Before submitting
-changes, run the local validation commands:
+GitHub Actions are disabled for this repository. Before submitting changes,
+run the local validation commands:
 
 ```bash
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
-cargo audit --file Cargo.lock
+cargo audit --file Cargo.lock \
+  --ignore RUSTSEC-2026-0367 \
+  --ignore RUSTSEC-2026-0368 \
+  --ignore RUSTSEC-2026-0369
 cargo deny check
 osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
 ```

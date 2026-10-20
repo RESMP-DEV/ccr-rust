@@ -137,6 +137,44 @@ fn validate_provider_credentials(
     );
 }
 
+fn validate_provider_extra_headers(config: &serde_json::Value) -> Result<()> {
+    let Some(providers) = config.get("Providers").and_then(|value| value.as_array()) else {
+        return Ok(());
+    };
+    for (index, provider) in providers.iter().enumerate() {
+        let Some(headers) = provider
+            .get("extra_headers")
+            .and_then(|value| value.as_object())
+        else {
+            continue;
+        };
+        let name = provider
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        for (header, value) in headers {
+            reqwest::header::HeaderName::from_bytes(header.as_bytes()).map_err(|error| {
+                anyhow::anyhow!(
+                    "invalid extra_headers key for provider '{name}' at /Providers/{index}/{header}: {error}"
+                )
+            })?;
+            let header_value = value.as_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid extra_headers value for provider '{name}' at /Providers/{index}/{header}: value must be a string"
+                )
+            })?;
+            header_value
+                .parse::<reqwest::header::HeaderValue>()
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "invalid extra_headers value for provider '{name}' at /Providers/{index}/{header}: {error}"
+                    )
+                })?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_client_credentials(
     config: &serde_json::Value,
     expansion_failures: &[(String, String)],
@@ -563,6 +601,7 @@ impl Config {
         // expands to text containing `$word` must not block startup.
         let allow_unexpanded_credentials = allow_unexpanded_credentials_override();
         validate_provider_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
+        validate_provider_extra_headers(&value)?;
         validate_client_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
         let file: ConfigFile =
             serde_json::from_value(value).context("Failed to parse config JSON")?;
@@ -1267,6 +1306,7 @@ mod credential_guard_tests {
         let mut failures = Vec::new();
         expand_env_references(&mut value, &mut failures, "");
         validate_provider_credentials(&value, &failures, allow_unexpanded)?;
+        validate_provider_extra_headers(&value)?;
         validate_client_credentials(&value, &failures, allow_unexpanded)
     }
 
@@ -1290,6 +1330,13 @@ mod credential_guard_tests {
         let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"api-key": "${CCR_AZURE_API_KEY}"}}], "Router": {"default": "p1,m"}}"#;
         let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
         assert!(error.to_string().contains("header 'api-key'"));
+    }
+
+    #[test]
+    fn invalid_extra_headers_are_rejected_at_config_load() {
+        let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"bad header": "value"}}], "Router": {"default": "p1,m"}}"#;
+        let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
+        assert!(error.to_string().contains("invalid extra_headers key"));
     }
 
     #[test]

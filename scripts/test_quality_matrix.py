@@ -30,12 +30,28 @@ class QualityMatrixTests(unittest.TestCase):
             names,
             [
                 "format",
+                "python-format",
+                "python-lint",
+                "python-typecheck",
+                "rust-sloc-ratchet",
+                "shellcheck",
                 "clippy",
                 "rust-tests",
                 "no-default-features",
+                "debug-binary",
                 "python-helpers",
                 "vendored-gp-routing",
             ],
+        )
+
+    def test_python_runtime_uses_the_checkout_debug_binary(self) -> None:
+        checks = quality.selected_checks(fast=False, coverage=False, mutation=False)
+        by_name = {check.name: check for check in checks}
+        self.assertIn("debug-binary", by_name)
+        self.assertIn("python-helpers", by_name)
+        self.assertEqual(
+            dict(by_name["python-helpers"].env).get("CCR_TEST_BINARY"),
+            str(quality.ROOT / "target" / "debug" / "ccr-rust"),
         )
 
     def test_optional_modes_replace_or_add_expensive_checks(self) -> None:

@@ -548,8 +548,7 @@ def plan_restore(snapshot: Path) -> dict[str, Any]:
     for name, record in sorted(captured.items()):
         symlink = False
         retired = (
-            name.startswith("local-bin/")
-            or name.startswith("local-bin-targets/")
+            name.startswith(("local-bin/", "local-bin-targets/"))
         ) and name.split("/", 1)[1] in RETIRED_BIN_FILES
         if retired:
             # A retired wrapper captured by an older snapshot, as a regular file

@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Raised the repository quality standard and made it enforceable. The
+  offline dispatcher now also runs Ruff format and lint over the shipped
+  Python trees, `ty` type checks the helper scripts, and ShellCheck covers
+  the tracked shell entry points; `ruff.toml` is the single source of truth
+  for the Python rules. Dependency advisories are documented as a release
+  gate with their own commands, since they need advisory-database access.
+- Removed the GitHub Actions release workflow. The organization's Actions
+  billing is intentionally unresolved, so CI and verification run locally
+  and the release commands are documented in
+  `docs/dependency-security.md`.
+- Repaired the defects the wider checks exposed: unquoted shell expansion in
+  the stress-test orchestrator, an unused `cleanup` handler warning, blind
+  exception handling and formatting drift in the benchmark and provider
+  validation helpers, missing explicit `check=False` on subprocess calls, and
+  three type errors in the helper test suite.
+- Updated the locked dependency graph to `rustls` 0.23.46 and `quinn-proto`
+  0.11.19, clearing the RUSTSEC-2026-0346 through RUSTSEC-2026-0349 and
+  RUSTSEC-2026-0338 through RUSTSEC-2026-0342 advisories.
+
 - Removed the Qwen token-plan lane from every governed fallback chain and
   from the main/auth private seat, because the plan's monthly utilization
   window was exhausted and each dispatch paid a guaranteed refusal before a

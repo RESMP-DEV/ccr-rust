@@ -21,7 +21,7 @@ use futures::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::metrics::{
-    increment_active_streams, record_stream_backpressure, record_throughput, record_ttft,
+    record_stream_backpressure, record_throughput, record_ttft, ActiveStreamGuard,
 };
 
 async fn send_stream_timeout_error(
@@ -57,12 +57,11 @@ pub async fn stream_response_translated(
     model_name: &str,
     chain: TransformerChain,
 ) -> Response {
-    increment_active_streams(1);
-
     let _model_name = model_name.to_string();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(buffer_size);
 
     tokio::spawn(async move {
+        let _active_stream_guard = ActiveStreamGuard::new();
         let mut stream = byte_stream;
         let mut decoder = SseFrameDecoder::new();
         let mut translation_state = StreamTranslationState::new();
@@ -87,6 +86,7 @@ pub async fn stream_response_translated(
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_token_time: Option<std::time::Instant> = None;
         let mut ended_with_timeout = false;
+        let mut saw_openai_terminal = false;
         let mut upstream_completed_cleanly = true;
 
         loop {
@@ -104,6 +104,7 @@ pub async fn stream_response_translated(
                 }
                 chunk = stream.next() => {
                     let Some(chunk) = chunk else {
+                        upstream_completed_cleanly &= saw_openai_terminal;
                         break;
                     };
                     match chunk {
@@ -111,7 +112,11 @@ pub async fn stream_response_translated(
                             let mut forwarded = false;
                             for frame in decoder.push(&bytes) {
                                 let json_str = frame.data.trim();
-                                if json_str == "[DONE]" || json_str.is_empty() {
+                                if json_str == "[DONE]" {
+                                    saw_openai_terminal = true;
+                                    continue;
+                                }
+                                if json_str.is_empty() {
                                     continue;
                                 }
 
@@ -140,6 +145,7 @@ pub async fn stream_response_translated(
                                     let was_first = translation_state.is_first;
                                     let events =
                                         translate_stream_chunk_to_anthropic(&chunk, &mut translation_state);
+                                    saw_openai_terminal |= translation_state.finish_reason.is_some();
                                     if was_first {
                                         first_token_time = Some(std::time::Instant::now());
                                     }
@@ -228,7 +234,6 @@ pub async fn stream_response_translated(
         }
 
         if ended_with_timeout {
-            increment_active_streams(-1);
             return;
         }
 
@@ -379,8 +384,6 @@ pub async fn stream_response_translated(
                 }
             }
         }
-
-        increment_active_streams(-1);
     });
 
     let body = Body::from_stream(ReceiverStream::new(rx));
@@ -404,14 +407,13 @@ pub async fn stream_anthropic_response_with_tracking(
     verify_ctx: StreamVerifyCtx,
     chain: TransformerChain,
 ) -> Response {
-    increment_active_streams(1);
-
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(buffer_size);
     let tier_name = verify_ctx.tier_name.clone();
     let local_estimate = verify_ctx.local_estimate;
     let pricing = verify_ctx.pricing;
 
     tokio::spawn(async move {
+        let _active_stream_guard = ActiveStreamGuard::new();
         let mut stream = byte_stream;
         let mut decoder = SseFrameDecoder::new();
         let mut input_tokens: u64 = 0;
@@ -426,6 +428,7 @@ pub async fn stream_anthropic_response_with_tracking(
         let mut first_token_time: Option<std::time::Instant> = None;
         let mut last_token_time: Option<std::time::Instant> = None;
         let mut ended_with_timeout = false;
+        let mut saw_message_stop = false;
         let mut upstream_completed_cleanly = true;
 
         loop {
@@ -443,6 +446,7 @@ pub async fn stream_anthropic_response_with_tracking(
                 }
                 chunk = stream.next() => {
                     let Some(chunk) = chunk else {
+                        upstream_completed_cleanly &= saw_message_stop;
                         break;
                     };
                     match chunk {
@@ -453,6 +457,19 @@ pub async fn stream_anthropic_response_with_tracking(
                                 if json_str == "[DONE]" || json_str.is_empty() {
                                     continue;
                                 }
+
+                                let event_kind = serde_json::from_str::<serde_json::Value>(
+                                    json_str,
+                                )
+                                .ok()
+                                .and_then(|event| {
+                                    event
+                                        .get("type")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_string)
+                                });
+                                saw_message_stop |= frame.event.as_deref() == Some("message_stop")
+                                    || event_kind.as_deref() == Some("message_stop");
 
                                 // Parse Anthropic SSE events to extract usage.
                                 // message_start reports usage under
@@ -565,7 +582,6 @@ pub async fn stream_anthropic_response_with_tracking(
         }
 
         if ended_with_timeout {
-            increment_active_streams(-1);
             return;
         }
 
@@ -665,8 +681,6 @@ pub async fn stream_anthropic_response_with_tracking(
                 }
             }
         }
-
-        increment_active_streams(-1);
     });
 
     let body = Body::from_stream(ReceiverStream::new(rx));
@@ -992,6 +1006,130 @@ mod tests {
         assert_eq!(usage["output_tokens"], 7);
         assert_eq!(usage["cache_read_input_tokens"], 5);
         assert_eq!(usage["reasoning_tokens"], 3);
+    }
+
+    fn tracked_context(
+        tracker: &std::sync::Arc<crate::ratelimit::RateLimitTracker>,
+    ) -> (
+        crate::sse::StreamVerifyCtx,
+        std::sync::Arc<crate::admission::AdmissionTracker>,
+    ) {
+        let admission = std::sync::Arc::new(crate::admission::AdmissionTracker::new());
+        let permit = admission
+            .acquire("provider,model", Some(8))
+            .expect("admission fixture");
+        let context = crate::sse::StreamVerifyCtx {
+            tier_name: "provider".to_string(),
+            ratelimit_key: "provider,model".to_string(),
+            ratelimit_generation: tracker.generation("provider,model"),
+            local_estimate: 1,
+            ratelimit_tracker: Some(tracker.clone()),
+            admission_permit: Some(permit),
+            rate_limit_info: None,
+            stream_start: std::time::Instant::now(),
+            stream_idle_timeout: std::time::Duration::from_secs(5),
+            pricing: None,
+        };
+        (context, admission)
+    }
+
+    #[tokio::test]
+    async fn truncated_openai_stream_is_not_a_route_success() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        tracker.record_429("provider,model", Some(std::time::Duration::from_secs(30)));
+        let (context, _admission) = tracked_context(&tracker);
+        let payload = r#"data: {"id":"partial","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}
+"#;
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response = stream_response_translated(
+            byte_stream,
+            8,
+            Some(context),
+            "model",
+            TransformerChain::new(),
+        )
+        .await;
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
+
+        assert!(tracker.has_backoff("provider,model"));
+    }
+
+    #[tokio::test]
+    async fn terminal_openai_stream_clears_route_backoff() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        tracker.record_429("provider,model", Some(std::time::Duration::from_secs(30)));
+        let (context, _admission) = tracked_context(&tracker);
+        let payload = r#"data: {"id":"done","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response = stream_response_translated(
+            byte_stream,
+            8,
+            Some(context),
+            "model",
+            TransformerChain::new(),
+        )
+        .await;
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
+
+        assert!(!tracker.has_backoff("provider,model"));
+    }
+
+    #[tokio::test]
+    async fn truncated_anthropic_stream_is_not_a_route_success() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        tracker.record_429("provider,model", Some(std::time::Duration::from_secs(30)));
+        let (context, _admission) = tracked_context(&tracker);
+        let payload = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n";
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response = stream_anthropic_response_with_tracking(
+            byte_stream,
+            8,
+            context,
+            TransformerChain::new(),
+        )
+        .await;
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
+
+        assert!(tracker.has_backoff("provider,model"));
+    }
+
+    #[tokio::test]
+    async fn terminal_anthropic_stream_clears_route_backoff() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        tracker.record_429("provider,model", Some(std::time::Duration::from_secs(30)));
+        let (context, _admission) = tracked_context(&tracker);
+        let payload = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response = stream_anthropic_response_with_tracking(
+            byte_stream,
+            8,
+            context,
+            TransformerChain::new(),
+        )
+        .await;
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
+
+        assert!(!tracker.has_backoff("provider,model"));
     }
 
     #[tokio::test]

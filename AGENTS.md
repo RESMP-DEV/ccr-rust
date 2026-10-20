@@ -70,7 +70,7 @@ Important files and areas:
 - `src/router/` — HTTP handlers, dispatch, request translation, response translation, and streaming.
 - `src/gp_router.rs` — request-aware GP reranking and credible-set cost ordering.
 - `src/frontend/` — client-format normalization.
-- `src/transform/` and `src/transformer.rs` — transformer implementations and registry plumbing.
+- `src/transform/` and `src/transformer/` — transformer implementations and registry plumbing.
 - `src/metrics/` — Prometheus metrics and persistence.
 - `src/mcp/` — MCP server and tool-catalog handling.
 - `src/ratelimit.rs` — provider backoff logic.

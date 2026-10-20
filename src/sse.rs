@@ -62,6 +62,11 @@ pub struct SseFrameDecoder {
     buf: Vec<u8>,
 }
 
+/// Maximum bytes retained while waiting for one SSE frame boundary. This
+/// matches the first-event peek limit and prevents a provider that emits an
+/// unterminated frame from growing router memory until stream idle timeout.
+const MAX_PENDING_BYTES: usize = 1024 * 1024;
+
 impl SseFrameDecoder {
     pub fn new() -> Self {
         Self::default()
@@ -71,6 +76,16 @@ impl SseFrameDecoder {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SseFrame> {
         if !chunk.is_empty() {
             self.buf.extend_from_slice(chunk);
+        }
+        if self.buf.len() > MAX_PENDING_BYTES {
+            let discarded = self.buf.len();
+            self.buf.clear();
+            tracing::warn!(
+                discarded_bytes = discarded,
+                limit_bytes = MAX_PENDING_BYTES,
+                "Discarding malformed SSE frame with no boundary"
+            );
+            return Vec::new();
         }
 
         let mut frames = Vec::new();
@@ -88,6 +103,10 @@ impl SseFrameDecoder {
         }
 
         frames
+    }
+
+    pub fn pending_bytes(&self) -> usize {
+        self.buf.len()
     }
 }
 
@@ -174,6 +193,15 @@ mod tests {
     fn bare_carriage_return_bounds_a_line_without_entering_its_value() {
         assert_eq!(read_next_line(b"first\rsecond", 0), Some((5, 6)));
         assert_eq!(read_next_line(b"first\r", 0), None);
+    }
+
+    #[test]
+    fn malformed_unterminated_frame_is_bounded() {
+        let mut decoder = SseFrameDecoder::new();
+
+        let malformed = vec![b'x'; MAX_PENDING_BYTES + 1];
+        assert!(decoder.push(&malformed).is_empty());
+        assert_eq!(decoder.pending_bytes(), 0);
     }
 
     #[test]

@@ -69,6 +69,40 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
     checks = [
         Check("format", ("cargo", "fmt", "--check")),
         Check(
+            "python-format",
+            (
+                "ruff",
+                "format",
+                "--check",
+                "benchmarks",
+                "scripts",
+                "tests/provider_validation",
+            ),
+        ),
+        Check(
+            "python-lint",
+            (
+                "ruff",
+                "check",
+                "benchmarks",
+                "scripts",
+                "tests/provider_validation",
+            ),
+        ),
+        Check("python-typecheck", ("ty", "check", "scripts")),
+        Check(
+            "rust-sloc-ratchet",
+            (sys.executable, "scripts/check_sloc.py", "--json"),
+        ),
+        Check(
+            "shellcheck",
+            (
+                "shellcheck",
+                "benchmarks/run_stress_test.sh",
+                "examples/smoke-test.sh",
+            ),
+        ),
+        Check(
             "clippy",
             (
                 "cargo",
@@ -122,6 +156,10 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
                 ("cargo", "check", "--no-default-features", "--locked"),
             ),
             Check(
+                "debug-binary",
+                ("cargo", "build", "--all-features", "--locked"),
+            ),
+            Check(
                 "python-helpers",
                 (
                     sys.executable,
@@ -133,6 +171,7 @@ def selected_checks(*, fast: bool, coverage: bool, mutation: bool) -> tuple[Chec
                     "-p",
                     "test_*.py",
                 ),
+                env=(("CCR_TEST_BINARY", str(ROOT / "target" / "debug" / "ccr-rust")),),
             ),
             Check(
                 "vendored-gp-routing",

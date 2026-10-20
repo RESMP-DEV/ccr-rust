@@ -1,0 +1,10 @@
+target-version = "py310"
+
+[lint.per-file-ignores]
+# Benchmark polling is deliberately best-effort: a failed metrics sample must
+# never abort the active stress run.
+"benchmarks/stress_sse_streams.py" = ["BLE001", "S110"]
+# Provider validation is a diagnostic matrix. It reports each optional API
+# experiment separately instead of allowing one provider failure to hide the
+# remaining contract differences.
+"tests/provider_validation/validate_apis.py" = ["BLE001"]

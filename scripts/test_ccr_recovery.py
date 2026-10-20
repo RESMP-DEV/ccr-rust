@@ -135,11 +135,8 @@ class RecoveryTests(unittest.TestCase):
         )
 
     def test_sanitize_fails_closed_on_credential_shaped_content(self) -> None:
-        with mock.patch.object(
-            recovery,
-            "CONFIG_FILES",
-            (*recovery.CONFIG_FILES, "serve.py"),
-        ):
+        config_files: list[str] = [*recovery.CONFIG_FILES, "serve.py"]
+        with mock.patch.object(recovery, "CONFIG_FILES", config_files):
             (self.config_root / "serve.py").write_text(
                 'API_KEY = "abcdefghijklmnopqrstuvwxyz"\n', encoding="utf-8"
             )
@@ -191,9 +188,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("local-bin-targets/ccr-fallback-policy", captured)
 
     def test_snapshot_captures_dangling_symlink(self) -> None:
-        with mock.patch.object(
-            recovery, "BIN_FILES", (*recovery.BIN_FILES, "dangling")
-        ):
+        bin_files: list[str] = [*recovery.BIN_FILES, "dangling"]
+        with mock.patch.object(recovery, "BIN_FILES", bin_files):
             (self.local_bin / "dangling").symlink_to(self.base / "missing-target")
             result = recovery.snapshot(label="test", root=self.snapshots)
         self.assertIn("local-bin/dangling", result["captured"])
@@ -399,14 +395,18 @@ class RecoveryTests(unittest.TestCase):
     def test_retired_claude_ccr_is_not_restored(self) -> None:
         """A pre-retirement snapshot must not put the old launcher back."""
         retired = self.local_bin / "claude-ccr"
-        retired.write_text("#!/bin/bash\nexport ANTHROPIC_BASE_URL=http://127.0.0.1:3456\n")
+        retired.write_text(
+            "#!/bin/bash\nexport ANTHROPIC_BASE_URL=http://127.0.0.1:3456\n"
+        )
         os.chmod(retired, 0o700)
 
         # Capture the surface while the pre-retirement launcher is present.
         with mock.patch.object(
             recovery, "BIN_FILES", ("ccr-local", "ccr-fallback-policy", "claude-ccr")
         ):
-            snapshot_result = recovery.snapshot(label="pre-retirement", root=self.snapshots)
+            snapshot_result = recovery.snapshot(
+                label="pre-retirement", root=self.snapshots
+            )
         snapshot = self.snapshots / snapshot_result["snapshot"]
         self.assertIn("local-bin/claude-ccr", snapshot_result["captured"])
 
@@ -431,7 +431,9 @@ class RecoveryTests(unittest.TestCase):
         with mock.patch.object(
             recovery, "BIN_FILES", ("ccr-local", "ccr-fallback-policy", "claude-ccr")
         ):
-            snapshot_result = recovery.snapshot(label="pre-retirement", root=self.snapshots)
+            snapshot_result = recovery.snapshot(
+                label="pre-retirement", root=self.snapshots
+            )
         snapshot = self.snapshots / snapshot_result["snapshot"]
         self.assertIn("local-bin/claude-ccr", snapshot_result["captured"])
 
