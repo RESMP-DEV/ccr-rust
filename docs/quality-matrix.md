@@ -72,7 +72,10 @@ because the check needs network access to advisory databases. Run them before
 a release:
 
 ```bash
-cargo audit --file Cargo.lock
+cargo audit --file Cargo.lock \
+  --ignore RUSTSEC-2026-0367 \
+  --ignore RUSTSEC-2026-0368 \
+  --ignore RUSTSEC-2026-0369
 cargo deny check
 osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
 ```

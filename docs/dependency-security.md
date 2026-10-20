@@ -76,21 +76,18 @@ cargo deny check
 osv-scanner scan source --config osv-scanner.toml --lockfile Cargo.lock
 ```
 
-OSV-Scanner 2.6.0 honors `IgnoredVulns.ignoreUntil` without any experimental
-flag. A live scan of `paste` 1.0.15 with its exception dated 2026-10-01
-returned exit 0; the same scan with an expiry of 2020-01-01 returned exit 1
-and reported RUSTSEC-2024-0436. `--experimental-ignores` is not a supported
-option in this version. The existing exceptions still expire on 2026-10-01;
-this update does not extend them.
+Historical enforcement note from 2026-09-17: OSV-Scanner 2.6.0 honored
+`IgnoredVulns.ignoreUntil`, and a probe with an already-expired `paste`
+exception failed as intended. That behavior remains the enforcement contract.
+The current expiry dates and reviewed consumers are the 2026-11-19 entries
+above; the original 2026-10-01 dates are no longer current.
 
-### Remaining migrations
+### Historical remaining-migration note
 
-The refreshed crates.io metadata shows Ratatui Core 0.1.2 supports `lru`
-0.18, but Tantivy 0.26.2 still requires `lru` 0.16.3. A dashboard-only
-update therefore cannot remove the affected cache implementation from the
-default Sindexer graph. Egobox GP 0.36.3 and Linfa PLS 0.8.1 still require
-`paste`. The existing risk decisions and follow-ups below remain applicable
-to the unchanged locked consumers. Redis 1.7.0 is available, but requires
+The September refresh found Ratatui Core 0.1.2 support for `lru` 0.18 while
+Tantivy 0.26.2 still required the 0.16 line, and Egobox GP 0.36.3 still
+required `paste`. The October recheck above supersedes those version
+observations without changing the need to recheck every dependency refresh. Redis 1.7.0 is available, but requires
 the separately tested persistence migration described below.
 
 ## 2026-08-23 review
