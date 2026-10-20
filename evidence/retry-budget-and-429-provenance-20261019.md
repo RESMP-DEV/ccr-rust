@@ -35,8 +35,9 @@ a guaranteed-refusal round trip before reaching a tier that worked.
   attempt.
 - `src/router/mod.rs`: the synthesized terminal 429 now carries an
   `error.details` array with each rate-limited full `provider,model` route
-  and its retry hint, plus an `x-ccr-rate-limited-tiers` header. The
-  historical `x-ccr-tier` provider-name contract is unchanged.
+  and its retry hint, plus an `x-ccr-rate-limited-tiers` header.
+  `x-ccr-tier` keeps dispatch's configured `tier_name` display-name
+  contract.
 - `docs/configuration.md`, `docs/failover_architecture.md`, `CHANGELOG.md`:
   the retry-budget contract and the terminal-response shape are documented.
 - The Qwen lane was removed from every governed chain earlier the same day
@@ -52,10 +53,13 @@ All in `tests/test_failover_controls.rs`, against local mock upstreams only. The
   exhaustion the cascade completes once across both tiers with no extra
   sweeps, so the exemption cannot become unbounded amplification.
 - `terminal_rate_limit_response_reports_tier_provenance`: the terminal 429
-  names both rate-limited routes in the body and the header, the legacy
-  `x-ccr-tier` value stays the provider name, and a second request issued
-  while both routes are in local backoff reports the same routes with
-  non-null retry hints without any further upstream hits.
+  names both rate-limited routes in the body and the header, `x-ccr-tier`
+  carries the last rate-limited route's configured display name, and a
+  second request issued while both routes are in local backoff reports the
+  same routes with non-null retry hints without any further upstream hits.
+- `terminal_rate_limit_keeps_the_configured_tier_display_name`: a provider
+  with a custom `tier_name` keeps that value in `x-ccr-tier`, which a
+  provider-prefix implementation would break.
 - `all_admission_deferred_requests_re_sweep_until_permit_release`: when one
   request holds the only admission permit, a second request stays held and
   succeeds after the permit releases. This disproves the review worker's
@@ -76,6 +80,13 @@ All in `tests/test_failover_controls.rs`, against local mock upstreams only. The
 - Independent read-only review worker: `build/reports/reviews/retry-budget-provenance.md`.
   It found no blocking issue and raised the sweep-amplification concern that
   the second regression above now covers.
+- Configured review services on PR #65. Kilo Code Review reported no issues
+  and recommended merge. CodeRabbit raised three minor findings, all accepted
+  and fixed: the 503 description overstated its contents, this receipt's test
+  count and `x-ccr-tier` claim did not match the test, and the terminal
+  response had replaced the configured `tier_name` display name with the
+  provider prefix, which would break any provider with a custom name. The
+  display-name regression is now pinned by a dedicated test.
 
 ## Final quality receipt
 

@@ -399,6 +399,68 @@ async fn exhausted_retry_budget_completes_the_cascade_without_extra_sweeps() {
     assert_eq!(second_hits.load(Ordering::SeqCst), 1);
 }
 
+/// A provider with a configured `tier_name` must keep that display name in
+/// `x-ccr-tier`. This is the contract dispatch already uses, and it is what a
+/// provider-prefix implementation would silently break.
+#[tokio::test]
+async fn terminal_rate_limit_keeps_the_configured_tier_display_name() {
+    if skip_if_localhost_bind_unavailable("terminal_rate_limit_tier_display_name") {
+        return;
+    }
+    let (url, hits) = spawn_fixed_upstream(429, json!({"error": {"message": "limited"}})).await;
+    let config = load_config(&json!({
+        "Providers": [{
+            "name": "primary",
+            "api_base_url": url,
+            "api_key": "k",
+            "models": ["m"],
+            "tier_name": "glm-fast"
+        }],
+        "Router": {
+            "default": "primary,m",
+            "tiers": ["primary,m"],
+            "tierRetries": {"primary": {"max_retries": 0}}
+        },
+        "API_TIMEOUT_MS": 5000
+    }));
+    let app = build_app(config);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "primary,m",
+                        "messages": [user_message()],
+                        "max_tokens": 16
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ccr-tier")
+            .and_then(|value| value.to_str().ok()),
+        Some("glm-fast")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ccr-rate-limited-tiers")
+            .and_then(|value| value.to_str().ok()),
+        Some("primary,m")
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
 /// A terminal all-rate-limited response must identify every route that was
 /// tried or skipped, not only the final route.
 #[tokio::test]
@@ -445,6 +507,15 @@ async fn terminal_rate_limit_response_reports_tier_provenance() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    // The established header carries the last rate-limited tier's configured
+    // display name, not the provider prefix or the full route.
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ccr-tier")
+            .and_then(|value| value.to_str().ok()),
+        Some("second")
+    );
     assert_eq!(
         response
             .headers()

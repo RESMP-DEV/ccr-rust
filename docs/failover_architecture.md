@@ -96,8 +96,8 @@ Verified against the tree at the revision above.
 - Terminal response: synthesized 429 (with `retry-after`, `x-ccr-tier`, and
   `x-ccr-rate-limited-tiers`) only when the final sweep saw exclusively rate
   limiting; its error body carries a `details` array with each rate-limited
-  route and retry hint. Other exhausted cascades return 503 with a per-tier
-  attempt summary.
+  route and retry hint. Other exhausted cascades return 503 with an
+  aggregate message carrying tier, attempt, and sweep counts.
 
 ### Failure classification (`src/router/dispatch.rs`)
 

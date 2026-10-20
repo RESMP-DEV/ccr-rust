@@ -373,28 +373,35 @@ fn strip_search_tags(request: &mut AnthropicRequest) {
     }
 }
 
+/// One route observed rate-limited by this request, with the configured
+/// display name used by `x-ccr-tier` and the route's own retry hint.
+type RateLimitedRoute = (String, String, Option<std::time::Duration>);
+
 /// Record that one route was rate-limited, keeping the first observation of
 /// each full `provider,model` route. The terminal 429 reports this list, so a
 /// client-visible failure names every exhausted candidate without conflating
-/// sibling models on one provider.
+/// sibling models on one provider. The configured `tier_name` travels with the
+/// route because that display name, not the provider prefix, is the documented
+/// `x-ccr-tier` contract.
 fn note_rate_limited_tier(
-    tiers: &mut Vec<(String, Option<std::time::Duration>)>,
+    tiers: &mut Vec<RateLimitedRoute>,
     route: &str,
+    tier_name: &str,
     retry_after: Option<std::time::Duration>,
 ) {
-    if tiers.iter().any(|(tier, _)| tier == route) {
+    if tiers.iter().any(|(tier, _, _)| tier == route) {
         return;
     }
-    tiers.push((route.to_string(), retry_after));
+    tiers.push((route.to_string(), tier_name.to_string(), retry_after));
 }
 
 fn rate_limit_exhausted_response(
     retry_after: Option<std::time::Duration>,
-    rate_limited_tiers: &[(String, Option<std::time::Duration>)],
+    rate_limited_tiers: &[RateLimitedRoute],
 ) -> Response {
     let details: Vec<_> = rate_limited_tiers
         .iter()
-        .map(|(tier, tier_retry_after)| {
+        .map(|(tier, _, tier_retry_after)| {
             serde_json::json!({
                 "tier": tier,
                 "reason": "rate_limited",
@@ -417,17 +424,17 @@ fn rate_limit_exhausted_response(
             response.headers_mut().insert("retry-after", value);
         }
     }
-    if let Some((tier_name, _)) = rate_limited_tiers.last() {
-        // Preserve the historical provider-name contract; the dedicated
-        // provenance header below carries the unambiguous full route.
-        let provider = tier_name.split(',').next().unwrap_or(tier_name);
-        if let Ok(value) = provider.parse() {
+    // `x-ccr-tier` carries the same configured display name dispatch uses, so
+    // a provider with a custom `tier_name` keeps its established value. The
+    // dedicated provenance header below carries the unambiguous full route.
+    if let Some((_, tier_name, _)) = rate_limited_tiers.last() {
+        if let Ok(value) = tier_name.parse() {
             response.headers_mut().insert("x-ccr-tier", value);
         }
     }
     let provenance = rate_limited_tiers
         .iter()
-        .map(|(tier, _)| tier.as_str())
+        .map(|(route, _, _)| route.as_str())
         .collect::<Vec<_>>()
         .join(",");
     if let Ok(value) = provenance.parse::<axum::http::HeaderValue>() {
@@ -583,7 +590,7 @@ pub async fn handle_messages(
     // unavailable. The synthesized terminal 429 reports this list so a
     // client-visible failure explains which candidates were exhausted and
     // why, instead of a bare "all candidates rate limited".
-    let mut rate_limited_tiers: Vec<(String, Option<std::time::Duration>)> = Vec::new();
+    let mut rate_limited_tiers: Vec<RateLimitedRoute> = Vec::new();
 
     // Serialize messages to JSON values once for pre-request token audit
     let msg_values: Vec<serde_json::Value> = request
@@ -677,6 +684,7 @@ pub async fn handle_messages(
                 note_rate_limited_tier(
                     &mut rate_limited_tiers,
                     tier,
+                    tier_name,
                     state.ratelimit_tracker.backoff_remaining(tier.as_str()),
                 );
                 // Carry the tracker's live backoff window into this sweep's
@@ -822,7 +830,12 @@ pub async fn handle_messages(
                             crate::metrics::record_rate_limit_hit(tier);
                             crate::metrics::record_rate_limit_backoff(tier);
                             saw_rate_limit = true;
-                            note_rate_limited_tier(&mut rate_limited_tiers, tier, retry_after);
+                            note_rate_limited_tier(
+                                &mut rate_limited_tiers,
+                                tier,
+                                tier_name,
+                                retry_after,
+                            );
                             retry_after_hint = match (retry_after_hint, retry_after) {
                                 (Some(current), Some(candidate)) => Some(current.max(candidate)),
                                 (None, some) => some,
@@ -893,7 +906,12 @@ pub async fn handle_messages(
                             gp_router.record_attempt(plan, tier, attempt, None, config);
                         }
                         saw_rate_limit = true;
-                        note_rate_limited_tier(&mut rate_limited_tiers, tier, retry_after);
+                        note_rate_limited_tier(
+                            &mut rate_limited_tiers,
+                            tier,
+                            tier_name,
+                            retry_after,
+                        );
                         retry_after_hint = match (retry_after_hint, retry_after) {
                             (Some(current), Some(candidate)) => Some(current.max(candidate)),
                             (None, some) => some,
