@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Tightened the delegation default from a broad/size heuristic to decomposition
+  first: enumerate every task piece before work and send every piece that can
+  carry its own bounded scope, ownership, acceptance check, and finish line to
+  a worker, including a one-piece task. The parent may read only what the
+  briefs need and retains conversation, cross-piece judgment, credentials and
+  other irreversible actions, live-service coordination, tools unreachable by
+  worker infrastructure, and final integration; size, file count, elapsed
+  time, and effort already spent are not delegation criteria.
 - Made bounded worker delegation the documented default for broad or
   multi-file audit, research, implementation, and test diagnosis. The worker
   guide now gives a parent-side delegation trigger, a compact XML brief

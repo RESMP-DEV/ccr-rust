@@ -142,6 +142,43 @@ was rate-limited until the next included window, so #6 was merged with the
 local deterministic gate and no unresolved review threads. No branch protection
 was available on this private repository.
 
+## Amendment: decomposition-first delegation rule (same day)
+
+User direction: a model given a new task should always see how many pieces it
+can cleanly decompose into verifiable results, and everything that decomposes
+that way should be sent off. The earlier rule used a size heuristic (broad
+search, multiple files, roughly five parent tool calls or five minutes), which
+left the delegation decision to judgment about effort rather than to the
+structure of the task.
+
+The global rule in `~/AGENTS.md` was replaced with a decomposition-first
+contract, propagated by `agent-instructions-sync --sync` to the Codex and ZCode
+copies. It requires enumerating a task's pieces before doing the work, reading
+only what the briefs themselves need, and judging each piece by one question:
+can it be stated as a bounded work order with its own acceptance evidence? Every
+piece that passes goes to a worker. Size, file count, elapsed time, and effort
+already spent are explicitly excluded as criteria.
+
+Two bounded read-only reviews ran against the change. Run
+`20261020-082658-x3loiy1v` (thread `01a159ec-4496-7c73-b93b-9a031212368f`,
+requested GLM Flash route, 305.678 seconds, exit 0) returned
+`VERDICT: REVISE` and found four semantic gaps: brief-writing reads were not
+carved out from "before touching the work", "parent-only tools" was
+self-referential, a single-delegable-piece task was ambiguous, and sunk parent
+effort was not named as a banned criterion. All four are fixed in the current
+wording. Its private report is
+`build/reports/delegation-decomposition/rule-review.txt` (SHA-256
+`32c82acb93e67d7012616f7c657a274080fc486a6d4f886c98b0661166830b60`).
+
+Run `20261020-082709-jctayew5` (thread
+`01a159ec-6e50-75e0-b0e9-2486f209ec3b`, 493.621 seconds, exit 0) produced no
+usable final report: it spent its budget tracking concurrent edits and
+self-referenced its own run. Its receipt is recorded as an incomplete review
+and is not treated as evidence. Its intermediate trace did contribute one
+verified finding, that the repository guide and runbook had not yet carried
+the pre-launch split, launch-before-parent-work ordering, and the
+do-not-collapse clauses; those were added.
+
 ## Non-claims
 
 - This does not prove future model obedience to the instruction; it changes
@@ -155,3 +192,25 @@ was available on this private repository.
 - Worker receipts still report requested routes; they do not independently
   prove the upstream served route. Router metrics/logs remain the routing
   evidence.
+
+## Amendment: decomposition-first refinement (same day)
+
+User direction: a model receiving a new task should always ask how many
+pieces it can cleanly decompose into verifiable results, and every
+decomposable piece should be sent off. The canonical global rule was changed
+from a broad-work/five-tool-call/five-minute heuristic to an enumeration
+requirement: before touching the work, enumerate the pieces; every piece with
+its own bounded scope, ownership, acceptance check, and finish line goes to a
+worker. The parent keeps only conversation, cross-piece judgment, credentials
+and irreversible actions, live-service coordination, parent-only tools, and
+final integration. `agent-instructions-sync --sync` propagated the core block
+to Codex and ZCode with parity checks passing. A pre-change backup is in
+`~/.cache/alphaheng/instruction-backups/delegation-decomposition-20261020/`.
+
+The repository guide, worker runbook, focused documentation test, and
+changelog were updated to enforce the same enumeration-first contract. The
+first relaunch attempt correctly failed before model dispatch because its
+output parent did not exist; after creating that private directory, two
+read-only GLM workers reviewed rule semantics and repository propagation.
+Their completion receipts are
+`20261020-082658-x3loiy1v` and `20261020-082709-jctayew5`.
