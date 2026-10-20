@@ -96,27 +96,25 @@ ids that the router otherwise silently dispatches to `Router.default` (a
 requested `MiniMax-M3.1-Flash-Preview` was measured serving `zai,glm-5.3`
 before the alias existed). An operator alias entry is never overridden, and a
 model name offered by two providers stays unaliased rather than guessing.
-The approved main-machine shared chain is GLM-5.3-Flash,
-`qwen,qwen3.8-flash`, MiniMax `MiniMax-M3.1-Flash`, then
-`qwen,deepseek-v4.1-flash-1017` and finally the undated
-`qwen,deepseek-v4.1-flash`. Main/auth additionally insert
-`qwen,qwen3.8-max` immediately after their GLM-5.3 primary. The Qwen Token
-Plan tier gives worker volume a separate credit pool and keeps GLM-5.3 out of the
-worker fallback sequence. Both GLM tiers were cordoned 2026-10-18 after the
-Z.AI monthly tool quota reported 4000/4000 used, then restored the same day
-by user direction once that premise was disproved: Z.AI meters usage without
-distinguishing model sessions from tool use, the router kept completing GLM
-calls (by the thousand) after the probe read zero, as did the ZCode app on
-the same plan, and the observed completion limits are the rolling 5-hour
-prompt window and concurrency caps, so the cordon's guaranteed-refusal
-rationale did not apply. The main listener's chain is GLM-5.3, Qwen Max,
-GLM-5.3-Flash, Qwen Flash, MiniMax, then Qwen DeepSeek, so interactive Codex
-and Claude sessions always start on the GLM-5.3 judgment seat and reach the
-stronger Qwen seat before volume fallbacks. The former FlashX head remains removed after
-its coding-plan trial expired, FlashX is also absent from the Z.AI provider
-catalog, and the native GMI and DeepSeek providers stay registered but
-unrouted. MiniMax canonicalizes M3-family and legacy preview requests to the
-official `MiniMax-M3.1-Flash` ID.
+The approved main-machine shared chain is GLM-5.3-Flash followed by
+MiniMax `MiniMax-M3.1-Flash`, with no private consumer seat. GLM-5.3 stays the
+main and auth primary and is not a worker fallback. Both GLM tiers were
+cordoned 2026-10-18 after the Z.AI monthly tool quota reported 4000/4000
+used, then restored the same day by user direction once that premise was
+disproved: Z.AI meters usage without distinguishing model sessions from tool
+use, the router kept completing GLM calls (by the thousand) after the probe
+read zero, as did the ZCode app on the same plan, and the observed completion
+limits are the rolling 5-hour prompt window and concurrency caps, so the
+cordon's guaranteed-refusal rationale did not apply. The Qwen Token Plan lane
+was removed from the chain, and from the main/auth `qwen,qwen3.8-max` seat,
+on 2026-10-19: its monthly utilization window was exhausted, so every dispatch
+paid one guaranteed refusal before reaching a tier that could still serve. An
+exhausted window is not something routing can optimize around; the lane is
+skipped until it recovers. Qwen, along with the native GMI and DeepSeek
+providers and the former FlashX head, stays registered but unrouted, so a
+dated re-approval restores it without rewiring credentials. MiniMax
+canonicalizes M3-family and legacy preview requests to the official
+`MiniMax-M3.1-Flash` ID.
 
 Before changing or restarting a shared provider route, run:
 

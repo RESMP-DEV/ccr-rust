@@ -322,8 +322,10 @@ class PolicyTests(unittest.TestCase):
                 policy.load_policy(self.root)
 
     def test_minimax_general_fallback_uses_the_official_non_preview_model(self) -> None:
+        # MiniMax is the final shared fallback, so its reviewed ID is the last
+        # chain entry rather than an interior seat.
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[-3],
+            policy.MACHINE_ROUTE_CHAIN[-1],
             "minimax,MiniMax-M3.1-Flash",
         )
         minimax = policy.MACHINE_SHARED_PROVIDERS["minimax"]
@@ -342,19 +344,16 @@ class PolicyTests(unittest.TestCase):
     def test_removed_tiers_stay_registered_providers(self) -> None:
         # 2026-10-11: gmi (unreliable) and deepseek (balance exhausted) left
         # the chain but stay registered so re-adding a chain entry restores
-        # them without rewiring credentials.
+        # them without rewiring credentials. Qwen joined that group on
+        # 2026-10-19 when its monthly window ran out.
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
-            (
-                "zai,glm-5.3-flash",
-                "qwen,qwen3.8-flash",
-                "minimax,MiniMax-M3.1-Flash",
-                "qwen,deepseek-v4.1-flash-1017",
-                "qwen,deepseek-v4.1-flash",
-            ),
+            ("zai,glm-5.3-flash", "minimax,MiniMax-M3.1-Flash"),
         )
         self.assertNotIn("gmi,Qwen/Qwen3.8-Max-0902", policy.MACHINE_ROUTE_CHAIN)
         self.assertNotIn("deepseek,deepseek-flash", policy.MACHINE_ROUTE_CHAIN)
+        self.assertNotIn("qwen,qwen3.8-flash", policy.MACHINE_ROUTE_CHAIN)
+        self.assertNotIn("qwen,deepseek-v4.1-flash", policy.MACHINE_ROUTE_CHAIN)
         self.assertIn("gmi", policy.MACHINE_SHARED_PROVIDERS)
         self.assertIn("deepseek", policy.MACHINE_SHARED_PROVIDERS)
         self.assertIn("qwen", policy.MACHINE_SHARED_PROVIDERS)
@@ -381,10 +380,12 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
 
-    def test_worker_chain_preserves_judgment_seat_with_qwen_credit_lane(self) -> None:
+    def test_worker_chain_keeps_judgment_seat_and_minimax_fallback(self) -> None:
+        # 2026-10-19: the Qwen credit lane left the chain with its exhausted
+        # monthly window; GLM Flash leads and MiniMax is the only fallback.
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[:2],
-            ("zai,glm-5.3-flash", "qwen,qwen3.8-flash"),
+            policy.MACHINE_ROUTE_CHAIN,
+            ("zai,glm-5.3-flash", "minimax,MiniMax-M3.1-Flash"),
         )
         self.assertNotIn("zai,glm-5.3", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
@@ -392,7 +393,7 @@ class PolicyTests(unittest.TestCase):
             policy.MACHINE_CONSUMERS["glm-workers.json"], "zai,glm-5.3-flash"
         )
 
-    def test_main_and_auth_get_qwen_max_before_flash_fallbacks(self) -> None:
+    def test_main_and_auth_share_the_chain_after_the_qwen_removal(self) -> None:
         machine_policy = {
             "version": 1,
             "routes": list(policy.MACHINE_ROUTE_CHAIN),
@@ -414,18 +415,17 @@ class PolicyTests(unittest.TestCase):
             },
         }
         derived = policy.derive(config, machine_policy, "config.json")
+        # The private Qwen Max seat left with the rest of the lane, so main and
+        # auth now run the plain shared chain behind their GLM-5.3 primary.
         self.assertEqual(
-            derived["Router"]["tiers"][:3],
+            derived["Router"]["tiers"],
             [
                 "zai,glm-5.3",
-                "qwen,qwen3.8-max",
                 "zai,glm-5.3-flash",
+                "minimax,MiniMax-M3.1-Flash",
             ],
         )
-        self.assertLess(
-            derived["Router"]["tiers"].index("qwen,qwen3.8-max"),
-            derived["Router"]["tiers"].index("qwen,qwen3.8-flash"),
-        )
+        self.assertEqual(policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES, {})
 
     def test_qwen_token_plan_uses_verified_anthropic_endpoint(self) -> None:
         qwen = policy.MACHINE_SHARED_PROVIDERS["qwen"]
@@ -443,12 +443,19 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("deepseek-v4.1-flash-1017", qwen["models"])
         self.assertIn("deepseek-v4.1-flash", qwen["models"])
 
-    def test_qwen_deepseek_1017_precedes_undated_fallback(self) -> None:
-        self.assertEqual(policy.MACHINE_ROUTE_CHAIN[-1], "qwen,deepseek-v4.1-flash")
-        self.assertLess(
-            policy.MACHINE_ROUTE_CHAIN.index("qwen,deepseek-v4.1-flash-1017"),
-            policy.MACHINE_ROUTE_CHAIN.index("qwen,deepseek-v4.1-flash"),
+    def test_qwen_stays_registered_but_unrouted_after_exhaustion(self) -> None:
+        # The token plan kept its provider and credential so a dated
+        # re-approval restores the lane, but no route references it.
+        self.assertIn("qwen", policy.MACHINE_SHARED_PROVIDERS)
+        self.assertEqual(
+            [
+                route
+                for route in policy.MACHINE_ROUTE_CHAIN
+                if route.startswith("qwen,")
+            ],
+            [],
         )
+        self.assertEqual(policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES, {})
 
     def test_zai_provider_registered_for_restored_routes(self) -> None:
         zai = policy.MACHINE_SHARED_PROVIDERS["zai"]
