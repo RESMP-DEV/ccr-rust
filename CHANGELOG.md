@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added the resident local Qwen3.8-27B MXFP4 MLX server as the final shared
+  crawl-back tier (`local27,qwen3.8-27b-mxfp4`) by user direction dated
+  2026-10-21. It sits after GLM-5.3 Flash for the standard (`config.json`),
+  interactive (`config-auth.json`), worker (`glm-workers.json`) and OCR
+  listeners, so it only serves once every cloud tier has failed. The provider
+  targets the streaming backend (`127.0.0.1:8081`) rather than the admission
+  proxy (`:8080`, which rejects `stream:true`) and carries `maxInflight: 4` to
+  match the proxy's backend bound. Receipt:
+  `evidence/local27-final-fallback-20261021.md`.
 - Clarified the scoped-worker delegation contract: every parent-created brief
   must be mechanically executable with one bounded outcome, exact ownership,
   acceptance commands, report evidence, and a stop condition. Ambiguous work
