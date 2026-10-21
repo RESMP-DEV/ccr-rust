@@ -42,6 +42,11 @@ on it directly. `deploy/com.kearm.strata-b550-tunnel.plist` runs an SSH forward
 from `127.0.0.1:18081` through `b550-jump`; that SSH route resolves `b550.lan`
 through the live router and authenticates B550's host key. The installed agent
 reached `loaded: true` and completed `STRATA_B550_TUNNEL_OK` through the tunnel.
+An explicit LaunchAgent restart also re-established the listener and returned
+the same loaded health payload; its stderr log remained empty.
+An unauthenticated chat completion through the tunnel returned HTTP 401 with
+`missing or wrong API key`; the unauthenticated `/health` endpoint exposes only
+load state, not generation.
 
 ## Policy
 
@@ -65,6 +70,14 @@ Validation:
 - Deployed `sync` changed all four governed consumers; `check` reported no
   drift and policy SHA-256
   `fc2f0bb724d044c4708cc3f5c869d62ccfff7836047a1cd1c0128c455d73c8a1`.
+- Expanding the private runtime credential environment and running
+  `ccr-rust --config ... validate` accepted all four derived consumer configs.
+- Idle-gated auth, OCR, and main listener restarts succeeded. A pinned request
+  to the auth listener returned `CCR_STRATA_PINNED_OK` and moved
+  `ccr_requests_total{tier="strata-b550"}` from absent to 1. Parsed SSE ended
+  with `[DONE]`, and the same listener returned a valid `get_time` tool call.
+  After the main restart, a pinned request returned `CCR_MAIN_STRATA_OK` and
+  moved that listener's Strata counter from 0 to 1.
 
 ## Non-claims
 
