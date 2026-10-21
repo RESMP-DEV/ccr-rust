@@ -40,13 +40,12 @@ ccr-local validate
 
 The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
-Main/auth sessions start at GLM-5.3, receive Qwen 3.8 Max next, and then use
-the shared worker chain. Worker sessions lead with GLM-5.3-Flash, followed by
-Qwen 3.8 Flash, MiniMax M3.1 Flash, Qwen's dated DeepSeek V4.1 Flash 1017
-checkpoint, and finally Qwen's undated DeepSeek V4.1 Flash lane. OCR retains
-its distinct OpenRouter primary. FlashX remains absent after its coding-plan
-trial expired. Inspect the active config and live route counters before
-claiming which backend served a request.
+Main/auth sessions start at GLM-5.3 and then follow the shared chain: MiniMax
+M3.1 Flash, GLM-5.3 Flash, DeepSeek Flash, the keyed B550 Strata Coder tunnel,
+and finally the resident local27 model. Worker sessions lead with MiniMax;
+OCR retains its distinct OpenRouter primary. FlashX remains absent after its
+coding-plan trial expired. Inspect the active config and live route counters
+before claiming which backend served a request.
 
 For MiniMax, follow [MiniMax setup and operations](minimax.md). Its transformer
 must be explicitly configured, source-policy changes must also update the
@@ -58,6 +57,7 @@ installed launcher module, and busy listeners must wait for an idle restart.
 | `~/.claude-code-router/runtime-credentials.json` | Private credential values, mode `0600`; never print or commit |
 | `~/.claude-code-router/serve*.py` | Load allowed credentials and execute governed CCR listeners |
 | `~/Library/LaunchAgents/com.kearm.ccr-rust.plist` | Start at login and restart after exit |
+| `~/Library/LaunchAgents/com.kearm.strata-b550-tunnel.plist` | Forward `127.0.0.1:18081` to the keyed B550 Strata service through dynamically discovered SSH routes |
 | `~/.claude-code-router/logs/` | Service logs; inspect locally, redact before sharing |
 | `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers; `claude-ccr` is a retired stub on the maintainer's Mac |
 | `~/.codex/ccr.config.toml` | CCR provider profile for the installed Codex fork |

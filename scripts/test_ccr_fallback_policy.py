@@ -354,6 +354,7 @@ class PolicyTests(unittest.TestCase):
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
+                "strata-b550,qwen3.8-flash-next-coder",
                 "local27,qwen3.8-27b-mxfp4",
             ),
         )
@@ -372,15 +373,15 @@ class PolicyTests(unittest.TestCase):
             "User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"]
         )
 
-    def test_glm_flash_is_final_fallback_and_main_auth_primary_unchanged(
+    def test_local_fallback_order_and_main_auth_primary_unchanged(
         self,
     ) -> None:
         # 2026-10-21: GLM Flash moved to the final shared fallback so the
-        # exhausted GLM utilization window is only spent after MiniMax; the
-        # main and auth primary stay on GLM-5.3.
+        # exhausted GLM utilization window is only spent after MiniMax. Strata
+        # B550 is the stronger local coding tier, while local27 remains final.
         self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[-3],
+            policy.MACHINE_ROUTE_CHAIN[-4],
             "zai,glm-5.3-flash",
         )
         # 2026-10-21: the resident local MLX model is the last crawl-back tier.
@@ -399,13 +400,14 @@ class PolicyTests(unittest.TestCase):
     ) -> None:
         # 2026-10-21: the scoped-worker primary moved to MiniMax because the
         # Z.AI GLM plan keeps exhausting its monthly utilization window; GLM
-        # Flash is the final shared fallback.
+        # Flash remains behind MiniMax; both local tiers follow the cloud lane.
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
             (
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
+                "strata-b550,qwen3.8-flash-next-coder",
                 "local27,qwen3.8-27b-mxfp4",
             ),
         )
@@ -447,6 +449,7 @@ class PolicyTests(unittest.TestCase):
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
+                "strata-b550,qwen3.8-flash-next-coder",
                 "local27,qwen3.8-27b-mxfp4",
             ],
         )
@@ -458,6 +461,18 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(local["api_base_url"], "http://127.0.0.1:8081/v1")
         self.assertEqual(local["protocol"], "openai")
         self.assertEqual(local["maxInflight"], 4)
+
+    def test_strata_b550_is_keyed_single_flight_and_nonthinking(self) -> None:
+        strata = policy.MACHINE_SHARED_PROVIDERS["strata-b550"]
+        self.assertEqual(strata["api_base_url"], "http://127.0.0.1:18081/v1")
+        self.assertEqual(strata["api_key"], "${CCR_STRATA_B550_API_KEY}")
+        self.assertEqual(strata["protocol"], "openai")
+        self.assertEqual(strata["maxInflight"], 1)
+        self.assertEqual(strata["force_reasoning_effort"], "none")
+        self.assertEqual(
+            strata["transformer"],
+            {"use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]},
+        )
 
     def test_qwen_token_plan_uses_verified_anthropic_endpoint(self) -> None:
         qwen = policy.MACHINE_SHARED_PROVIDERS["qwen"]

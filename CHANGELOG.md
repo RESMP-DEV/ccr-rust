@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added the keyed B550 Strata Coder service as a local coding crawl-back tier
+  (`strata-b550,qwen3.8-flash-next-coder`) ahead of `local27`. The provider uses
+  a localhost SSH tunnel whose SSH alias rediscovers `b550.lan` through the
+  live router rather than pinning a LAN address. It forces
+  `reasoning_effort: none` so an omitted setting cannot consume the reply
+  budget and limits the current FIFO engine to one in-flight request. Its
+  16384-token context remains narrower than `local27`, so over-long requests
+  can continue to the final resident tier.
 - Added native DeepSeek (`deepseek,deepseek-flash`) back to the shared chain
   as the last cloud tier, directly ahead of the local model, by user direction
   dated 2026-10-21. A live probe authenticated and completed a real request, so
