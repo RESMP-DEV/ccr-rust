@@ -51,6 +51,16 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # on purpose: an exhausted window cannot be optimized around, only skipped.
     "minimax,MiniMax-M3.1-Flash",
     "zai,glm-5.3-flash",
+    # 2026-10-21 user direction: native DeepSeek returns as the last cloud
+    # tier, ahead of the local model. A live probe the same day authenticated
+    # and completed a real request, so the earlier PAYG-balance cordon is lifted.
+    "deepseek,deepseek-flash",
+    # 2026-10-21 user direction: the resident local Qwen3.8-27B MXFP4 MLX
+    # server is the very last crawl-back tier for every consumer (standard,
+    # interactive/auth, workers), so a cloud-wide outage or exhausted windows
+    # still leave a serving model. It costs nothing and cannot 429, but it is
+    # the slowest and weakest tier, hence last.
+    "local27,qwen3.8-27b-mxfp4",
 )
 MACHINE_CONSUMERS: dict[str, str] = {
     # Primaries returned to their pre-cordon tiers with the 2026-10-18
@@ -92,9 +102,8 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "extra_headers": {"User-Agent": "ccr-rust/1 (+gmi)"},
         "models": ["Qwen/Qwen3.8-Max-0902"],
     },
-    # Registered option, unrouted since 2026-10-11 (PAYG balance exhausted,
-    # preflight 402). Kept wired so topping up plus re-adding the chain entry
-    # restores it.
+    # Routed again 2026-10-21 (balance topped up; unrouted 2026-10-11 to
+    # 2026-10-21 after preflight 402).
     "deepseek": {
         "name": "deepseek",
         "api_base_url": "https://api.deepseek.com/anthropic/v1",
@@ -130,6 +139,25 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
             "use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]
         },
     },
+    # Resident local MLX server (dflash_mlx, Qwen3.8-27B MXFP4) on this Mac.
+    # Points at the backend (:8081), not the admission proxy (:8080): the proxy
+    # rejects stream:true, and CCR clients stream. maxInflight mirrors the
+    # proxy's LOCAL27_MAX_BACKEND=4 so the backend keeps the same bound. The
+    # server ignores the request model name and needs no auth; the credential
+    # reference exists only because shared providers require one.
+    "local27": {
+        "name": "local27",
+        "api_base_url": "http://127.0.0.1:8081/v1",
+        "api_key": "${CCR_LOCAL27_API_KEY}",
+        "protocol": "openai",
+        "models": ["qwen3.8-27b-mxfp4"],
+        "maxInflight": 4,
+        # The server defaults to 512 completion tokens when a request omits
+        # max_tokens (Codex does); the model's context is 262144.
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 16384, "only_if_missing": True}]]
+        },
+    },
     "minimax": {
         "name": "minimax",
         "api_base_url": "https://api.minimax.io/anthropic/v1",
@@ -154,7 +182,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "d90d53f21e76a4723fb9128eaa0b1e7f47baa5ea0d0bc430fe3fea5cc666b16f"
+    "2509925ef4be3cfe6603d78d8adac3bd89e013214f212237c83029cf2d352c32"
 )
 
 

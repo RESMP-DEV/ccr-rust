@@ -350,10 +350,15 @@ class PolicyTests(unittest.TestCase):
         # 2026-10-19 when its monthly window ran out.
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
-            ("minimax,MiniMax-M3.1-Flash", "zai,glm-5.3-flash"),
+            (
+                "minimax,MiniMax-M3.1-Flash",
+                "zai,glm-5.3-flash",
+                "deepseek,deepseek-flash",
+                "local27,qwen3.8-27b-mxfp4",
+            ),
         )
         self.assertNotIn("gmi,Qwen/Qwen3.8-Max-0902", policy.MACHINE_ROUTE_CHAIN)
-        self.assertNotIn("deepseek,deepseek-flash", policy.MACHINE_ROUTE_CHAIN)
+        self.assertIn("deepseek,deepseek-flash", policy.MACHINE_ROUTE_CHAIN)
         self.assertNotIn("qwen,qwen3.8-flash", policy.MACHINE_ROUTE_CHAIN)
         self.assertNotIn("qwen,deepseek-v4.1-flash", policy.MACHINE_ROUTE_CHAIN)
         self.assertIn("gmi", policy.MACHINE_SHARED_PROVIDERS)
@@ -375,8 +380,13 @@ class PolicyTests(unittest.TestCase):
         # main and auth primary stay on GLM-5.3.
         self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[-1],
+            policy.MACHINE_ROUTE_CHAIN[-3],
             "zai,glm-5.3-flash",
+        )
+        # 2026-10-21: the resident local MLX model is the last crawl-back tier.
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN[-1],
+            "local27,qwen3.8-27b-mxfp4",
         )
         self.assertEqual(
             policy.MACHINE_CONSUMERS["glm-workers.json"],
@@ -392,7 +402,12 @@ class PolicyTests(unittest.TestCase):
         # Flash is the final shared fallback.
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
-            ("minimax,MiniMax-M3.1-Flash", "zai,glm-5.3-flash"),
+            (
+                "minimax,MiniMax-M3.1-Flash",
+                "zai,glm-5.3-flash",
+                "deepseek,deepseek-flash",
+                "local27,qwen3.8-27b-mxfp4",
+            ),
         )
         self.assertNotIn("zai,glm-5.3", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
@@ -431,9 +446,18 @@ class PolicyTests(unittest.TestCase):
                 "zai,glm-5.3",
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
+                "deepseek,deepseek-flash",
+                "local27,qwen3.8-27b-mxfp4",
             ],
         )
         self.assertEqual(policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES, {})
+
+    def test_local27_is_streaming_backend_bounded_like_its_proxy(self) -> None:
+        local = policy.MACHINE_SHARED_PROVIDERS["local27"]
+        # :8080 is the admission proxy and rejects stream:true; :8081 streams.
+        self.assertEqual(local["api_base_url"], "http://127.0.0.1:8081/v1")
+        self.assertEqual(local["protocol"], "openai")
+        self.assertEqual(local["maxInflight"], 4)
 
     def test_qwen_token_plan_uses_verified_anthropic_endpoint(self) -> None:
         qwen = policy.MACHINE_SHARED_PROVIDERS["qwen"]
