@@ -57,7 +57,7 @@ installed launcher module, and busy listeners must wait for an idle restart.
 | `~/.claude-code-router/runtime-credentials.json` | Private credential values, mode `0600`; never print or commit |
 | `~/.claude-code-router/serve*.py` | Load allowed credentials and execute governed CCR listeners |
 | `~/Library/LaunchAgents/com.kearm.ccr-rust.plist` | Start at login and restart after exit |
-| `~/Library/LaunchAgents/com.kearm.strata-b550-tunnel.plist` | Forward `127.0.0.1:18081` to the keyed B550 Strata service over the named `b550-zt` ZeroTier alias |
+| `~/Library/LaunchAgents/com.kearm.strata-b550-tunnel.plist` | Forward `127.0.0.1:18081` to the keyed B550 Strata service through the ZeroTier-first `strata_b550_tunnel.sh` fallback sequence |
 | `~/.claude-code-router/logs/` | Service logs; inspect locally, redact before sharing |
 | `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers; `claude-ccr` is a retired stub on the maintainer's Mac |
 | `~/.codex/ccr.config.toml` | CCR provider profile for the installed Codex fork |

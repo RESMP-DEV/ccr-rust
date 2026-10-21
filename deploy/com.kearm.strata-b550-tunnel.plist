@@ -6,23 +6,7 @@
     <string>com.kearm.strata-b550-tunnel</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/ssh</string>
-        <string>-N</string>
-        <string>-L</string>
-        <string>127.0.0.1:18081:127.0.0.1:18080</string>
-        <string>-o</string>
-        <string>ExitOnForwardFailure=yes</string>
-        <string>-o</string>
-        <string>ServerAliveInterval=10</string>
-        <string>-o</string>
-        <string>ServerAliveCountMax=3</string>
-        <string>-o</string>
-        <string>BatchMode=yes</string>
-        <string>-o</string>
-        <string>ControlMaster=no</string>
-        <string>-o</string>
-        <string>ControlPersist=no</string>
-        <string>b550-zt</string>
+        <string>/Users/kearm/.local/share/ccr-routing/strata_b550_tunnel.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

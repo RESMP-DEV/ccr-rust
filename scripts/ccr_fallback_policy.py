@@ -163,11 +163,11 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
             "use": [["maxtoken", {"max_tokens": 16384, "only_if_missing": True}]]
         },
     },
-    # Keyed LAN Strata service on B550. The localhost tunnel avoids macOS
-    # mDNS/router-DNS flapping and uses the named ZeroTier alias, so it never
-    # pins a historical LAN IPv4 address. The service enforces the referenced
-    # credential. Forcing reasoning off avoids a client that omits an effort
-    # spending its output budget in reasoning_content.
+    # Keyed LAN Strata service on B550. The localhost tunnel is ZeroTier-first
+    # with authenticated router/LAN and Strix-jump fallbacks, so it never pins
+    # a historical IPv4 address. The service enforces the referenced credential.
+    # Forcing reasoning off avoids a client that omits an effort spending its
+    # output budget in reasoning_content.
     "strata-b550": {
         "name": "strata-b550",
         "api_base_url": "http://127.0.0.1:18081/v1",

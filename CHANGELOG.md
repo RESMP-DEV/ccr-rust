@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added the keyed B550 Strata Coder service as a local coding crawl-back tier
   (`strata-b550,qwen3.8-flash-next-coder`) ahead of `local27`. The provider uses
-  a localhost SSH tunnel over the named `b550-zt` ZeroTier alias rather than
-  pinning a LAN address. It forces
+  a ZeroTier-first localhost SSH tunnel with authenticated LAN and Strix-jump
+  fallbacks rather than pinning a LAN address. It forces
   `reasoning_effort: none` so an omitted setting cannot consume the reply
   budget and limits the current FIFO engine to one in-flight request. Its
   16384-token context remains narrower than `local27`, so over-long requests

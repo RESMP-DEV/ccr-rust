@@ -38,18 +38,22 @@ Direct router-DNS IPv4 access authenticated and completed:
   arguments `{"timezone":"Etc/UTC"}`, HTTP 200.
 
 macOS `b550.local` resolution flapped during validation, so CCR does not depend
-on it directly. The current `deploy/com.kearm.strata-b550-tunnel.plist` runs an
-SSH forward from `127.0.0.1:18081` through the named `b550-zt` ZeroTier alias;
-that lane authenticated the same B550 machine-id and avoids movable LAN
-addressing. The installed agent reached `loaded: true` and completed
-`STRATA_B550_TUNNEL_OK`; an earlier LAN-jump version of the same plist also
-passed before the durable path was moved to ZeroTier.
+on it directly. `scripts/strata_b550_tunnel.sh` tries authenticated hosts in
+this order: named `b550-zt` ZeroTier, router-resolved `B550`, and `b550-jump`
+through Strix. The ZeroTier lane authenticated the same B550 machine-id, but a
+later preflight observed an overlay timeout; the script therefore falls through
+within one launchd run instead of pinning CCR to any one transient path.
 The first ZeroTier swap exposed an inherited SSH `ControlPersist` mux owning
-the port while launchd was only spawn-scheduled. The plist now sets
+the port while launchd was only spawn-scheduled. Every SSH attempt now sets
 `ControlMaster=no` and `ControlPersist=no`; after closing the mux, launchd owns
-the foreground SSH PID and the health endpoint returns `loaded: true`.
+the foreground tunnel process and the health endpoint returns `loaded: true`.
+The deployed fallback sequence itself was exercised: `b550-zt` timed out, the
+agent advanced to `B550`, launchd owned the wrapper PID, its SSH child owned
+port 18081, and the final routed-provider preflight passed.
 An explicit LaunchAgent restart also re-established the listener and returned
-the same loaded health payload; its stderr log remained empty.
+the same loaded health payload. Before the final multi-path exercise its stderr
+log was empty; the final run records the expected ZeroTier timeout and LAN
+fallback in the private launchd logs.
 An unauthenticated chat completion through the tunnel returned HTTP 401 with
 `missing or wrong API key`; the unauthenticated `/health` endpoint exposes only
 load state, not generation.
@@ -78,12 +82,15 @@ Validation:
   `fc2f0bb724d044c4708cc3f5c869d62ccfff7836047a1cd1c0128c455d73c8a1`.
 - Expanding the private runtime credential environment and running
   `ccr-rust --config ... validate` accepted all four derived consumer configs.
-- Idle-gated auth, OCR, and main listener restarts succeeded. A pinned request
-  to the auth listener returned `CCR_STRATA_PINNED_OK` and moved
+- Idle-gated auth, OCR, main, and worker listener restarts succeeded. The
+  worker needed a second bounded idle wait, then restarted without interrupting
+  its live requests. A pinned request to the auth listener returned
+  `CCR_STRATA_PINNED_OK` and moved
   `ccr_requests_total{tier="strata-b550"}` from absent to 1. Parsed SSE ended
   with `[DONE]`, and the same listener returned a valid `get_time` tool call.
   After the main restart, a pinned request returned `CCR_MAIN_STRATA_OK` and
-  moved that listener's Strata counter from 0 to 1.
+  moved that listener's Strata counter from 0 to 1. After the worker restart,
+  `CCR_WORKER_STRATA_OK` moved its Strata counter from 0 to 1.
 
 ## Non-claims
 
@@ -94,5 +101,5 @@ Validation:
   FIFO engine contract rather than a measured admission optimum.
 - The B550 service is intentionally resident. This does not establish that both
   GPUs remain free for later CUDA benchmark arms.
-- The tunnel depends on B550 and its ZeroTier overlay being reachable; local27
-  remains the final crawl-back when that lane is unavailable.
+- The tunnel depends on at least one authenticated B550 path being reachable;
+  local27 remains the final crawl-back when all three are unavailable.

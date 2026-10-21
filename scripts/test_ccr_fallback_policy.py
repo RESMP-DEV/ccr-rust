@@ -475,22 +475,24 @@ class PolicyTests(unittest.TestCase):
             {"use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]},
         )
 
-    def test_strata_tunnel_agent_owns_zeroTier_forward(self) -> None:
-        path = (
-            Path(__file__).resolve().parents[1]
-            / "deploy"
-            / "com.kearm.strata-b550-tunnel.plist"
-        )
+    def test_strata_tunnel_agent_owns_zeroTier_first_forward(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        path = root / "deploy" / "com.kearm.strata-b550-tunnel.plist"
         agent = plistlib.loads(path.read_bytes())
         args = agent["ProgramArguments"]
-        self.assertEqual(args[-1], "b550-zt")
-        self.assertIn("127.0.0.1:18081:127.0.0.1:18080", args)
+        self.assertEqual(
+            args,
+            ["/Users/kearm/.local/share/ccr-routing/strata_b550_tunnel.sh"],
+        )
+        script = (root / "scripts" / "strata_b550_tunnel.sh").read_text()
+        self.assertIn("hosts=(b550-zt B550 b550-jump)", script)
+        self.assertIn("127.0.0.1:18081:127.0.0.1:18080", script)
         for option in (
             "ExitOnForwardFailure=yes",
             "ControlMaster=no",
             "ControlPersist=no",
         ):
-            self.assertIn(option, args)
+            self.assertIn(option, script)
 
     def test_qwen_token_plan_uses_verified_anthropic_endpoint(self) -> None:
         qwen = policy.MACHINE_SHARED_PROVIDERS["qwen"]
