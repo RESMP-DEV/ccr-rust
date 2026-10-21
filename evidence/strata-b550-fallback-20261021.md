@@ -38,10 +38,16 @@ Direct router-DNS IPv4 access authenticated and completed:
   arguments `{"timezone":"Etc/UTC"}`, HTTP 200.
 
 macOS `b550.local` resolution flapped during validation, so CCR does not depend
-on it directly. `deploy/com.kearm.strata-b550-tunnel.plist` runs an SSH forward
-from `127.0.0.1:18081` through `b550-jump`; that SSH route resolves `b550.lan`
-through the live router and authenticates B550's host key. The installed agent
-reached `loaded: true` and completed `STRATA_B550_TUNNEL_OK` through the tunnel.
+on it directly. The current `deploy/com.kearm.strata-b550-tunnel.plist` runs an
+SSH forward from `127.0.0.1:18081` through the named `b550-zt` ZeroTier alias;
+that lane authenticated the same B550 machine-id and avoids movable LAN
+addressing. The installed agent reached `loaded: true` and completed
+`STRATA_B550_TUNNEL_OK`; an earlier LAN-jump version of the same plist also
+passed before the durable path was moved to ZeroTier.
+The first ZeroTier swap exposed an inherited SSH `ControlPersist` mux owning
+the port while launchd was only spawn-scheduled. The plist now sets
+`ControlMaster=no` and `ControlPersist=no`; after closing the mux, launchd owns
+the foreground SSH PID and the health endpoint returns `loaded: true`.
 An explicit LaunchAgent restart also re-established the listener and returned
 the same loaded health payload; its stderr log remained empty.
 An unauthenticated chat completion through the tunnel returned HTTP 401 with
@@ -59,7 +65,7 @@ Strata config is 16384.
 
 Validation:
 
-- `python3 -m unittest test_ccr_fallback_policy -v`: 36 tests OK.
+- `python3 -m unittest test_ccr_fallback_policy -v`: 37 tests OK.
 - `plutil -lint deploy/com.kearm.strata-b550-tunnel.plist`: OK.
 - `python3 scripts/quality.py`: PASS (format, Python format/lint/typecheck,
   SLOC ratchet, ShellCheck, clippy, Rust tests, no-default-features, debug
@@ -88,5 +94,5 @@ Validation:
   FIFO engine contract rather than a measured admission optimum.
 - The B550 service is intentionally resident. This does not establish that both
   GPUs remain free for later CUDA benchmark arms.
-- The tunnel depends on B550 and the Strix jump host being reachable; local27
+- The tunnel depends on B550 and its ZeroTier overlay being reachable; local27
   remains the final crawl-back when that lane is unavailable.

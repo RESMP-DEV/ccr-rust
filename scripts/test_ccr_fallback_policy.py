@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 import os
+import plistlib
 import sys
 import tempfile
 import threading
@@ -473,6 +474,23 @@ class PolicyTests(unittest.TestCase):
             strata["transformer"],
             {"use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]},
         )
+
+    def test_strata_tunnel_agent_owns_zeroTier_forward(self) -> None:
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "deploy"
+            / "com.kearm.strata-b550-tunnel.plist"
+        )
+        agent = plistlib.loads(path.read_bytes())
+        args = agent["ProgramArguments"]
+        self.assertEqual(args[-1], "b550-zt")
+        self.assertIn("127.0.0.1:18081:127.0.0.1:18080", args)
+        for option in (
+            "ExitOnForwardFailure=yes",
+            "ControlMaster=no",
+            "ControlPersist=no",
+        ):
+            self.assertIn(option, args)
 
     def test_qwen_token_plan_uses_verified_anthropic_endpoint(self) -> None:
         qwen = policy.MACHINE_SHARED_PROVIDERS["qwen"]

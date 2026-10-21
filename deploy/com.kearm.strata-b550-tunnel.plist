@@ -18,7 +18,11 @@
         <string>ServerAliveCountMax=3</string>
         <string>-o</string>
         <string>BatchMode=yes</string>
-        <string>b550-jump</string>
+        <string>-o</string>
+        <string>ControlMaster=no</string>
+        <string>-o</string>
+        <string>ControlPersist=no</string>
+        <string>b550-zt</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
