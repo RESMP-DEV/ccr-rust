@@ -119,6 +119,21 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
         self.assertNotIn("let the worker decompose", guide)
         self.assertNotIn("worker decides the split", guide)
 
+    def test_worker_guide_launcher_example_is_a_complete_brief(self) -> None:
+        guide = self.read("docs/worker-inspection.md")
+        self.assertNotIn("Inspect the assigned files", guide)
+        self.assertIn(
+            "Review the worker-brief contract in AGENTS.md and"
+            " docs/worker-inspection.md for inconsistent wording; make no edits.",
+            guide,
+        )
+        self.assertIn("Run python3 scripts/test_worker_delegation_docs.py.", guide)
+        self.assertIn(
+            "Stop after reporting its exit code, any inconsistency with quoted"
+            " file and line, and evidence-backed non-claims.",
+            guide,
+        )
+
     def test_both_guides_state_the_same_brief_contract(self) -> None:
         for prefix in (
             "Every brief is mechanically executable",

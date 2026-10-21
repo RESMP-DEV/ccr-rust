@@ -59,8 +59,14 @@ with one finish line and explicit non-goals:
 
 ```bash
 run=$(mktemp -d "${TMPDIR:-/tmp}/ccr-task.XXXXXX")
+brief=$(cat <<'BRIEF'
+<task>Review the worker-brief contract in AGENTS.md and docs/worker-inspection.md for inconsistent wording; make no edits.</task>
+<instructions>Owned surface is those two files, read-only. Run python3 scripts/test_worker_delegation_docs.py. Stop after reporting its exit code, any inconsistency with quoted file and line, and evidence-backed non-claims.</instructions>
+<report>Return the check result, findings or no findings, and non-claims.</report>
+BRIEF
+)
 codex-ccr-worker --cwd "$PWD" --read-only --output "$run/result.txt" \
-  'Inspect the assigned files; report findings and evidence, without edits.' \
+  "$brief" \
   >"$run/relay.jsonl" 2>"$run/launcher.stderr"
 
 ccr-rust workers list --limit 5

@@ -24,6 +24,11 @@ only.
 - `scripts/test_worker_delegation_docs.py`: added assertions for the contract
   phrases and the no-worker-decomposition rule in both guides, plus a
   cross-document equality test for the two contract paragraphs.
+- Reviewer repair on PR #70: replaced the launcher sketch's vague “inspect the
+  assigned files” prompt with a complete read-only brief that names the two
+  files, the exact acceptance command, the stop condition, and the report
+  fields. Added a documentation assertion so the incomplete prompt cannot
+  return.
 - `CHANGELOG.md`: recorded the operator-workflow clarification during parent
   integration.
 
@@ -56,6 +61,8 @@ Parent integrated-tree validation, 2026-10-21:
   concurrently in flight. The focused delegation suite passed then and is
   rerun by the parent on the integrated tree below.
 - `git diff --check` — exit 0.
+- Post-review `python3 scripts/test_worker_delegation_docs.py` — exit 0;
+  10 tests, OK. Post-review `git diff --check` — exit 0.
 - `sindexer update /Users/kearm/ccr-rust` — exited 0 with an index error:
   the Milvus endpoint `127.0.0.1:19530` refused the connection. The stack
   was left unconfigured per the no-reindex rule; no durable index update
