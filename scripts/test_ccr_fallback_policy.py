@@ -321,11 +321,13 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "approved integrity pin"):
                 policy.load_policy(self.root)
 
-    def test_minimax_general_fallback_uses_the_official_non_preview_model(self) -> None:
-        # MiniMax is the final shared fallback, so its reviewed ID is the last
-        # chain entry rather than an interior seat.
+    def test_minimax_worker_primary_uses_the_official_non_preview_model(
+        self,
+    ) -> None:
+        # 2026-10-21: MiniMax is the scoped-worker primary, so its reviewed ID
+        # leads the shared chain rather than sitting at the final fallback.
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[-1],
+            policy.MACHINE_ROUTE_CHAIN[0],
             "minimax,MiniMax-M3.1-Flash",
         )
         minimax = policy.MACHINE_SHARED_PROVIDERS["minimax"]
@@ -348,7 +350,7 @@ class PolicyTests(unittest.TestCase):
         # 2026-10-19 when its monthly window ran out.
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
-            ("zai,glm-5.3-flash", "minimax,MiniMax-M3.1-Flash"),
+            ("minimax,MiniMax-M3.1-Flash", "zai,glm-5.3-flash"),
         )
         self.assertNotIn("gmi,Qwen/Qwen3.8-Max-0902", policy.MACHINE_ROUTE_CHAIN)
         self.assertNotIn("deepseek,deepseek-flash", policy.MACHINE_ROUTE_CHAIN)
@@ -365,32 +367,38 @@ class PolicyTests(unittest.TestCase):
             "User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"]
         )
 
-    def test_restored_glm_chain_leads_with_entitled_primaries(self) -> None:
-        # 2026-10-18 user-directed restore: the monthly tool quota does not
-        # gate completions, so the GLM tiers lead again and every governed
-        # primary sits on a route the plan serves.
+    def test_glm_flash_is_final_fallback_and_main_auth_primary_unchanged(
+        self,
+    ) -> None:
+        # 2026-10-21: GLM Flash moved to the final shared fallback so the
+        # exhausted GLM utilization window is only spent after MiniMax; the
+        # main and auth primary stay on GLM-5.3.
         self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[0],
+            policy.MACHINE_ROUTE_CHAIN[-1],
             "zai,glm-5.3-flash",
         )
         self.assertEqual(
             policy.MACHINE_CONSUMERS["glm-workers.json"],
-            "zai,glm-5.3-flash",
+            "minimax,MiniMax-M3.1-Flash",
         )
         self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
 
-    def test_worker_chain_keeps_judgment_seat_and_minimax_fallback(self) -> None:
-        # 2026-10-19: the Qwen credit lane left the chain with its exhausted
-        # monthly window; GLM Flash leads and MiniMax is the only fallback.
+    def test_worker_chain_leads_with_minimax_and_keeps_glm_flash_fallback(
+        self,
+    ) -> None:
+        # 2026-10-21: the scoped-worker primary moved to MiniMax because the
+        # Z.AI GLM plan keeps exhausting its monthly utilization window; GLM
+        # Flash is the final shared fallback.
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
-            ("zai,glm-5.3-flash", "minimax,MiniMax-M3.1-Flash"),
+            ("minimax,MiniMax-M3.1-Flash", "zai,glm-5.3-flash"),
         )
         self.assertNotIn("zai,glm-5.3", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
         self.assertEqual(
-            policy.MACHINE_CONSUMERS["glm-workers.json"], "zai,glm-5.3-flash"
+            policy.MACHINE_CONSUMERS["glm-workers.json"],
+            "minimax,MiniMax-M3.1-Flash",
         )
 
     def test_main_and_auth_share_the_chain_after_the_qwen_removal(self) -> None:
@@ -421,8 +429,8 @@ class PolicyTests(unittest.TestCase):
             derived["Router"]["tiers"],
             [
                 "zai,glm-5.3",
-                "zai,glm-5.3-flash",
                 "minimax,MiniMax-M3.1-Flash",
+                "zai,glm-5.3-flash",
             ],
         )
         self.assertEqual(policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES, {})
