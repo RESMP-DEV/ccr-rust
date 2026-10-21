@@ -353,11 +353,12 @@ class PolicyTests(unittest.TestCase):
             (
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
+                "deepseek,deepseek-flash",
                 "local27,qwen3.8-27b-mxfp4",
             ),
         )
         self.assertNotIn("gmi,Qwen/Qwen3.8-Max-0902", policy.MACHINE_ROUTE_CHAIN)
-        self.assertNotIn("deepseek,deepseek-flash", policy.MACHINE_ROUTE_CHAIN)
+        self.assertIn("deepseek,deepseek-flash", policy.MACHINE_ROUTE_CHAIN)
         self.assertNotIn("qwen,qwen3.8-flash", policy.MACHINE_ROUTE_CHAIN)
         self.assertNotIn("qwen,deepseek-v4.1-flash", policy.MACHINE_ROUTE_CHAIN)
         self.assertIn("gmi", policy.MACHINE_SHARED_PROVIDERS)
@@ -379,7 +380,7 @@ class PolicyTests(unittest.TestCase):
         # main and auth primary stay on GLM-5.3.
         self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[-2],
+            policy.MACHINE_ROUTE_CHAIN[-3],
             "zai,glm-5.3-flash",
         )
         # 2026-10-21: the resident local MLX model is the last crawl-back tier.
@@ -404,6 +405,7 @@ class PolicyTests(unittest.TestCase):
             (
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
+                "deepseek,deepseek-flash",
                 "local27,qwen3.8-27b-mxfp4",
             ),
         )
@@ -444,6 +446,7 @@ class PolicyTests(unittest.TestCase):
                 "zai,glm-5.3",
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
+                "deepseek,deepseek-flash",
                 "local27,qwen3.8-27b-mxfp4",
             ],
         )

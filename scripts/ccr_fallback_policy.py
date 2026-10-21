@@ -51,6 +51,10 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # on purpose: an exhausted window cannot be optimized around, only skipped.
     "minimax,MiniMax-M3.1-Flash",
     "zai,glm-5.3-flash",
+    # 2026-10-21 user direction: native DeepSeek returns as the last cloud
+    # tier, ahead of the local model. A live probe the same day authenticated
+    # and completed a real request, so the earlier PAYG-balance cordon is lifted.
+    "deepseek,deepseek-flash",
     # 2026-10-21 user direction: the resident local Qwen3.8-27B MXFP4 MLX
     # server is the very last crawl-back tier for every consumer (standard,
     # interactive/auth, workers), so a cloud-wide outage or exhausted windows
@@ -98,9 +102,8 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "extra_headers": {"User-Agent": "ccr-rust/1 (+gmi)"},
         "models": ["Qwen/Qwen3.8-Max-0902"],
     },
-    # Registered option, unrouted since 2026-10-11 (PAYG balance exhausted,
-    # preflight 402). Kept wired so topping up plus re-adding the chain entry
-    # restores it.
+    # Routed again 2026-10-21 (balance topped up; unrouted 2026-10-11 to
+    # 2026-10-21 after preflight 402).
     "deepseek": {
         "name": "deepseek",
         "api_base_url": "https://api.deepseek.com/anthropic/v1",
@@ -179,7 +182,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "9104a0d93e4539d8e61008311b4715a53527895e504ea3dcb18e41e13cb7beb6"
+    "2509925ef4be3cfe6603d78d8adac3bd89e013214f212237c83029cf2d352c32"
 )
 
 

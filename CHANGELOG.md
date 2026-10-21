@@ -13,9 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added native DeepSeek (`deepseek,deepseek-flash`) back to the shared chain
+  as the last cloud tier, directly ahead of the local model, by user direction
+  dated 2026-10-21. A live probe authenticated and completed a real request, so
+  the 2026-10-11 balance cordon is lifted. It matters because the local model
+  prefills about 115 tok/s: when MiniMax and both GLM tiers were rate-limited,
+  ~200k-token requests fell through to local and held the single backend for
+  tens of minutes.
 - Added the resident local Qwen3.8-27B MXFP4 MLX server as the final shared
   crawl-back tier (`local27,qwen3.8-27b-mxfp4`) by user direction dated
-  2026-10-21. It sits after GLM-5.3 Flash for the standard (`config.json`),
+  2026-10-21. It sits after DeepSeek for the standard (`config.json`),
   interactive (`config-auth.json`), worker (`glm-workers.json`) and OCR
   listeners, so it only serves once every cloud tier has failed. The provider
   targets the streaming backend (`127.0.0.1:8081`) rather than the admission

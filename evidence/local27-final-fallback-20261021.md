@@ -35,3 +35,18 @@ governed listener.
   requests; Codex Responses-path requests omitting `max_tokens`.
 - Backend 8081 is shared with direct :8080 users; CCR traffic bypasses the
   proxy's admission counters (bounded by `maxInflight`, not by the proxy).
+
+## Addendum: DeepSeek tier and failure diagnosis (same day)
+- Chain is now minimax, zai flash, `deepseek,deepseek-flash`, local27. DeepSeek
+  key (`CCR_DEEPSEEK_API_KEY`, already in runtime-credentials.json) passed
+  preflight and a real completion; a pinned round trip via 3457 returned the
+  expected text. Integrity pin now `2509925e...2c32`; 35 tests OK.
+- Failure cause: listener 3456 recorded 12-13 rate-limit hits each on MiniMax,
+  glm-5.3 and glm-5.3-flash, so its requests (about 200k-token prompts) fell to
+  local27; backend log showed one 202,300-token prefill at ~115 tok/s
+  (>900 s), head-of-line blocking every other request. Not an AIMD or
+  maxInflight fault: 3 in-flight on a limit of 4. My 1/2/4-way direct backend
+  probes timed out behind that prefill, so they say nothing about throughput.
+- Restarts: 3457, 3461, 3458 done idle-gated; 3456 deferred (3 live requests).
+- Kilo review failed with the reviewer's own "Assistant request was rate
+  limited"; CodeRabbit completed with one comment, answered on the thread.
