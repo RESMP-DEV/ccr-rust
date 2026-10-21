@@ -96,9 +96,13 @@ ids that the router otherwise silently dispatches to `Router.default` (a
 requested `MiniMax-M3.1-Flash-Preview` was measured serving `zai,glm-5.3`
 before the alias existed). An operator alias entry is never overridden, and a
 model name offered by two providers stays unaliased rather than guessing.
-The approved main-machine shared chain is GLM-5.3-Flash followed by
-MiniMax `MiniMax-M3.1-Flash`, with no private consumer seat. GLM-5.3 stays the
-main and auth primary and is not a worker fallback. Both GLM tiers were
+The approved main-machine shared chain is MiniMax `MiniMax-M3.1-Flash`
+followed by GLM-5.3-Flash, with no private consumer seat. GLM-5.3 stays the
+main and auth primary and is not a worker fallback. The scoped-worker
+primary moved to MiniMax on 2026-10-21 by user authorization: the Z.AI GLM
+plan keeps exhausting its monthly utilization window, so GLM Flash became
+the final shared fallback to stop burning that window first on every
+scoped-worker dispatch. Both GLM tiers were
 cordoned 2026-10-18 after the Z.AI monthly tool quota reported 4000/4000
 used, then restored the same day by user direction once that premise was
 disproved: Z.AI meters usage without distinguishing model sessions from tool

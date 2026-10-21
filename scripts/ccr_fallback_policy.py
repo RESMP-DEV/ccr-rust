@@ -35,26 +35,31 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # calls after that probe read 0%, and the ZCode app kept serving GLM on
     # the same plan. The observed completion limits are the rolling 5-hour
     # prompt window and concurrency caps.
-    # Worker order: Flash handles subscription volume and MiniMax remains the
-    # general fallback. GLM-5.3 stays the main/auth primary but is not a
-    # worker fallback. The MiniMax ID below is the reviewed one in this source
-    # tree and is what the live listeners already serve; legacy `-Preview`
-    # aliases are canonicalized on dispatch rather than pinned here.
+    # Worker order (2026-10-21 user authorization): MiniMax M3.1 Flash is the
+    # scoped-worker primary because the Z.AI GLM plan keeps exhausting its
+    # monthly utilization window, while MiniMax absorbs that volume. GLM-5.3
+    # remains the main/auth primary; GLM-5.3 Flash becomes the final shared
+    # fallback instead of the first worker tier. The MiniMax ID below is the
+    # reviewed one in this source tree and is what the live listeners
+    # already serve; legacy `-Preview` aliases are canonicalized on
+    # dispatch rather than pinned here.
     # Qwen was removed 2026-10-19 by user direction: the token plan's monthly
     # utilization window was exhausted, so every dispatch paid a guaranteed
     # refusal before reaching a tier that could still serve. The provider and
     # its credential stay registered below so a dated re-approval restores it
     # without rewiring keys. Live utilization at removal is not re-checked here
     # on purpose: an exhausted window cannot be optimized around, only skipped.
-    "zai,glm-5.3-flash",
     "minimax,MiniMax-M3.1-Flash",
+    "zai,glm-5.3-flash",
 )
 MACHINE_CONSUMERS: dict[str, str] = {
     # Primaries returned to their pre-cordon tiers with the 2026-10-18
     # user-directed GLM restore.
     "config.json": "zai,glm-5.3",
     "config-auth.json": "zai,glm-5.3",
-    "glm-workers.json": "zai,glm-5.3-flash",
+    # 2026-10-21: the worker primary moved to MiniMax so GLM Flash is no
+    # longer the first tier a scoped worker burns its window on.
+    "glm-workers.json": "minimax,MiniMax-M3.1-Flash",
     # OCR keeps its distinct local primary; shared fallback remains governed.
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
 }
@@ -149,7 +154,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "4f72219c40a00a7d3e304a01cccfe87ffcbe8d5390dbaf84eb34a07d879f2d6b"
+    "d90d53f21e76a4723fb9128eaa0b1e7f47baa5ea0d0bc430fe3fea5cc666b16f"
 )
 
 
