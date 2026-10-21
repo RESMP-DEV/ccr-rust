@@ -100,6 +100,12 @@ quality gate passed.
   stage after 900 seconds rather than interrupting them. No worker-listener
   restart has been forced. Its on-disk config is synchronized; new launcher
   processes already request `minimax,MiniMax-M3.1-Flash` from it.
+- A later retry observed zero active requests and streams, exited 0 at the
+  idle stage after 0.511 seconds, and restarted the worker listener. Live
+  `/health?details=1` now reports default
+  `minimax,MiniMax-M3.1-Flash` followed by `zai,glm-5.3-flash`. A post-restart
+  `ccr-recovery doctor` runtime-listener scan reported all four listeners OK
+  with the expected tier orders.
 - Live process evidence at 10:46 PDT showed four in-flight `codex exec`
   workers on the MiniMax route (`tune-env`, `tune-env`, `tune-env`, and the
   MLX worktree) and one pre-change GLM worker still draining. A completed
@@ -113,10 +119,6 @@ quality gate passed.
 
 ## Non-claims
 
-- The worker listener process had not yet drained enough for an idle-gated
-  restart at receipt time. Its runtime `/health?details=1` still showed the
-  old default and tier order, although its config and every newly launched
-  worker route selection were already MiniMax-first.
 - The worker-sandbox PreflightTests/RuntimeTests socket errors were
   environmental; the parent reran both focused suites and the full quality
   matrix outside that sandbox with green results.
