@@ -55,6 +55,11 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # tier, ahead of the local model. A live probe the same day authenticated
     # and completed a real request, so the earlier PAYG-balance cordon is lifted.
     "deepseek,deepseek-flash",
+    # 2026-10-21 user direction: the keyed B550 Strata Coder service is the
+    # stronger local coding crawl-back. It sits ahead of local27, but remains
+    # constrained to one in-flight request because its current engine config is
+    # a FIFO server with a 16384-token context.
+    "strata-b550,qwen3.8-flash-next-coder",
     # 2026-10-21 user direction: the resident local Qwen3.8-27B MXFP4 MLX
     # server is the very last crawl-back tier for every consumer (standard,
     # interactive/auth, workers), so a cloud-wide outage or exhausted windows
@@ -158,6 +163,23 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
             "use": [["maxtoken", {"max_tokens": 16384, "only_if_missing": True}]]
         },
     },
+    # Keyed LAN Strata service on B550. The localhost tunnel is ZeroTier-first
+    # with authenticated router/LAN and Strix-jump fallbacks, so it never pins
+    # a historical IPv4 address. The service enforces the referenced credential.
+    # Forcing reasoning off avoids a client that omits an effort spending its
+    # output budget in reasoning_content.
+    "strata-b550": {
+        "name": "strata-b550",
+        "api_base_url": "http://127.0.0.1:18081/v1",
+        "api_key": "${CCR_STRATA_B550_API_KEY}",
+        "protocol": "openai",
+        "models": ["qwen3.8-flash-next-coder"],
+        "maxInflight": 1,
+        "force_reasoning_effort": "none",
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]
+        },
+    },
     "minimax": {
         "name": "minimax",
         "api_base_url": "https://api.minimax.io/anthropic/v1",
@@ -182,7 +204,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "2509925ef4be3cfe6603d78d8adac3bd89e013214f212237c83029cf2d352c32"
+    "fc2f0bb724d044c4708cc3f5c869d62ccfff7836047a1cd1c0128c455d73c8a1"
 )
 
 
