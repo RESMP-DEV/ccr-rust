@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Clarified the scoped-worker delegation contract: every parent-created brief
+  must be mechanically executable with one bounded outcome, exact ownership,
+  acceptance commands, report evidence, and a stop condition. Ambiguous work
+  is split or retained by the parent, while workers execute exactly one brief
+  and neither decide their role nor decompose the assignment.
+- Changed the governed CCR worker routing by user authorization dated
+  2026-10-21: MiniMax M3.1 Flash is now the scoped-worker primary
+  (`glm-workers.json`), and Z.AI GLM-5.3 Flash moved from the chain head to
+  the final shared fallback. The Z.AI plan kept exhausting its monthly
+  utilization window, so GLM Flash is only spent after MiniMax. Main/auth
+  remain GLM-5.3 primary with the MiniMax and GLM Flash shared tiers; OCR
+  retains its OpenRouter primary with the same shared chain. This is a
+  source-policy change only: live deployment, listener restarts, and live
+  completion verification are still required before the new order takes
+  effect.
 - Replaced the initial broad/size delegation heuristic with decomposition
   first: enumerate every task piece before work and send every piece that can
   carry its own bounded scope, ownership, acceptance check, and finish line to

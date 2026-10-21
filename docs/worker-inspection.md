@@ -23,6 +23,21 @@ collapse several delegable pieces into one broader interactive pass because
 they share a theme, and do not ask permission to launch a worker the user's
 task already authorizes.
 
+## Brief contract
+
+Every brief is mechanically executable and states one bounded outcome, the
+exact owned files or surface, the exact acceptance command or commands, the
+report evidence the worker must produce, and an explicit stop condition. A
+brief that leaves the worker to choose a scope, locate the right files, or
+weigh cross-piece tradeoffs is not a brief: the parent splits it further or
+keeps it. Ambiguity is never delegated.
+
+The worker executes exactly one brief. It does not decide whether it is a
+worker, does not re-plan the parent task, and does not decompose its own
+assignment. When a brief is genuinely under-specified, the worker stops and
+asks the parent for a fresh split, naming the missing piece, instead of
+guessing or widening scope.
+
 Keep the launcher's verbose relay out of the parent agent's context. Redirect
 it to a private directory; the launcher still retains its original trace and
 receipt under `~/.cache/ccr-worker-runs`.
@@ -32,8 +47,8 @@ rather than backgrounding them in one shell; this keeps the harness tracking
 each process and avoids the known zero-byte/background-exit failure mode.
 Use one worker per bounded concern, not one broad worker per task.
 
-Use a compact lowercase-XML brief with one finish line and explicit
-non-goals:
+Use a compact lowercase-XML brief that satisfies the brief contract above,
+with one finish line and explicit non-goals:
 
 ```text
 <task>State one bounded outcome and the exact files or symbols owned.</task>

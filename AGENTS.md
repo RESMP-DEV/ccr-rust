@@ -127,6 +127,21 @@ work, send independent pieces concurrently, and do not ask permission to
 launch a worker the user's task already authorizes. Do not collapse several
 delegable pieces into one broader interactive pass because they share a theme.
 
+### Deterministic brief contract
+
+Every brief is mechanically executable and states one bounded outcome, the
+exact owned files or surface, the exact acceptance command or commands, the
+report evidence the worker must produce, and an explicit stop condition. A
+brief that leaves the worker to choose a scope, locate the right files, or
+weigh cross-piece tradeoffs is not a brief: the parent splits it further or
+keeps it. Ambiguity is never delegated.
+
+The worker executes exactly one brief. It does not decide whether it is a
+worker, does not re-plan the parent task, and does not decompose its own
+assignment. When a brief is genuinely under-specified, the worker stops and
+asks the parent for a fresh split, naming the missing piece, instead of
+guessing or widening scope.
+
 <worker_inspection>
 Use `ccr-rust workers list --limit 5` and `ccr-rust workers show RUN --json`
 to inspect native `codex-ccr-worker` artifacts without loading full JSONL
