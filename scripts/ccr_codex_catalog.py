@@ -14,6 +14,7 @@ from typing import Any
 
 DEFAULT_CATALOG = Path.home() / ".codex" / "ccr-live-model-catalog.json"
 SOURCE_SLUG = "glm-5.3"
+GLM_REASONING_EFFORTS = ("low", "high", "max")
 
 ENTRIES: tuple[dict[str, str], ...] = (
     {
@@ -110,6 +111,20 @@ def entry_by_slug(document: dict[str, Any], slug: str) -> dict[str, Any] | None:
     return None
 
 
+def normalize_source_reasoning_metadata(source: dict[str, Any]) -> bool:
+    """Pin the source entry to GLM-5.3's provider-native effort labels."""
+    before = copy.deepcopy(source)
+    source["defaultReasoningEffort"] = "max"
+    source["default_reasoning_effort"] = "max"
+    source["default_reasoning_level"] = "max"
+    source["supported_reasoning_efforts"] = list(GLM_REASONING_EFFORTS)
+    source["supported_reasoning_levels"] = [
+        {"effort": effort, "description": f"{effort} reasoning"}
+        for effort in GLM_REASONING_EFFORTS
+    ]
+    return source != before
+
+
 def derive_entry(source: dict[str, Any], target: dict[str, str]) -> dict[str, Any]:
     derived = copy.deepcopy(source)
     slug = target["slug"]
@@ -143,6 +158,8 @@ def catalog_sync(
             raise TypeError(
                 f"source model metadata has invalid context_window: {SOURCE_SLUG}"
             )
+        if normalize_source_reasoning_metadata(source):
+            result["changes"].append({"action": "normalize", "slug": SOURCE_SLUG})
 
         models = [
             entry

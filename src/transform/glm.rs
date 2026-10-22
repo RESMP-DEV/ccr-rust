@@ -218,32 +218,36 @@ impl Transformer for GlmTransformer {
     }
 
     fn transform_request(&self, mut request: Value) -> Result<Value> {
-        let Some(obj) = request.as_object_mut() else {
+        let model = if let Some(obj) = request.as_object_mut() {
+            let model = obj
+                .get("model")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Inject reasoning_effort for supported models if not already set
+            if supports_reasoning_effort(&model) && !obj.contains_key("reasoning_effort") {
+                // Default to "medium" effort for balanced performance
+                obj.insert(
+                    "reasoning_effort".to_string(),
+                    Value::String("medium".to_string()),
+                );
+                trace!("Injected reasoning_effort=medium for model {}", model);
+            }
+
+            obj.remove("metadata");
+            obj.remove("anthropic-beta");
+            obj.remove("anthropic-version");
+            obj.remove("anthropic_version");
+            model
+        } else {
             return Ok(request);
         };
 
-        // Clone model name to avoid borrow issues during mutation
-        let model = obj
-            .get("model")
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        // Inject reasoning_effort for supported models if not already set
-        if supports_reasoning_effort(&model) && !obj.contains_key("reasoning_effort") {
-            // Default to "medium" effort for balanced performance
-            obj.insert(
-                "reasoning_effort".to_string(),
-                Value::String("medium".to_string()),
-            );
-            trace!("Injected reasoning_effort=medium for model {}", model);
-        }
-
-        // Strip Anthropic-specific passthrough fields
-        obj.remove("metadata");
-        obj.remove("anthropic-beta");
-        obj.remove("anthropic-version");
-        obj.remove("anthropic_version");
+        // Prior assistant reasoning stays in Anthropic-style `thinking`
+        // blocks here. The OpenAI translation layer converts them to
+        // `reasoning_content` (and signed `reasoning_blocks`) once, so the
+        // Anthropic-protocol path keeps the provider-native shape.
 
         trace!("GLM request transformed for model {}", model);
         Ok(request)
@@ -274,6 +278,44 @@ impl Transformer for GlmTransformer {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn glm53_uses_provider_default_max_effort() {
+        let transformer = GlmTransformer::default();
+        let request = json!({
+            "model": "glm-5.3",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let transformed = transformer.transform_request(request).unwrap();
+        assert!(transformed.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn assistant_thinking_stays_in_anthropic_shape() {
+        let transformer = GlmTransformer::default();
+        let request = json!({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Select the tool."},
+                    {"type": "tool_use", "id": "call", "name": "get_weather", "input": {}}
+                ]
+            }]
+        });
+
+        // The OpenAI translation layer converts thinking blocks once, so the
+        // Anthropic-shaped request keeps them intact until then.
+        let transformed = transformer.transform_request(request).unwrap();
+        let message = &transformed["messages"][0];
+        assert!(message.get("reasoning_content").is_none());
+        let blocks = message["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "Select the tool.");
+        assert_eq!(blocks[1]["type"], "tool_use");
+    }
 
     #[test]
     fn extracts_single_think_block() {

@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use chrono::NaiveDateTime;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::fs;
@@ -80,6 +81,15 @@ fn parse_chars(value: &str) -> std::result::Result<usize, String> {
     bounded_number(value, 16000)
 }
 
+fn valid_timestamp_prefix(name: &str) -> bool {
+    name.len() >= 16
+        && name.as_bytes()[..8].iter().all(u8::is_ascii_digit)
+        && name.as_bytes()[8] == b'-'
+        && name.as_bytes()[9..15].iter().all(u8::is_ascii_digit)
+        && name.as_bytes()[15] == b'-'
+        && NaiveDateTime::parse_from_str(&name[..15], "%Y%m%d-%H%M%S").is_ok()
+}
+
 pub fn run(args: WorkerArgs) -> Result<()> {
     let root = match args.runs_dir {
         Some(root) => root,
@@ -157,8 +167,22 @@ fn run_directories(root: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
-    paths.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
-    Ok(paths)
+    let mut timestamped = Vec::new();
+    let mut other = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().to_string());
+        if valid_timestamp_prefix(&name) {
+            timestamped.push(path);
+        } else {
+            other.push(path);
+        }
+    }
+    timestamped.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    other.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    timestamped.extend(other);
+    Ok(timestamped)
 }
 
 fn resolve_run(root: &Path, run: &str) -> Result<PathBuf> {

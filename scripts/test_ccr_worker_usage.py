@@ -117,13 +117,21 @@ ccr_requests_total{tier="zai"} 4
                 (run_dir / "status.json").write_text(
                     json.dumps(status), encoding="utf-8"
                 )
+            orphan = root / (date.today().strftime("%Y%m%d") + "-060306-orphan")
+            orphan.mkdir()
+            (orphan / "events.jsonl").write_text("", encoding="utf-8")
 
             result = usage.summarize_runs(root, days=1)
 
-        self.assertEqual(result.runs, 4)
+        self.assertEqual(result.runs, 5)
         self.assertEqual(
             result.outcomes,
-            {"completed": 1, "timed_out": 1, "unreadable": 2},
+            {
+                "completed": 1,
+                "receipt_pending": 1,
+                "timed_out": 1,
+                "unreadable": 2,
+            },
         )
         self.assertEqual(result.timeout_profiles, {"review": 2})
         self.assertEqual(result.requested_routes, {"zai,glm-5.3-flash": 2})

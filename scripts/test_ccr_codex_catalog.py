@@ -14,7 +14,7 @@ class CodexCatalogTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.path = self.root / "catalog.json"
-        self.source = {
+        self.source: dict[str, object] = {
             "slug": "glm-5.3",
             "id": "glm-5.3",
             "model": "glm-5.3",
@@ -67,6 +67,40 @@ class CodexCatalogTests(unittest.TestCase):
         self.assertTrue(first["ok"])
         self.assertTrue(second["ok"])
         self.assertEqual(second["changes"], [])
+
+    def test_glm_source_reasoning_metadata_uses_provider_native_labels(self) -> None:
+        self.source.update(
+            {
+                "defaultReasoningEffort": "xhigh",
+                "default_reasoning_effort": "xhigh",
+                "supported_reasoning_efforts": ["low", "high", "xhigh", "max"],
+            }
+        )
+        self.write_catalog([self.source])
+
+        result = catalog.catalog_sync(self.path, apply=True, take_snapshot=False)
+        document = json.loads(self.path.read_text())
+        source = next(
+            entry
+            for entry in document["models"]
+            if entry["slug"] == catalog.SOURCE_SLUG
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(source["defaultReasoningEffort"], "max")
+        self.assertEqual(source["default_reasoning_effort"], "max")
+        self.assertEqual(source["default_reasoning_level"], "max")
+        self.assertEqual(
+            source["supported_reasoning_efforts"],
+            ["low", "high", "max"],
+        )
+        self.assertEqual(
+            source["supported_reasoning_levels"],
+            [
+                {"effort": "low", "description": "low reasoning"},
+                {"effort": "high", "description": "high reasoning"},
+                {"effort": "max", "description": "max reasoning"},
+            ],
+        )
 
     def test_apply_with_no_changes_neither_snapshots_nor_writes(self) -> None:
         catalog.catalog_sync(self.path, apply=True, take_snapshot=False)

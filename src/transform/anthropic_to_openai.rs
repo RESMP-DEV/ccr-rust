@@ -73,12 +73,45 @@ fn transform_non_streaming_response(anthropic_response: Value) -> Result<Value> 
 
     // Transform content blocks
     let (content, tool_calls) = transform_anthropic_content(&anthropic_response)?;
+    let reasoning_blocks = anthropic_response
+        .get("content")
+        .and_then(|content| content.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("thinking"))
+        .map(|block| {
+            let mut reasoning = serde_json::json!({
+                "thinking": block.get("thinking").and_then(Value::as_str).unwrap_or("")
+            });
+            if let Some(signature) = block
+                .get("signature")
+                .and_then(Value::as_str)
+                .filter(|signature| !signature.is_empty())
+            {
+                reasoning["signature"] = Value::String(signature.to_string());
+            }
+            reasoning
+        })
+        .collect::<Vec<_>>();
+    let reasoning_content = reasoning_blocks
+        .iter()
+        .filter_map(|block| block.get("thinking").and_then(Value::as_str))
+        .filter(|thinking| !thinking.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
     // Build OpenAI format response
     let mut message = serde_json::json!({
         "role": "assistant",
         "content": content
     });
+    if !reasoning_content.is_empty() {
+        message["reasoning_content"] = Value::String(reasoning_content);
+    }
+    if !reasoning_blocks.is_empty() {
+        message["reasoning_blocks"] = Value::Array(reasoning_blocks);
+    }
 
     // Add tool_calls if present
     if let Some(tools) = tool_calls {
@@ -399,6 +432,11 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                         }]
                     })
                 }
+                "thinking" => {
+                    // Preserve block boundaries so the Responses adapter can
+                    // pair each signature with its own reasoning text.
+                    serde_json::json!({"reasoning_block_index": block_index})
+                }
                 _ => serde_json::json!({}),
             };
 
@@ -429,6 +467,10 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                 serde_json::json!({"content": text})
             } else if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
                 serde_json::json!({"reasoning_content": thinking})
+            } else if let Some(signature) = delta.get("signature").and_then(|v| v.as_str()) {
+                // The Responses stream adapter accumulates this opaque value
+                // and emits it on the completed reasoning output item.
+                serde_json::json!({"reasoning_signature": signature})
             } else if let Some(partial_json) = delta.get("partial_json").and_then(|v| v.as_str()) {
                 // Tool use partial JSON
                 serde_json::json!({
@@ -565,6 +607,7 @@ fn current_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_transformer_name() {
@@ -656,6 +699,33 @@ mod tests {
         assert_eq!(args_json["operation"], "add");
         assert_eq!(args_json["a"], 1);
         assert_eq!(args_json["b"], 2);
+    }
+
+    #[test]
+    fn test_transform_signed_thinking_response() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_response = json!({
+            "id": "msg_signed",
+            "type": "message",
+            "role": "assistant",
+            "model": "MiniMax-M3.1-Flash",
+            "content": [
+                {"type": "thinking", "thinking": "Select the tool.", "signature": "sig-1"},
+                {"type": "tool_use", "id": "call", "name": "get_weather", "input": {}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {}
+        });
+
+        let result = transformer.transform_response(anthropic_response).unwrap();
+        let message = &result["choices"][0]["message"];
+        assert_eq!(message["reasoning_content"], "Select the tool.");
+        assert_eq!(
+            message["reasoning_blocks"][0]["thinking"],
+            "Select the tool."
+        );
+        assert_eq!(message["reasoning_blocks"][0]["signature"], "sig-1");
+        assert_eq!(message["tool_calls"][0]["id"], "call");
     }
 
     #[test]
@@ -759,6 +829,28 @@ mod tests {
 
         assert_eq!(result["object"], "chat.completion.chunk");
         assert_eq!(result["choices"][0]["delta"]["content"], "Hello");
+    }
+
+    #[test]
+    fn test_transform_streaming_signature_delta() {
+        let transformer = AnthropicToOpenAiResponseTransformer;
+        let anthropic_event = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "signature_delta",
+                "signature": "sig-1"
+            }
+        });
+
+        let result = transformer.transform_response(anthropic_event).unwrap();
+        assert_eq!(
+            result["choices"][0]["delta"]["reasoning_signature"],
+            "sig-1"
+        );
+        assert!(result["choices"][0]["delta"]
+            .get("reasoning_content")
+            .is_none());
     }
 
     #[test]

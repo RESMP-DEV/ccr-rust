@@ -20,7 +20,7 @@
 use crate::transformer::Transformer;
 use anyhow::Result;
 use serde_json::Value;
-use tracing::{trace, warn};
+use tracing::trace;
 
 pub(crate) const MINIMAX_M3_1_FLASH: &str = "MiniMax-M3.1-Flash";
 const MALFORMED_MINIMAX_PLACEHOLDER: &str = "[MALFORMED_MINIMAX_OUTPUT_REMOVED]";
@@ -300,9 +300,37 @@ impl Transformer for MinimaxTransformer {
         }
 
         if is_m3_model(&model) {
-            // M3 uses native Anthropic-style thinking
-            // For Anthropic format requests, inject thinking: {type: "adaptive"}
-            if !obj.contains_key("thinking") {
+            // M3 uses native Anthropic-style thinking. M3.1 always thinks and
+            // accepts adaptive mode; normalize the common Anthropic `enabled`
+            // spelling while leaving an explicit impossible `disabled` request
+            // for provider validation.
+            // Every M3-family name above is canonicalized to M3.1 Flash.
+            if is_m3_model(&model) {
+                match obj.get_mut("thinking") {
+                    None => {
+                        obj.insert(
+                            "thinking".to_string(),
+                            serde_json::json!({"type": "adaptive"}),
+                        );
+                    }
+                    Some(thinking) => {
+                        let should_normalize = thinking
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_none_or(|kind| kind == "enabled");
+                        if should_normalize {
+                            if let Some(thinking_obj) = thinking.as_object_mut() {
+                                thinking_obj.remove("budget_tokens");
+                                thinking_obj.remove("display");
+                                thinking_obj.insert(
+                                    "type".to_string(),
+                                    Value::String("adaptive".to_string()),
+                                );
+                            }
+                        }
+                    }
+                }
+            } else if !obj.contains_key("thinking") {
                 obj.insert(
                     "thinking".to_string(),
                     serde_json::json!({"type": "adaptive"}),
@@ -330,7 +358,6 @@ impl Transformer for MinimaxTransformer {
         }
 
         // Strip Anthropic-specific passthrough fields if present
-        obj.remove("metadata");
         obj.remove("anthropic-beta");
         obj.remove("anthropic-version");
         obj.remove("anthropic_version");
@@ -343,50 +370,6 @@ impl Transformer for MinimaxTransformer {
 
     fn transform_response(&self, mut response: Value) -> Result<Value> {
         sanitize_response_text(&mut response);
-
-        // Handle Anthropic-format responses (from /anthropic/v1 endpoint)
-        // If response has content array with only thinking blocks and no text,
-        // convert the thinking to a text block to avoid empty responses
-        if let Some(content) = response.get_mut("content") {
-            if let Some(content_array) = content.as_array_mut() {
-                let has_text = content_array
-                    .iter()
-                    .any(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"));
-
-                if !has_text {
-                    // No text blocks - check for thinking blocks
-                    let thinking_text: Vec<String> = content_array
-                        .iter()
-                        .filter_map(|block| {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("thinking") {
-                                block
-                                    .get("thinking")
-                                    .and_then(|t| t.as_str())
-                                    .map(|s| s.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    if !thinking_text.is_empty() {
-                        warn!(
-                            "MiniMax returned thinking-only response ({} blocks), converting to text",
-                            thinking_text.len()
-                        );
-                        // Prepend a text block with the thinking content
-                        let combined_thinking = thinking_text.join("\n\n");
-                        content_array.insert(
-                            0,
-                            serde_json::json!({
-                                "type": "text",
-                                "text": format!("[Thinking]\n{}", combined_thinking)
-                            }),
-                        );
-                    }
-                }
-            }
-        }
 
         // Map reasoning_details -> reasoning_content in choices (OpenAI format for M2.x)
         if let Some(choices) = response.get_mut("choices") {
@@ -688,24 +671,42 @@ mod tests {
 
         let transformed = transformer.transform_request(request).unwrap();
         assert_eq!(transformed["thinking"]["type"], "adaptive");
-        assert!(transformed.get("metadata").is_none());
+        assert_eq!(transformed["metadata"], json!({"user_id": "abc"}));
         assert!(transformed.get("anthropic-beta").is_none());
         assert!(transformed.get("anthropic-version").is_none());
         assert!(transformed.get("anthropic_version").is_none());
     }
 
     #[test]
-    fn test_transform_request_preserves_existing_thinking() {
+    fn test_transform_request_normalizes_legacy_thinking_for_m3_aliases() {
         let transformer = MinimaxTransformer;
         let request = json!({
             "model": "MiniMax-M3",
             "messages": [{"role": "user", "content": "Hello"}],
-            "thinking": {"type": "enabled"}
+            "thinking": {"type": "enabled", "budget_tokens": 4096}
         });
 
         let transformed = transformer.transform_request(request).unwrap();
-        // Should preserve existing thinking parameter
-        assert_eq!(transformed["thinking"]["type"], "enabled");
+        // Every M3 alias is rewritten to M3.1 Flash, which requires adaptive.
+        assert_eq!(transformed["model"], MINIMAX_M3_1_FLASH);
+        assert_eq!(transformed["thinking"], json!({"type": "adaptive"}));
+    }
+
+    #[test]
+    fn test_m31_normalizes_anthropic_enabled_thinking_controls() {
+        let transformer = MinimaxTransformer;
+        let request = json!({
+            "model": "MiniMax-M3.1-Flash",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": 4096,
+                "display": "summarized"
+            }
+        });
+
+        let transformed = transformer.transform_request(request).unwrap();
+        assert_eq!(transformed["thinking"], json!({"type": "adaptive"}));
     }
 
     #[test]
@@ -777,16 +778,33 @@ mod tests {
         let transformed = transformer.transform_response(response).unwrap();
         let content = transformed["content"].as_array().unwrap();
 
-        // Should have inserted a text block at the beginning
+        // Thinking remains hidden and structurally replayable; it is never
+        // rewritten into visible assistant text.
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["signature"], "abc123");
+    }
+
+    #[test]
+    fn test_signed_thinking_and_tool_use_remain_ordered() {
+        let transformer = MinimaxTransformer;
+        let response = json!({
+            "id": "msg_tool",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "select the tool", "signature": "sig"},
+                {"type": "tool_use", "id": "call", "name": "get_weather", "input": {}}
+            ],
+            "stop_reason": "tool_use"
+        });
+        let transformed = transformer.transform_response(response).unwrap();
+        let content = transformed["content"].as_array().unwrap();
+
         assert_eq!(content.len(), 2);
-        assert_eq!(content[0]["type"], "text");
-        assert!(content[0]["text"].as_str().unwrap().contains("[Thinking]"));
-        assert!(content[0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("The user wants me to say hello"));
-        // Original thinking block should still be there
-        assert_eq!(content[1]["type"], "thinking");
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["signature"], "sig");
+        assert_eq!(content[1]["type"], "tool_use");
     }
 
     #[test]

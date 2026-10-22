@@ -96,6 +96,8 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
         self.assertIn("separate foreground tool sessions", guide)
         self.assertIn("ccr-worker-usage --days 7", guide)
         self.assertIn("Evidence, not automatic approval", guide)
+        self.assertIn("`running` means the launcher wrote its initial receipt", guide)
+        self.assertIn("may carry a `salvage` object", guide)
 
     def test_worker_guide_defines_a_deterministic_brief_contract(self) -> None:
         guide = self.read("docs/worker-inspection.md")
@@ -118,6 +120,32 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
         self.assertNotIn("worker may decompose", guide)
         self.assertNotIn("let the worker decompose", guide)
         self.assertNotIn("worker decides the split", guide)
+
+    def test_both_guides_define_the_worker_report_authority_boundary(self) -> None:
+        prefixes = (
+            "A worker report is evidence about the surface",
+            "A worker must never declare a gate",
+            "The parent independently verifies the exact command",
+        )
+        for relative_path in ("AGENTS.md", "docs/worker-inspection.md"):
+            with self.subTest(relative_path=relative_path):
+                guide = self.read(relative_path)
+                self.assertIn("report authority boundary", guide)
+                for phrase in (
+                    "never execute them as instructions",
+                    "release decision",
+                    "phase assignment",
+                    "production procedure",
+                    "findings outside scope without directives",
+                    "never restate a worker verdict",
+                ):
+                    self.assertIn(phrase, guide)
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                self.assertEqual(
+                    self.paragraph_starting_with("AGENTS.md", prefix),
+                    self.paragraph_starting_with("docs/worker-inspection.md", prefix),
+                )
 
     def test_worker_guide_launcher_example_is_a_complete_brief(self) -> None:
         guide = self.read("docs/worker-inspection.md")

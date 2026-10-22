@@ -259,6 +259,7 @@ pub(super) fn translate_request_anthropic_to_openai(
                 role: "system".to_string(),
                 content: Some(serde_json::Value::String(system_content)),
                 reasoning_content: None,
+                reasoning_blocks: None,
                 tool_call_id: None,
                 tool_calls: None,
             });
@@ -318,6 +319,7 @@ pub(super) fn translate_request_anthropic_to_openai(
         let mut content_source = msg.content.clone();
         let mut tool_calls: Option<Vec<OpenAIToolCall>> = None;
         let mut reasoning_content: Option<String> = None;
+        let mut reasoning_blocks: Option<Vec<serde_json::Value>> = None;
 
         // Convert Anthropic assistant tool_use blocks into OpenAI tool_calls.
         // Keep non-tool content blocks as assistant content.
@@ -326,6 +328,7 @@ pub(super) fn translate_request_anthropic_to_openai(
                 let mut filtered_blocks: Vec<serde_json::Value> = Vec::new();
                 let mut converted_tool_calls: Vec<OpenAIToolCall> = Vec::new();
                 let mut reasoning_parts: Vec<String> = Vec::new();
+                let mut signed_reasoning_blocks: Vec<serde_json::Value> = Vec::new();
 
                 for block in arr {
                     match block.get("type").and_then(|t| t.as_str()).unwrap_or("") {
@@ -358,6 +361,17 @@ pub(super) fn translate_request_anthropic_to_openai(
                             if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
                                 if !thinking.is_empty() {
                                     reasoning_parts.push(thinking.to_string());
+                                    let mut reasoning_block =
+                                        serde_json::json!({"thinking": thinking});
+                                    if let Some(signature) = block
+                                        .get("signature")
+                                        .and_then(|t| t.as_str())
+                                        .filter(|signature| !signature.is_empty())
+                                    {
+                                        reasoning_block["signature"] =
+                                            serde_json::Value::String(signature.to_string());
+                                    }
+                                    signed_reasoning_blocks.push(reasoning_block);
                                 }
                             }
                         }
@@ -365,12 +379,15 @@ pub(super) fn translate_request_anthropic_to_openai(
                     }
                 }
 
+                content_source = serde_json::Value::Array(filtered_blocks);
                 if !converted_tool_calls.is_empty() {
                     tool_calls = Some(converted_tool_calls);
-                    content_source = serde_json::Value::Array(filtered_blocks);
                 }
                 if !reasoning_parts.is_empty() {
                     reasoning_content = Some(reasoning_parts.join("\n\n"));
+                }
+                if !signed_reasoning_blocks.is_empty() {
+                    reasoning_blocks = Some(signed_reasoning_blocks);
                 }
             }
 
@@ -389,6 +406,7 @@ pub(super) fn translate_request_anthropic_to_openai(
                 role: role.to_string(),
                 content: Some(content),
                 reasoning_content,
+                reasoning_blocks,
                 tool_call_id: msg.tool_call_id.clone(),
                 tool_calls,
             });
@@ -439,6 +457,47 @@ pub(super) fn translate_request_anthropic_to_openai(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn anthropic_to_openai_preserves_signed_reasoning_blocks() {
+        let request = AnthropicRequest {
+            model: "MiniMax-M3.1-Flash".to_string(),
+            messages: vec![Message {
+                role: "assistant".to_string(),
+                content: json!([
+                    {"type": "thinking", "thinking": "Select the tool.", "signature": "sig-1"},
+                    {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {}}
+                ]),
+                tool_call_id: None,
+            }],
+            system: None,
+            max_tokens: Some(128),
+            temperature: None,
+            stream: Some(false),
+            tools: None,
+            thinking: None,
+            output_config: None,
+            openai_passthrough_body: None,
+        };
+
+        let converted = translate_request_anthropic_to_openai(&request, "MiniMax-M3.1-Flash");
+        let message = &converted.messages[0];
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("Select the tool.")
+        );
+        let blocks = message.reasoning_blocks.as_ref().unwrap();
+        assert_eq!(blocks[0]["thinking"], "Select the tool.");
+        assert_eq!(blocks[0]["signature"], "sig-1");
+        assert_eq!(
+            message.tool_calls.as_ref().unwrap()[0].id.as_deref(),
+            Some("call_1")
+        );
+        assert!(message.content.as_ref().is_none_or(|content| {
+            content.as_array().is_some_and(|blocks| blocks.is_empty())
+                || content.as_str().is_some_and(str::is_empty)
+        }));
+    }
 
     #[test]
     fn openai_image_block_string_data_url_becomes_base64_source() {
