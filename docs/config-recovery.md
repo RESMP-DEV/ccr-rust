@@ -20,7 +20,8 @@ change is a rollback instead of an outage.
 | `ccr-recovery restore [name]` | Dry run: report drift without writing |
 | `ccr-recovery restore [name] --apply` | Write the snapshot back onto the live surface |
 | `ccr-recovery restore [name] --apply --restart` | Also idle-gate and restart listeners |
-| `ccr-recovery activate --listener <name>` | Idle-gate and restart one listener now |
+| `ccr-recovery activate --listener <name>` | Snapshot, verify, idle-gate, restart, and runtime-check one listener |
+| `ccr-recovery activate --listener <name> --live-check` | Also make one tiny low-effort completion through the listener's default model |
 | `ccr-recovery doctor` | Snapshot health, file drift, and live in-memory route drift |
 | `ccr-recovery sanitize [name]` | Build a verified, secret-free copy for replication |
 
@@ -33,10 +34,10 @@ Exit code `0` means the requested operation succeeded and verified.
 | --- | --- |
 | `config-root/` | the four consumer configs, their launchd entrypoint scripts, `fallback-policy.json`, `runtime-credentials.json`, `ccr-api-key.env`, the deployed policy module, `.env`, `gmi_idle_activation.py` |
 | `launch-agents/` | the plist for each CCR listener, the API tunnel, and the modelctl guard |
-| `local-bin/` | `ccr-local`, `ccr-wait-idle`, `ccr-fallback-policy`, `ccr-catalog-sync`, `ccr-glm-workers-local`, `codex-ccr`. The retired `claude-ccr` wrapper is not captured, and a snapshot that still contains it reports it as unmapped instead of restoring it |
+| `local-bin/` | `ccr-local`, `ccr-wait-idle`, `ccr-fallback-policy`, `ccr-catalog-sync`, `ccr-glm-workers-local`, `codex-ccr`, and `ccr-recovery`. The retired `claude-ccr` wrapper is not captured, and a snapshot that still contains it reports it as unmapped instead of restoring it |
 | `local-bin-targets/` | the files behind `local-bin` symlinks, so a link and its content are both recoverable |
 | `toolbelt-manifests/`, `lapis-tools/` | both registered copies of the recovery, catalog, and idle-gate tool manifests |
-| `share/`, `cloudflared/`, `syncthing/` | the deployed policy module, each tunnel `config.yml`, and the Syncthing config that owns the sanitized replication share |
+| `share/`, `cloudflared/`, `syncthing/` | the deployed policy and recovery modules, each tunnel `config.yml`, and the Syncthing config that owns the sanitized replication share |
 | `codex/` | `ccr-live-model-catalog.json`, the active `config.toml`, CCR profile files, and the GLM worker role |
 
 Snapshots live under `~/.local/share/ccr-recovery/snapshots`, created mode
@@ -74,6 +75,16 @@ policy sync until it has drained and restarted; an older listener that answers
 only the plain liveness contract is reported as runtime-unchecked rather than
 mistaken for drift-free. Restore with `--restart` gates and restarts main,
 worker, auth, and OCR.
+
+`activate` is deliberately stricter than a liveness probe. It captures and
+verifies a complete pre-activation snapshot, waits for the listener to drain,
+restarts it, verifies that the process maps the vnode inode of the installed
+`~/.cargo/bin/ccr-rust` executable, and compares the returned tier order with
+the consumer config. This catches the case where a launchd wrapper appears to
+restart but a long-lived Rust process continues executing a replaced binary.
+The optional `--live-check` performs one bounded, low-effort completion through
+the configured default model and requires nonempty assistant content. It is
+opt-in because it spends provider quota.
 
 ## Policy integrity pin
 

@@ -62,10 +62,15 @@ class RecoveryTests(unittest.TestCase):
         )
         self.toolbelt_manifests.mkdir()
         self.lapis_tools.mkdir()
+        self.share_root = self.base / "share"
+        self.share_root.mkdir()
         for name in recovery.TOOL_MANIFESTS:
             (self.toolbelt_manifests / name).write_text('{"name": "tool"}')
             (self.lapis_tools / name).write_text('{"name": "tool"}')
         (self.local_bin / "ccr-local").write_text("#!/usr/bin/env bash\n")
+        (self.local_bin / "ccr-recovery").write_text("# recovery wrapper\n")
+        (self.share_root / "ccr_fallback_policy.py").write_text("# policy\n")
+        (self.share_root / "ccr_recovery.py").write_text("# recovery\n")
         (self.local_bin / "ccr-fallback-policy").symlink_to(
             self.base / "deployed" / "ccr_fallback_policy.py"
         )
@@ -80,6 +85,8 @@ class RecoveryTests(unittest.TestCase):
             mock.patch.object(recovery, "SYNCTHING_CONFIG", self.syncthing_config),
             mock.patch.object(recovery, "TOOLBELT_MANIFESTS", self.toolbelt_manifests),
             mock.patch.object(recovery, "LAPIS_TOOL_MANIFESTS", self.lapis_tools),
+            mock.patch.object(recovery, "SNAPSHOT_ROOT", self.snapshots),
+            mock.patch.object(recovery, "SHARE_ROOT", self.share_root),
         ]
         for patch in self.patches:
             patch.start()
@@ -90,7 +97,12 @@ class RecoveryTests(unittest.TestCase):
             recovery, "LAUNCH_AGENT_LABELS", ("com.kearm.ccr-rust",)
         ).start()
         mock.patch.object(
-            recovery, "BIN_FILES", ("ccr-local", "ccr-fallback-policy")
+            recovery,
+            "BIN_FILES",
+            ("ccr-local", "ccr-fallback-policy", "ccr-recovery"),
+        ).start()
+        mock.patch.object(
+            recovery, "SHARE_FILES", ("ccr_fallback_policy.py", "ccr_recovery.py")
         ).start()
         mock.patch.object(
             recovery, "CONFIG_FILES", ("config.json", "runtime-credentials.json")
@@ -168,6 +180,12 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("lapis-tools/ccr-recovery.tool.json", captured)
         self.assertIn("lapis-tools/ccr-catalog-sync.tool.json", captured)
 
+    def test_snapshot_captures_the_recovery_tool_implementation(self) -> None:
+        result = recovery.snapshot(label="test", root=self.snapshots)
+        captured = set(result["captured"])
+        self.assertIn("local-bin/ccr-recovery", captured)
+        self.assertIn("share/ccr_recovery.py", captured)
+
     def test_snapshot_root_is_private(self) -> None:
         recovery.snapshot(label="test", root=self.snapshots)
         self.assertEqual(stat.S_IMODE(self.snapshots.stat().st_mode), 0o700)
@@ -196,11 +214,10 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn("local-bin/dangling", result["missing"])
 
     def test_snapshot_reports_missing_files_without_failing(self) -> None:
+        (self.local_bin / "ccr-recovery").unlink()
         result = recovery.snapshot(label="test", root=self.snapshots)
         self.assertTrue(result["verified"]["ok"])
-        # The fixture patches CONFIG_FILES to two files; the only target it
-        # does not create is the deployed policy copy under SHARE_ROOT.
-        self.assertIn("share/ccr_fallback_policy.py", result["missing"])
+        self.assertIn("local-bin/ccr-recovery", result["missing"])
 
     def test_snapshot_is_staged_so_interruption_leaves_no_partial_directory(
         self,
@@ -522,6 +539,9 @@ class RecoveryTests(unittest.TestCase):
         with (
             mock.patch.object(recovery, "wait_idle", return_value={"ok": True}) as idle,
             mock.patch.object(recovery, "listener_healthy", return_value=True),
+            mock.patch.object(
+                recovery, "listener_image", return_value={"ok": True, "pid": 42}
+            ),
             mock.patch.object(recovery.subprocess, "run") as run,
         ):
             run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
@@ -644,15 +664,125 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("/health?details=1", urlopen.call_args.args[0])
 
     def test_activate_listener_uses_the_configured_launchd_label(self) -> None:
-        with mock.patch.object(
-            recovery,
-            "restart_listener",
-            return_value={"ok": True, "stage": "restarted"},
-        ) as restart:
+        ready = {
+            "snapshot": "ready",
+            "path": str(self.snapshots / "ready"),
+            "created_at": "2026-10-22T14:00:00-07:00",
+            "verified": {"ok": True},
+            "missing": [],
+        }
+        with (
+            mock.patch.object(recovery, "snapshot", return_value=ready),
+            mock.patch.object(
+                recovery,
+                "restart_listener",
+                return_value={"ok": True, "stage": "restarted"},
+            ) as restart,
+            mock.patch.object(
+                recovery,
+                "runtime_listener_check",
+                return_value={"ok": True, "name": "ocr", "tiers": []},
+            ),
+        ):
             result = recovery.activate_listener("ocr")
         self.assertTrue(result["ok"])
         self.assertEqual(result["port"], 3458)
         restart.assert_called_once_with("com.kearm.ccr-ocr", 3458, 60, 900)
+        self.assertTrue(result["snapshot"]["verified"]["ok"])
+
+    def test_activate_snapshots_before_restart_and_blocks_on_bad_snapshot(self) -> None:
+        bad_snapshot = {"verified": {"ok": False}}
+        with (
+            mock.patch.object(recovery, "snapshot", return_value=bad_snapshot),
+            mock.patch.object(recovery, "restart_listener") as restart,
+        ):
+            result = recovery.activate_listener("main")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], "snapshot")
+        restart.assert_not_called()
+
+    def test_activate_blocks_when_snapshot_inventory_is_incomplete(self) -> None:
+        incomplete_snapshot = {
+            "verified": {"ok": True},
+            "missing": ["local-bin/ccr-recovery"],
+        }
+        with (
+            mock.patch.object(recovery, "snapshot", return_value=incomplete_snapshot),
+            mock.patch.object(recovery, "restart_listener") as restart,
+        ):
+            result = recovery.activate_listener("main")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], "snapshot")
+        restart.assert_not_called()
+
+    def test_activate_can_require_a_representative_completion(self) -> None:
+        ready = {
+            "snapshot": "ready",
+            "path": str(self.snapshots / "ready"),
+            "created_at": "2026-10-22T14:00:00-07:00",
+            "verified": {"ok": True},
+            "missing": [],
+        }
+        with (
+            mock.patch.object(recovery, "snapshot", return_value=ready),
+            mock.patch.object(
+                recovery,
+                "restart_listener",
+                return_value={"ok": True, "stage": "restarted"},
+            ),
+            mock.patch.object(
+                recovery,
+                "runtime_listener_check",
+                return_value={"ok": True, "name": "main", "tiers": []},
+            ),
+            mock.patch.object(
+                recovery,
+                "representative_listener_request",
+                return_value={"ok": True, "content": "OK"},
+            ) as live,
+        ):
+            result = recovery.activate_listener("main", live_check=True)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["live_request"]["ok"])
+        live.assert_called_once_with(3456)
+
+    def test_process_text_mappings_parses_lsof_fields(self) -> None:
+        output = "p42\nfcwd\ni1\nn/tmp\nftxt\ni2\nn/Users/x/ccr-rust\n"
+        with mock.patch.object(
+            recovery.subprocess,
+            "run",
+            return_value=mock.Mock(returncode=0, stdout=output, stderr=""),
+        ):
+            self.assertEqual(
+                recovery.process_text_mappings(42), [("/Users/x/ccr-rust", 2)]
+            )
+
+    def test_listener_image_requires_the_installed_vnode(self) -> None:
+        binary = self.base / "ccr-rust"
+        binary.write_bytes(b"binary")
+        with (
+            mock.patch.object(recovery, "CCR_BINARY", binary),
+            mock.patch.object(recovery, "listener_pid", return_value=42),
+            mock.patch.object(
+                recovery,
+                "process_text_mappings",
+                return_value=[(str(binary), binary.stat().st_ino)],
+            ),
+        ):
+            current = recovery.listener_image(3456)
+        self.assertTrue(current["ok"], current)
+        with (
+            mock.patch.object(recovery, "CCR_BINARY", binary),
+            mock.patch.object(recovery, "listener_pid", return_value=42),
+            mock.patch.object(
+                recovery,
+                "process_text_mappings",
+                return_value=[(str(binary), binary.stat().st_ino + 1)],
+            ),
+        ):
+            stale = recovery.listener_image(3456)
+        self.assertFalse(stale["ok"])
+        self.assertIn("replaced executable inode", stale["error"])
 
     def test_doctor_reports_missing_live_files(self) -> None:
         recovery.snapshot(label="test", root=self.snapshots)

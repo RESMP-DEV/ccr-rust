@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Hardened listener activation and configuration recovery. Activation now
+  captures and verifies a complete snapshot before restart, proves the listener
+  is executing the installed Rust binary's vnode rather than only checking
+  liveness, compares runtime tiers with its consumer config, and can optionally
+  make one bounded low-effort completion with `--live-check`. Recovery snapshots
+  now include the deployed recovery implementation as well as its local wrapper.
 - Preserved signed interleaved thinking across Codex Responses tool loops.
   MiniMax thinking blocks remain hidden and ordered, their opaque signatures
   round-trip through Responses `encrypted_content`, adjacent reasoning/message

@@ -126,6 +126,15 @@ BIN_FILES: tuple[str, ...] = (
     "ccr-catalog-sync",
     "ccr-glm-workers-local",
     "codex-ccr",
+    "ccr-recovery",
+)
+
+# Deployed policy and recovery implementations. The local-bin copies are
+# captured separately so restoring one implementation does not depend on the
+# other still being current.
+SHARE_FILES: tuple[str, ...] = (
+    "ccr_fallback_policy.py",
+    "ccr_recovery.py",
 )
 
 # Retired wrappers that older snapshots may still contain. They are reported as
@@ -147,6 +156,7 @@ LISTENER_BY_NAME = {
 # rollback story that prunes the good state to save space is worse than the
 # space cost.
 KEEP_SNAPSHOTS = 30
+CCR_BINARY = Path.home() / ".cargo" / "bin" / "ccr-rust"
 
 UMASK = os.umask(0)
 os.umask(UMASK)
@@ -193,9 +203,8 @@ def relative_targets() -> tuple[tuple[Path, str], ...]:
         )
     for name in BIN_FILES:
         targets.append((LOCAL_BIN / name, f"local-bin/{name}"))
-    targets.append(
-        (SHARE_ROOT / "ccr_fallback_policy.py", "share/ccr_fallback_policy.py")
-    )
+    for name in SHARE_FILES:
+        targets.append((SHARE_ROOT / name, f"share/{name}"))
     targets.append((SYNCTHING_CONFIG, "syncthing/config.xml"))
     for name in TOOL_MANIFESTS:
         targets.append((TOOLBELT_MANIFESTS / name, f"toolbelt-manifests/{name}"))
@@ -253,7 +262,7 @@ def safe_snapshot_name(name: object) -> bool:
     if area == "cloudflared":
         return len(rest) == 2 and rest[1] == "config.yml"
     if area == "share":
-        return name == "share/ccr_fallback_policy.py"
+        return len(rest) == 1 and rest[0] in SHARE_FILES
     if area == "syncthing":
         return name == "syncthing/config.xml"
     return False
@@ -346,13 +355,14 @@ def write_manifest(
     return manifest
 
 
-def snapshot(label: str = "manual", root: Path = SNAPSHOT_ROOT) -> dict[str, Any]:
+def snapshot(label: str = "manual", root: Path | None = None) -> dict[str, Any]:
     """Capture the live surface into a new timestamped snapshot directory.
 
     The snapshot is staged in a temporary sibling and moved into place only
     after the manifest is written, so an interrupted run cannot leave a
     directory that looks like a valid snapshot.
     """
+    root = root or SNAPSHOT_ROOT
     ensure_private_directory(root)
     moment = now()
     final = root / stamp(moment)
@@ -654,13 +664,89 @@ def wait_idle(port: int, timeout: int) -> dict[str, Any]:
     }
 
 
+def listener_pid(port: int) -> int | None:
+    """Return the PID currently owning a listener socket."""
+    try:
+        completed = subprocess.run(
+            ["lsof", "-tnP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    pids = [int(line) for line in completed.stdout.splitlines() if line.isdigit()]
+    return pids[0] if len(pids) == 1 else None
+
+
+def process_text_mappings(pid: int) -> list[tuple[str, int]]:
+    """Return an executable's mapped text paths and vnode inode numbers."""
+    try:
+        completed = subprocess.run(
+            ["lsof", "-Ffin", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    mappings: list[tuple[str, int]] = []
+    fd: str | None = None
+    inode: int | None = None
+    for line in completed.stdout.splitlines():
+        marker, value = line[:1], line[1:]
+        if marker == "f":
+            fd, inode = value, None
+        elif marker == "i" and value.isdigit():
+            inode = int(value)
+        elif marker == "n" and fd == "txt" and inode is not None:
+            mappings.append((value, inode))
+            fd, inode = None, None
+    return mappings
+
+
+def listener_image(port: int) -> dict[str, Any]:
+    """Identify the process and prove it is executing the installed image."""
+    pid = listener_pid(port)
+    if pid is None:
+        return {"ok": False, "error": "no unique listener PID"}
+    result: dict[str, Any] = {"ok": False, "pid": pid}
+    try:
+        expected_stat = CCR_BINARY.stat()
+    except OSError as error:
+        result["error"] = f"installed binary unavailable: {error}"
+        return result
+    expected_path = os.path.realpath(CCR_BINARY)
+    for mapped_path, inode in process_text_mappings(pid):
+        if os.path.realpath(mapped_path) == expected_path:
+            result.update(
+                executable=mapped_path,
+                vnode_inode=inode,
+                installed_inode=expected_stat.st_ino,
+            )
+            result["ok"] = inode == expected_stat.st_ino
+            if not result["ok"]:
+                result["error"] = "listener still maps the replaced executable inode"
+            return result
+    result["error"] = f"listener does not map {expected_path}"
+    return result
+
+
 def restart_listener(
-    label: str, port: int, timeout: int, idle_timeout: int
+    label: str,
+    port: int,
+    timeout: int,
+    idle_timeout: int,
+    *,
+    verify_image: bool = True,
 ) -> dict[str, Any]:
-    """Idle-gate, then kickstart, then confirm the listener serves again."""
+    """Idle-gate, restart, and prove the listener is healthy and current."""
     idle = wait_idle(port, idle_timeout)
     if not idle.get("ok"):
         return {"label": label, "port": port, "ok": False, "stage": "idle", **idle}
+    before = listener_image(port) if verify_image else {}
     domain = f"gui/{os.getuid()}/{label}"
     try:
         completed = subprocess.run(
@@ -682,16 +768,25 @@ def restart_listener(
         }
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if listener_healthy(port):
+        image = listener_image(port) if verify_image else {"ok": True}
+        if listener_healthy(port) and image.get("ok"):
             return {
                 "label": label,
                 "port": port,
                 "ok": True,
                 "stage": "restarted",
                 "idle": idle,
+                "before": before,
+                "image": image,
             }
         time.sleep(0.25)
-    return {"label": label, "port": port, "ok": False, "stage": "health"}
+    return {
+        "label": label,
+        "port": port,
+        "ok": False,
+        "stage": "image" if verify_image else "health",
+        "before": before,
+    }
 
 
 def listener_healthy(port: int) -> bool:
@@ -713,6 +808,7 @@ def activate_listener(
     *,
     idle_timeout: int = 900,
     restart_timeout: int = 60,
+    live_check: bool = False,
 ) -> dict[str, Any]:
     try:
         port, label, _config_name = LISTENER_BY_NAME[name]
@@ -723,11 +819,93 @@ def activate_listener(
             "error": f"unknown listener: {name}",
             "available": sorted(LISTENER_BY_NAME),
         }
-    return {
+    preflight = snapshot(label=f"pre-activate-{name}")
+    if not preflight.get("verified", {}).get("ok") or preflight.get("missing"):
+        return {
+            "listener": name,
+            "label": label,
+            "port": port,
+            "ok": False,
+            "stage": "snapshot",
+            "snapshot": preflight,
+        }
+    restarted = restart_listener(label, port, restart_timeout, idle_timeout)
+    result = {
         "listener": name,
         "label": label,
         "port": port,
-        **restart_listener(label, port, restart_timeout, idle_timeout),
+        "snapshot": {
+            key: preflight[key]
+            for key in ("snapshot", "path", "created_at", "verified")
+        },
+        **restarted,
+    }
+    if not restarted.get("ok"):
+        return result
+    runtime = runtime_listener_check(name, port, _config_name)
+    result["runtime"] = runtime
+    if live_check:
+        result["live_request"] = representative_listener_request(port)
+        result["ok"] = bool(runtime.get("ok") and result["live_request"].get("ok"))
+    else:
+        result["ok"] = bool(runtime.get("ok"))
+    return result
+
+
+def representative_listener_request(port: int, timeout: int = 60) -> dict[str, Any]:
+    """Make a tiny provider-backed request after an explicit operator opt-in."""
+    import urllib.error
+    import urllib.request
+
+    runtime = listener_runtime(port)
+    model = runtime.get("default")
+    if not isinstance(model, str) or not model:
+        return {"ok": False, "error": "listener has no default model"}
+    body = json.dumps(
+        {
+            "model": model,
+            "reasoning_effort": "low",
+            "messages": [
+                {"role": "user", "content": "Return exactly OK and no other text."}
+            ],
+            "max_tokens": 64,
+            "stream": False,
+        }
+    ).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(  # noqa: S310 - fixed loopback URL
+            request, timeout=timeout
+        ) as response:
+            document = json.loads(response.read().decode())
+    except (
+        OSError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ) as error:
+        return {"ok": False, "error": f"{type(error).__name__}: {error}"}
+    choices = document.get("choices") if isinstance(document, dict) else None
+    message = (
+        choices[0].get("message") if isinstance(choices, list) and choices else None
+    )
+    content = message.get("content") if isinstance(message, dict) else None
+    ok = isinstance(content, str) and bool(content.strip())
+    return {
+        "ok": ok,
+        "model": document.get("model") if isinstance(document, dict) else None,
+        "finish_reason": (
+            choices[0].get("finish_reason")
+            if isinstance(choices, list) and isinstance(choices[0], dict)
+            else None
+        ),
+        "content": content,
+        "usage": document.get("usage") if isinstance(document, dict) else None,
     }
 
 
@@ -1230,6 +1408,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.ArgumentParser:
         default=60,
         help="Seconds to wait for health (default: 60).",
     )
+    activate.add_argument(
+        "--live-check",
+        action="store_true",
+        help=(
+            "After restart, make one tiny low-effort completion through the "
+            "listener's configured default model."
+        ),
+    )
 
     sanitize = subparsers.add_parser(
         "sanitize", help="Build a verified, secret-free copy for replication."
@@ -1314,6 +1500,7 @@ def main(argv: list[str] | None = None) -> int:
             args.listener,
             idle_timeout=args.idle_timeout,
             restart_timeout=args.restart_timeout,
+            live_check=args.live_check,
         )
         emit(result)
         return 0 if result.get("ok") else 1

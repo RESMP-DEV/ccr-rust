@@ -35,7 +35,7 @@ ccr-local validate
 | `ccr-local status` / `validate` | Check the listener or load and validate its configuration |
 | `ccr-wait-idle` | Require two consecutive samples with zero active requests and streams |
 | `ccr-recovery` | Snapshot, verify, restore, and detect file or in-memory route drift |
-| `ccr-recovery activate --listener <name>` | Idle-gate and restart main, worker, auth, or OCR |
+| `ccr-recovery activate --listener <name>` | Snapshot, verify, idle-gate, restart, and runtime-check main, worker, auth, or OCR |
 | `ccr-catalog-sync` | Align Codex CCR route metadata with the approved primary and fallback routes |
 
 The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
