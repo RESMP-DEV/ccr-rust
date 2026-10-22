@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -845,6 +846,32 @@ class RecoveryTests(unittest.TestCase):
             stale = recovery.listener_image(3456)
         self.assertFalse(stale["ok"])
         self.assertIn("replaced executable inode", stale["error"])
+
+    def test_timestamp_helpers_run_on_the_launchd_system_python(self) -> None:
+        interpreter = Path("/usr/bin/python3")
+        if not interpreter.is_file():
+            self.skipTest("macOS system Python unavailable")
+        source = Path(__file__).with_name("ccr_recovery.py")
+        completed = subprocess.run(
+            [
+                str(interpreter),
+                "-c",
+                (
+                    "import os, sys; sys.path.insert(0, os.environ['SCRIPTS']); "
+                    "import ccr_recovery as recovery; recovery.stamp()"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+            cwd=source.parent.parent,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "SCRIPTS": str(source.parent),
+            },
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_doctor_reports_missing_live_files(self) -> None:
         recovery.snapshot(label="test", root=self.snapshots)

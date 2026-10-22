@@ -163,7 +163,7 @@ os.umask(UMASK)
 
 
 def now() -> dt.datetime:
-    return dt.datetime.now(dt.UTC).astimezone()
+    return dt.datetime.now(dt.timezone.utc).astimezone()
 
 
 def stamp(moment: dt.datetime | None = None) -> str:
@@ -1166,7 +1166,7 @@ def doctor(root: Path = SNAPSHOT_ROOT, max_age_hours: float = 24.0) -> dict[str,
     if newest and newest.get("created_at"):
         created = dt.datetime.fromisoformat(newest["created_at"])
         if created.tzinfo is None:
-            created = created.replace(tzinfo=dt.UTC)
+            created = created.replace(tzinfo=dt.timezone.utc)
         age_hours = (now() - created).total_seconds() / 3600.0
     runtime = runtime_listener_checks()
     runtime_ok = all(check["ok"] for check in runtime)
