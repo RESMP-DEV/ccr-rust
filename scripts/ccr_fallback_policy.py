@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Derive registered CCR configurations from one shared fallback policy."""
 
+from __future__ import annotations
+
 import argparse
 import copy
 import hashlib

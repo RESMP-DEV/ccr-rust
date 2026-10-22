@@ -52,6 +52,18 @@ surface rather than being reconstructed from a stale copy.
 - `RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 python3 scripts/quality.py` — all
   12 checks passed after review repairs.
 
+## LaunchAgent interpreter follow-up
+
+The first worker and OCR delayed-restart attempts exposed that launchd’s sanitized
+PATH resolves `python3` to macOS 3.9.6. The recovery helper failed on
+`datetime.UTC`, while the policy helper evaluated modern union annotations at
+import time. Both modules now run on the system interpreter:
+
+- `/usr/bin/python3 -m py_compile` passes for `ccr_recovery`,
+  `ccr_fallback_policy`, `ccr_wait_idle`, and `ccr_codex_catalog`.
+- Focused imports/stamps pass under `/usr/bin/python3`.
+- `python3 scripts/quality.py` passes all 12 checks.
+
 ## Non-claims
 
 - The live completion proves one main-route chat request, not every provider,

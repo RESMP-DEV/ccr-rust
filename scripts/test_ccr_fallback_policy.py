@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import plistlib
+import subprocess
 import sys
 import tempfile
 import threading
@@ -61,6 +62,31 @@ class PolicyTests(unittest.TestCase):
         pre.reset_mock()
         policy.sync(self.root, check=True)
         self.assertFalse(pre.called)
+
+    def test_module_imports_on_the_launchd_system_python(self) -> None:
+        interpreter = Path("/usr/bin/python3")
+        if not interpreter.is_file():
+            self.skipTest("macOS system Python unavailable")
+        script = Path(__file__).with_name("ccr_fallback_policy.py")
+        completed = subprocess.run(
+            [
+                str(interpreter),
+                "-c",
+                (
+                    "import os, sys; sys.path.insert(0, os.environ['SCRIPTS']); "
+                    "import ccr_fallback_policy"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "SCRIPTS": str(script.parent),
+            },
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_missing_recovery_module_does_not_block_sync(self) -> None:
         with (
