@@ -809,6 +809,7 @@ def activate_listener(
     idle_timeout: int = 900,
     restart_timeout: int = 60,
     live_check: bool = False,
+    root: Path | None = None,
 ) -> dict[str, Any]:
     try:
         port, label, _config_name = LISTENER_BY_NAME[name]
@@ -819,7 +820,7 @@ def activate_listener(
             "error": f"unknown listener: {name}",
             "available": sorted(LISTENER_BY_NAME),
         }
-    preflight = snapshot(label=f"pre-activate-{name}")
+    preflight = snapshot(label=f"pre-activate-{name}", root=root)
     if not preflight.get("verified", {}).get("ok") or preflight.get("missing"):
         return {
             "listener": name,
@@ -891,19 +892,16 @@ def representative_listener_request(port: int, timeout: int = 60) -> dict[str, A
     ) as error:
         return {"ok": False, "error": f"{type(error).__name__}: {error}"}
     choices = document.get("choices") if isinstance(document, dict) else None
-    message = (
-        choices[0].get("message") if isinstance(choices, list) and choices else None
-    )
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    if not isinstance(choice, dict):
+        return {"ok": False, "error": "completion response has no valid choice"}
+    message = choice.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     ok = isinstance(content, str) and bool(content.strip())
     return {
         "ok": ok,
         "model": document.get("model") if isinstance(document, dict) else None,
-        "finish_reason": (
-            choices[0].get("finish_reason")
-            if isinstance(choices, list) and isinstance(choices[0], dict)
-            else None
-        ),
+        "finish_reason": (choice.get("finish_reason"),),
         "content": content,
         "usage": document.get("usage") if isinstance(document, dict) else None,
     }
@@ -1501,6 +1499,7 @@ def main(argv: list[str] | None = None) -> int:
             idle_timeout=args.idle_timeout,
             restart_timeout=args.restart_timeout,
             live_check=args.live_check,
+            root=root,
         )
         emit(result)
         return 0 if result.get("ok") else 1

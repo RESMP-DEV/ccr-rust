@@ -715,6 +715,22 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result["stage"], "snapshot")
         restart.assert_not_called()
 
+    def test_activate_honors_the_requested_snapshot_root(self) -> None:
+        alternate_root = self.snapshots / "alternate"
+        ready = {
+            "snapshot": "ready",
+            "path": str(alternate_root / "ready"),
+            "created_at": "2026-10-22T14:00:00-07:00",
+            "verified": {"ok": True},
+            "missing": [],
+        }
+        with (
+            mock.patch.object(recovery, "snapshot", return_value=ready) as snapshot,
+            mock.patch.object(recovery, "restart_listener"),
+        ):
+            recovery.activate_listener("main", root=alternate_root)
+        snapshot.assert_called_once_with(label="pre-activate-main", root=alternate_root)
+
     def test_activate_can_require_a_representative_completion(self) -> None:
         ready = {
             "snapshot": "ready",
@@ -745,6 +761,27 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["live_request"]["ok"])
         live.assert_called_once_with(3456)
+
+    def test_representative_request_rejects_malformed_choice(self) -> None:
+        class Response:
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"choices":[null]}'
+
+        with (
+            mock.patch.object(
+                recovery, "listener_runtime", return_value={"ok": True, "default": "m"}
+            ),
+            mock.patch("urllib.request.urlopen", return_value=Response()),
+        ):
+            result = recovery.representative_listener_request(3456)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "completion response has no valid choice")
 
     def test_process_text_mappings_parses_lsof_fields(self) -> None:
         output = "p42\nfcwd\ni1\nn/tmp\nftxt\ni2\nn/Users/x/ccr-rust\n"

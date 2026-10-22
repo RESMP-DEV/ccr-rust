@@ -46,8 +46,11 @@ surface rather than being reconstructed from a stale copy.
 - `ruff format scripts/ccr_recovery.py scripts/test_ccr_recovery.py`
 - `ruff check scripts/ccr_recovery.py scripts/test_ccr_recovery.py`
 - `PYTHONPATH=scripts python3 -m unittest discover -s scripts -p test_ccr_recovery.py`
-  — 57 tests passed
+  — 59 tests passed after review repairs for alternate snapshot roots and
+  malformed completion choices
 - `ty check scripts`
+- `RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 python3 scripts/quality.py` — all
+  12 checks passed after review repairs.
 
 ## Non-claims
 
