@@ -63,6 +63,7 @@ import time. Both modules now run on the system interpreter:
   `ccr_fallback_policy`, `ccr_wait_idle`, and `ccr_codex_catalog`.
 - Focused imports/stamps pass under `/usr/bin/python3`.
 - `python3 scripts/quality.py` passes all 12 checks.
+- Simultaneous worker/OCR activation also exposed a same-second snapshot-name race; final-name claiming now uses an exclusive lock and a four-thread regression test passes repeatedly.
 
 ## Non-claims
 
