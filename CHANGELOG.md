@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   streaming signature deltas survive through the completed reasoning item.
   M3.1 also normalizes Anthropic `thinking.type: "enabled"` to the hosted API's
   `adaptive` spelling and preserves supported request metadata.
+  GLM Chat responses retain Anthropic-shaped thinking blocks so their signed
+  content is translated once by the shared OpenAI layer rather than dropped.
 - Hardened worker recovery and authority handling. The inspector now prefers
   timestamped run directories for `latest`, excludes malformed manual
   directories from that selector, and surfaces launcher salvage evidence

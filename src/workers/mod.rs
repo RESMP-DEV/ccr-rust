@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use chrono::NaiveDateTime;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::fs;
@@ -78,6 +79,15 @@ fn parse_limit(value: &str) -> std::result::Result<usize, String> {
 
 fn parse_chars(value: &str) -> std::result::Result<usize, String> {
     bounded_number(value, 16000)
+}
+
+fn valid_timestamp_prefix(name: &str) -> bool {
+    name.len() >= 16
+        && name.as_bytes()[..8].iter().all(u8::is_ascii_digit)
+        && name.as_bytes()[8] == b'-'
+        && name.as_bytes()[9..15].iter().all(u8::is_ascii_digit)
+        && name.as_bytes()[15] == b'-'
+        && NaiveDateTime::parse_from_str(&name[..15], "%Y%m%d-%H%M%S").is_ok()
 }
 
 pub fn run(args: WorkerArgs) -> Result<()> {
@@ -163,12 +173,7 @@ fn run_directories(root: &Path) -> Result<Vec<PathBuf>> {
         let name = path
             .file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().to_string());
-        let valid_prefix = name.len() >= 16
-            && name.as_bytes()[..8].iter().all(u8::is_ascii_digit)
-            && name.as_bytes()[8] == b'-'
-            && name.as_bytes()[9..15].iter().all(u8::is_ascii_digit)
-            && name.as_bytes()[15] == b'-';
-        if valid_prefix {
+        if valid_timestamp_prefix(&name) {
             timestamped.push(path);
         } else {
             other.push(path);

@@ -81,3 +81,14 @@ fn signed_reasoning_blocks_serialize_as_replayable_responses_items() {
     assert_eq!(replay_blocks[0]["signature"], "sig-1");
     assert_eq!(response["output"][2]["type"], "function_call");
 }
+
+#[test]
+fn malformed_encrypted_reasoning_array_is_not_used_as_signature() {
+    let item = json!({
+        "type": "reasoning",
+        "content": [{"type": "reasoning_text", "text": "Select the tool."}],
+        "encrypted_content": r#"[{"signature":"opaque-but-not-thinking"}]"#
+    });
+
+    assert!(reasoning_blocks_from_responses_item(&item).is_empty());
+}

@@ -116,7 +116,12 @@ def normalize_source_reasoning_metadata(source: dict[str, Any]) -> bool:
     before = copy.deepcopy(source)
     source["defaultReasoningEffort"] = "max"
     source["default_reasoning_effort"] = "max"
+    source["default_reasoning_level"] = "max"
     source["supported_reasoning_efforts"] = list(GLM_REASONING_EFFORTS)
+    source["supported_reasoning_levels"] = [
+        {"effort": effort, "description": f"{effort} reasoning"}
+        for effort in GLM_REASONING_EFFORTS
+    ]
     return source != before
 
 

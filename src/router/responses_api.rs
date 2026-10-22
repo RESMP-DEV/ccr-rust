@@ -589,9 +589,7 @@ fn reasoning_blocks_from_responses_item(item: &serde_json::Value) -> Vec<serde_j
                         .is_some()
                 })
                 .collect::<Vec<_>>();
-            if !blocks.is_empty() {
-                return blocks;
-            }
+            return blocks;
         }
         if text.is_empty() {
             return Vec::new();

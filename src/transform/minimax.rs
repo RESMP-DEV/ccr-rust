@@ -47,13 +47,6 @@ pub(crate) fn is_m3_model(model: &str) -> bool {
     M3_MODELS.iter().any(|m| model == *m) || model.starts_with("minimax-m3.")
 }
 
-fn is_m31_model(model: &str) -> bool {
-    model
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("minimax-m3.1")
-}
-
 /// True when this provider talks to MiniMax, regardless of how the operator
 /// named it. Multi-credential setups use names such as `minimax-anthropic`,
 /// `minimax-primary`, or `minimax-work`, and `config.example.json` ships
@@ -311,7 +304,8 @@ impl Transformer for MinimaxTransformer {
             // accepts adaptive mode; normalize the common Anthropic `enabled`
             // spelling while leaving an explicit impossible `disabled` request
             // for provider validation.
-            if is_m31_model(&model) {
+            // Every M3-family name above is canonicalized to M3.1 Flash.
+            if is_m3_model(&model) {
                 match obj.get_mut("thinking") {
                     None => {
                         obj.insert(
@@ -684,17 +678,18 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_request_preserves_existing_thinking() {
+    fn test_transform_request_normalizes_legacy_thinking_for_m3_aliases() {
         let transformer = MinimaxTransformer;
         let request = json!({
             "model": "MiniMax-M3",
             "messages": [{"role": "user", "content": "Hello"}],
-            "thinking": {"type": "enabled"}
+            "thinking": {"type": "enabled", "budget_tokens": 4096}
         });
 
         let transformed = transformer.transform_request(request).unwrap();
-        // Should preserve existing thinking parameter
-        assert_eq!(transformed["thinking"]["type"], "enabled");
+        // Every M3 alias is rewritten to M3.1 Flash, which requires adaptive.
+        assert_eq!(transformed["model"], MINIMAX_M3_1_FLASH);
+        assert_eq!(transformed["thinking"], json!({"type": "adaptive"}));
     }
 
     #[test]

@@ -99,7 +99,11 @@ fn latest_explicit_directory_trace_and_receipt_selectors_resolve() {
 fn latest_prefers_timestamped_runs_over_manual_directories() {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
-    for name in ["manual-resume-20260119", "20261022-105000-new"] {
+    for name in [
+        "manual-resume-20260119",
+        "99999999-999999-invalid",
+        "20261022-105000-new",
+    ] {
         let run = root.join(name);
         receipt(&run, "completed");
     }
@@ -109,7 +113,14 @@ fn latest_prefers_timestamped_runs_over_manual_directories() {
         .iter()
         .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
         .collect();
-    assert_eq!(names, ["20261022-105000-new", "manual-resume-20260119"]);
+    assert_eq!(
+        names,
+        [
+            "20261022-105000-new",
+            "manual-resume-20260119",
+            "99999999-999999-invalid"
+        ]
+    );
     assert_eq!(
         resolve_run(root, "latest").unwrap(),
         root.join("20261022-105000-new").canonicalize().unwrap()

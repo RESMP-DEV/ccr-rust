@@ -32,9 +32,14 @@ reasoning history without touching the live GLM native Responses passthrough.
 - OpenAI/Responses upstream dispatch strips the internal `reasoning_blocks`
   carrier after native reasoning conversion; it is not sent as an unsupported
   Chat field.
-- The GLM Chat transformer moves assistant thinking blocks to GLM's native
-  `reasoning_content` field and leaves GLM-5.3's provider-default `max` effort
-  unchanged instead of injecting invalid `medium`.
+- The GLM Chat transformer retains Anthropic-shaped assistant thinking blocks;
+  the shared OpenAI translation layer converts them once, and GLM-5.3's
+  provider-default `max` effort remains unchanged instead of injecting invalid
+  `medium`.
+- Streaming keeps independent text/signature buffers for each reasoning block,
+  so adjacent signatures no longer overwrite one another.
+- Structured `encrypted_content` arrays that contain no Anthropic thinking
+  blocks are discarded rather than recycled as an opaque signature.
 
 ## Verification
 
@@ -53,6 +58,11 @@ reasoning history without touching the live GLM native Responses passthrough.
 - `RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo build --release --locked`
   and `cargo install --path . --force --locked` — passed; both installed
   executables were replaced. No listener was restarted.
+- 2026-10-22 review repairs added focused checks for per-block streamed
+  signatures, GLM Anthropic-shaped thinking, all canonicalized M3 aliases,
+  strict run timestamp selection, bounded/sanitized salvage commands, and
+  malformed structured encrypted reasoning. The lib count is now 605 tests.
+  The full review-fix matrix is recorded below after rerunning the gate.
 
 The key mocked end-to-end test proves both requests seen by an Anthropic
 provider. The second upstream request contains the exact original signed
@@ -69,3 +79,7 @@ the matching `tool_result`; no hidden reasoning is rendered as visible text.
   validate foreign state remains responsible for rejection.
 - The GLM live route continues to use native Responses passthrough; this patch
   deliberately does not add GLM `clear_thinking` controls to that path.
+- The delegated read-only protocol-review worker run
+  `20261022-124600-2fv0lo5f` executed 108 commands but emitted no review
+  verdict. Its receipt remains `task_verified: false`; it is evidence of the
+  partial-worker failure mode and is not counted as protocol review approval.

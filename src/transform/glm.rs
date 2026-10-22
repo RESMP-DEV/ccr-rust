@@ -36,38 +36,6 @@ fn supports_reasoning_effort(model: &str) -> bool {
         .any(|m| model.eq_ignore_ascii_case(m) || model.starts_with(&format!("{m}-")))
 }
 
-fn move_assistant_thinking_to_reasoning_content(request: &mut Value) {
-    let Some(messages) = request.get_mut("messages").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for message in messages {
-        if message.get("role").and_then(Value::as_str) != Some("assistant")
-            || message
-                .get("reasoning_content")
-                .is_some_and(|value| !value.is_null())
-        {
-            continue;
-        }
-        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let mut reasoning = Vec::new();
-        blocks.retain(|block| {
-            if block.get("type").and_then(Value::as_str) == Some("thinking") {
-                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                    reasoning.push(text.to_string());
-                }
-                false
-            } else {
-                true
-            }
-        });
-        if !reasoning.is_empty() {
-            message["reasoning_content"] = Value::String(reasoning.join("\n\n"));
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 struct StreamState {
     in_think: bool,
@@ -276,9 +244,10 @@ impl Transformer for GlmTransformer {
             return Ok(request);
         };
 
-        // GLM's Chat API expects prior assistant reasoning at
-        // `message.reasoning_content`, not Anthropic-style content blocks.
-        move_assistant_thinking_to_reasoning_content(&mut request);
+        // Prior assistant reasoning stays in Anthropic-style `thinking`
+        // blocks here. The OpenAI translation layer converts them to
+        // `reasoning_content` (and signed `reasoning_blocks`) once, so the
+        // Anthropic-protocol path keeps the provider-native shape.
 
         trace!("GLM request transformed for model {}", model);
         Ok(request)
@@ -323,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_thinking_moves_to_glm_reasoning_content() {
+    fn assistant_thinking_stays_in_anthropic_shape() {
         let transformer = GlmTransformer::default();
         let request = json!({
             "model": "glm-5.2",
@@ -336,12 +305,16 @@ mod tests {
             }]
         });
 
+        // The OpenAI translation layer converts thinking blocks once, so the
+        // Anthropic-shaped request keeps them intact until then.
         let transformed = transformer.transform_request(request).unwrap();
         let message = &transformed["messages"][0];
-        assert_eq!(message["reasoning_content"], "Select the tool.");
+        assert!(message.get("reasoning_content").is_none());
         let blocks = message["content"].as_array().unwrap();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0]["type"], "tool_use");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "Select the tool.");
+        assert_eq!(blocks[1]["type"], "tool_use");
     }
 
     #[test]

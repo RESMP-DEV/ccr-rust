@@ -88,9 +88,18 @@ class CodexCatalogTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(source["defaultReasoningEffort"], "max")
         self.assertEqual(source["default_reasoning_effort"], "max")
+        self.assertEqual(source["default_reasoning_level"], "max")
         self.assertEqual(
             source["supported_reasoning_efforts"],
             ["low", "high", "max"],
+        )
+        self.assertEqual(
+            source["supported_reasoning_levels"],
+            [
+                {"effort": "low", "description": "low reasoning"},
+                {"effort": "high", "description": "high reasoning"},
+                {"effort": "max", "description": "max reasoning"},
+            ],
         )
 
     def test_apply_with_no_changes_neither_snapshots_nor_writes(self) -> None:

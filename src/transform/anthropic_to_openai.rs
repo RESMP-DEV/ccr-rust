@@ -432,6 +432,11 @@ fn transform_streaming_event(anthropic_event: Value) -> Result<Value> {
                         }]
                     })
                 }
+                "thinking" => {
+                    // Preserve block boundaries so the Responses adapter can
+                    // pair each signature with its own reasoning text.
+                    serde_json::json!({"reasoning_block_index": block_index})
+                }
                 _ => serde_json::json!({}),
             };
 
