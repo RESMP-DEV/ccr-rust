@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Made concurrent recovery snapshots race-safe. Each final snapshot name is now claimed with an exclusive lock before staging, so simultaneous listener activations cannot select or overwrite the same suffix.
+
 - Fixed launchd-invoked Python helpers for the macOS system interpreter. `ccr-recovery` now uses the 3.9-compatible timezone API, `ccr-fallback-policy` imports with deferred annotations, and regression tests import both modules through `/usr/bin/python3` with the launchd PATH.
 
 - Hardened listener activation and configuration recovery. Activation now

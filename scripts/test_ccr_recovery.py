@@ -12,9 +12,11 @@ import os
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 from unittest import mock
 
 import ccr_recovery as recovery
@@ -234,6 +236,19 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(
             [entry for entry in self.snapshots.iterdir() if entry.is_dir()], []
         )
+
+    def test_concurrent_snapshot_claims_are_exclusive(self) -> None:
+        barrier = threading.Barrier(4)
+
+        def capture(index: int) -> dict[str, Any]:
+            barrier.wait(timeout=5)
+            return recovery.snapshot(label=f"concurrent-{index}", root=self.snapshots)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(capture, range(4)))
+        names = [result["snapshot"] for result in results]
+        self.assertEqual(len(set(names)), 4, names)
+        self.assertTrue(all(result["verified"]["ok"] for result in results), results)
 
     def test_prune_keeps_newest_and_reports_removed(self) -> None:
         names = []

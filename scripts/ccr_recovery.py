@@ -365,12 +365,29 @@ def snapshot(label: str = "manual", root: Path | None = None) -> dict[str, Any]:
     root = root or SNAPSHOT_ROOT
     ensure_private_directory(root)
     moment = now()
-    final = root / stamp(moment)
+    moment_stamp = stamp(moment)
     suffix = 0
-    while final.exists():
-        suffix += 1
-        final = root / f"{stamp(moment)}-{suffix:02d}"
-    staging = Path(tempfile.mkdtemp(prefix=f".{stamp(moment)}.", dir=root))
+    lock_fd: int | None = None
+    lock_path: Path | None = None
+    while True:
+        final = root / (moment_stamp if suffix == 0 else f"{moment_stamp}-{suffix:02d}")
+        if final.exists():
+            suffix += 1
+            continue
+        candidate_lock = root / f".{final.name}.lock"
+        try:
+            lock_fd = os.open(
+                candidate_lock,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            suffix += 1
+            continue
+        lock_path = candidate_lock
+        break
+
+    staging = Path(tempfile.mkdtemp(prefix=f".{moment_stamp}.", dir=root))
     captured: list[str] = []
     missing: list[str] = []
     symlinks: set[str] = set()
@@ -394,6 +411,11 @@ def snapshot(label: str = "manual", root: Path | None = None) -> dict[str, Any]:
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        if lock_path is not None:
+            lock_path.unlink(missing_ok=True)
     removed = prune(root)
     return {
         "snapshot": final.name,
