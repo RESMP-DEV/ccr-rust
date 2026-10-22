@@ -96,6 +96,27 @@ fn latest_explicit_directory_trace_and_receipt_selectors_resolve() {
 }
 
 #[test]
+fn latest_prefers_timestamped_runs_over_manual_directories() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    for name in ["manual-resume-20260119", "20261022-105000-new"] {
+        let run = root.join(name);
+        receipt(&run, "completed");
+    }
+
+    let paths = run_directories(root).unwrap();
+    let names: Vec<_> = paths
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(names, ["20261022-105000-new", "manual-resume-20260119"]);
+    assert_eq!(
+        resolve_run(root, "latest").unwrap(),
+        root.join("20261022-105000-new").canonicalize().unwrap()
+    );
+}
+
+#[test]
 fn missing_and_unsupported_selectors_have_distinct_errors() {
     let directory = TempDir::new().unwrap();
     let root = directory.path();

@@ -120,8 +120,14 @@ def summarize_runs(runs_dir: Path, days: int) -> RunUsage:
     network_allowed = 0
     elapsed_total = 0.0
     count = 0
-    for status_path in sorted(runs_dir.glob("*/status.json")):
-        if (run_day := run_date(status_path.parent)) is None or run_day < cutoff:
+    run_directories = sorted(path for path in runs_dir.iterdir() if path.is_dir())
+    for run_dir in run_directories:
+        if (run_day := run_date(run_dir)) is None or run_day < cutoff:
+            continue
+        status_path = run_dir / "status.json"
+        if not status_path.exists():
+            outcomes["receipt_pending"] += 1
+            count += 1
             continue
         try:
             status = json.loads(status_path.read_text(encoding="utf-8"))

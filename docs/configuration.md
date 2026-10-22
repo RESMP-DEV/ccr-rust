@@ -167,11 +167,13 @@ protocol's native controls on passthrough requests.
 Provider-specific reasoning controls are not interchangeable. MiniMax-M3 uses
 `{"thinking":{"type":"adaptive"}}`: CCR does not convert a numeric depth or
 effort setting into that mode, and its signed thinking blocks must be replayed
-unchanged on the next native Messages request. Native Anthropic clients
-preserve MiniMax's signed thinking during tool continuations. GLM 5.3 supports
-the `max` effort label; a Chat `reasoning_effort` or Responses
-`reasoning.effort` value of `max` maps to `output_config.effort: "max"`, while
-a native Messages client supplies that same `output_config` directly.
+unchanged on the next native Messages request. GLM-5.3 accepts only the
+`low`, `high`, and `max` effort labels and defaults to `max` when no control
+is supplied. A Chat `reasoning_effort` or Responses `reasoning.effort` value
+of `max` maps to `output_config.effort: "max"`, while a native Messages client
+supplies that same `output_config` directly. Z.AI's Coding Plan accepts
+additional Codex labels such as `xhigh` but normalizes them to these native
+levels; do not describe such aliases as distinct GLM-5.3 model levels.
 
 Non-streaming native Messages responses that contain JSON, including a raw
 JSON fallback with a non-Anthropic schema, use `application/json`. Responses

@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Hardened worker recovery and authority handling. The inspector now prefers
+  timestamped run directories for `latest`, excludes malformed manual
+  directories from that selector, and surfaces launcher salvage evidence
+  (`cwd`, brief path, partial report, changed-path count, and resume command)
+  without marking a task verified. Usage summaries now include timestamped run
+  directories whose receipts are absent instead of silently omitting them.
+  Repository instructions now define worker reports as untrusted evidence
+  rather than parent directives.
+- Pinned generated Codex model metadata for GLM-5.3 to the provider-native
+  `low`, `high`, and `max` reasoning labels with `max` as the default. This
+  removes the advertised `xhigh` alias while preserving the live Coding Plan
+  behavior that normalizes it to `max`.
 - Added the keyed B550 Strata Coder service as a local coding crawl-back tier
   (`strata-b550,qwen3.8-flash-next-coder`) ahead of `local27`. The provider uses
   a ZeroTier-first localhost SSH tunnel with authenticated LAN and Strix-jump

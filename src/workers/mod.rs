@@ -157,8 +157,27 @@ fn run_directories(root: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
-    paths.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
-    Ok(paths)
+    let mut timestamped = Vec::new();
+    let mut other = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().to_string());
+        let valid_prefix = name.len() >= 16
+            && name.as_bytes()[..8].iter().all(u8::is_ascii_digit)
+            && name.as_bytes()[8] == b'-'
+            && name.as_bytes()[9..15].iter().all(u8::is_ascii_digit)
+            && name.as_bytes()[15] == b'-';
+        if valid_prefix {
+            timestamped.push(path);
+        } else {
+            other.push(path);
+        }
+    }
+    timestamped.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    other.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    timestamped.extend(other);
+    Ok(timestamped)
 }
 
 fn resolve_run(root: &Path, run: &str) -> Result<PathBuf> {

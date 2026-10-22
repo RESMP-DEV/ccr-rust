@@ -120,6 +120,15 @@ pub(super) fn write(output: &mut impl Write, value: &Value) -> Result<()> {
                 writeln!(output, "Warning: {}", single_line(warning))?;
             }
         }
+        if value["salvage"].is_object() {
+            writeln!(
+                output,
+                "Salvage: partial={} bytes; changed_paths={}; resume={}",
+                value["salvage"]["partial_report_bytes"],
+                value["salvage"]["changed_path_count"],
+                string(&value["salvage"]["resume_command"])
+            )?;
+        }
         if !value["final_report"].is_null() {
             writeln!(
                 output,
