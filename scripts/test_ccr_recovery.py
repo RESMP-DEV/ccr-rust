@@ -783,6 +783,31 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "completion response has no valid choice")
 
+    def test_representative_request_returns_scalar_finish_reason(self) -> None:
+        class Response:
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return (
+                    b'{"model":"m","choices":[{"message":{"content":"OK"},'
+                    b'"finish_reason":"stop"}]}'
+                )
+
+        with (
+            mock.patch.object(
+                recovery, "listener_runtime", return_value={"ok": True, "default": "m"}
+            ),
+            mock.patch("urllib.request.urlopen", return_value=Response()),
+        ):
+            result = recovery.representative_listener_request(3456)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["content"], "OK")
+        self.assertEqual(result["finish_reason"], "stop")
+
     def test_process_text_mappings_parses_lsof_fields(self) -> None:
         output = "p42\nfcwd\ni1\nn/tmp\nftxt\ni2\nn/Users/x/ccr-rust\n"
         with mock.patch.object(

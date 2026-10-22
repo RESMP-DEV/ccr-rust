@@ -901,7 +901,7 @@ def representative_listener_request(port: int, timeout: int = 60) -> dict[str, A
     return {
         "ok": ok,
         "model": document.get("model") if isinstance(document, dict) else None,
-        "finish_reason": (choice.get("finish_reason"),),
+        "finish_reason": choice.get("finish_reason"),
         "content": content,
         "usage": document.get("usage") if isinstance(document, dict) else None,
     }
