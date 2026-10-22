@@ -88,6 +88,8 @@ context limits across generations.
 The MiniMax transformer is required for:
 
 - adaptive thinking injection;
+- M3.1 `thinking.type: "enabled"` normalization to the hosted API's
+  `adaptive` spelling;
 - canonicalization on paths that invoke the transformer directly;
 - malformed assistant-history cleanup;
 - complete-response cleanup;
@@ -97,6 +99,26 @@ The registry does not infer a transformer from `provider.name`. A provider
 without the explicit transformer entry builds an empty chain. This was a real
 production defect: the MiniMax transformer existed in the registry but none of
 its behavior ran until the shared policy pinned its `use` entry.
+
+## Interleaved-thinking replay
+
+MiniMax M3.1 Flash officially requires the complete ordered assistant response,
+including signed `thinking` blocks, to be replayed with tool results. CCR
+preserves that contract across its Codex/OpenAI Responses frontend:
+
+1. an Anthropic `thinking` block and its opaque `signature` remain structured
+   and hidden;
+2. non-streaming and streaming converters expose a Responses `reasoning` item
+   whose `encrypted_content` carries the ordered provider blocks;
+3. on the next Responses request, adjacent `reasoning`, assistant message, and
+   function-call items are regrouped into one Anthropic assistant turn;
+4. the matching `tool_result` follows immediately in the next user turn.
+
+The transformer never rewrites hidden MiniMax thinking into visible text. A
+valid MiniMax response may contain a tool call without thinking; CCR does not
+synthesize a block in that case. `metadata` is passed through because MiniMax
+supports it, while explicit `thinking.type: "disabled"` is left for the
+provider's documented HTTP 400 validation.
 
 ## Malformed-output behavior
 

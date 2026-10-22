@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use super::content_part_events::{append_content_part_added, append_content_part_done};
 use super::{
     add_reasoning_output_item, append_response_delta, initial_responses_output_item,
-    map_openai_usage_to_responses_usage, response_output_item_identity, responses_reasoning_item,
-    unique_response_output_item_identity, ResponseOutputItemIdentity,
+    map_openai_usage_to_responses_usage, response_output_item_identity,
+    responses_reasoning_item_from_blocks, unique_response_output_item_identity,
+    ResponseOutputItemIdentity,
 };
 
 #[derive(Default)]
@@ -46,6 +47,7 @@ pub(super) struct ResponsesStreamConverter {
     message_quote_pending: String,
     refusal_text: String,
     reasoning_text: String,
+    reasoning_signature: String,
     response_status: String,
     incomplete_details: Option<serde_json::Value>,
     preserved_response: Option<serde_json::Value>,
@@ -142,6 +144,7 @@ impl ResponsesStreamConverter {
             message_quote_pending: String::new(),
             refusal_text: String::new(),
             reasoning_text: String::new(),
+            reasoning_signature: String::new(),
             response_status,
             incomplete_details: None,
             preserved_response,
@@ -459,6 +462,14 @@ impl ResponsesStreamConverter {
             .filter(|reasoning| !reasoning.is_empty())
         {
             self.push_reasoning_delta(reasoning, output);
+        }
+
+        if let Some(signature) = delta
+            .get("reasoning_signature")
+            .and_then(|value| value.as_str())
+            .filter(|signature| !signature.is_empty())
+        {
+            self.reasoning_signature = signature.to_string();
         }
 
         if let Some(refusal) = delta
@@ -810,6 +821,13 @@ impl ResponsesStreamConverter {
                 {
                     self.push_reasoning_delta(thinking, output);
                 }
+                if let Some(signature) = delta
+                    .get("signature")
+                    .and_then(|value| value.as_str())
+                    .filter(|signature| !signature.is_empty())
+                {
+                    self.reasoning_signature = signature.to_string();
+                }
             }
             Some("message_delta") => {
                 if let Some(usage) = chunk.get("usage") {
@@ -829,7 +847,17 @@ impl ResponsesStreamConverter {
         let mut indexed_output_items = Vec::new();
 
         if self.preserved_response.is_none() && !self.reasoning_text.is_empty() {
-            let reasoning_item = responses_reasoning_item(&self.response_id, &self.reasoning_text);
+            let mut reasoning_block = serde_json::json!({
+                "thinking": self.reasoning_text
+            });
+            if !self.reasoning_signature.is_empty() {
+                reasoning_block["signature"] =
+                    serde_json::Value::String(self.reasoning_signature.clone());
+            }
+            let reasoning_item = responses_reasoning_item_from_blocks(
+                &self.response_id,
+                std::slice::from_ref(&reasoning_block),
+            );
             let output_index = self
                 .reasoning_output_index
                 .expect("generated reasoning output must have an added event");
@@ -1085,5 +1113,46 @@ mod tests {
         converter.push_frame(None, &frame.to_string());
 
         assert_eq!(converter.next_output_index, 2);
+    }
+
+    #[test]
+    fn signed_streaming_reasoning_is_replayable() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let frames = [
+            serde_json::json!({
+                "id": "resp_signed",
+                "choices": [{
+                    "delta": {"reasoning_content": "Select the tool."}
+                }]
+            }),
+            serde_json::json!({
+                "id": "resp_signed",
+                "choices": [{
+                    "delta": {"reasoning_signature": "sig-1"}
+                }]
+            }),
+        ];
+        for frame in frames {
+            converter.push_frame(None, &frame.to_string());
+        }
+        let output = converter.finish();
+
+        let mut done_item = None;
+        for line in output.lines() {
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            let event: serde_json::Value = serde_json::from_str(data).unwrap();
+            if event["type"] == "response.output_item.done" {
+                done_item = Some(event["item"].clone());
+            }
+        }
+        let item = done_item.expect("reasoning output item should complete");
+        assert_eq!(item["type"], "reasoning");
+        assert_eq!(item["content"][0]["text"], "Select the tool.");
+        let blocks: Vec<serde_json::Value> =
+            serde_json::from_str(item["encrypted_content"].as_str().unwrap()).unwrap();
+        assert_eq!(blocks[0]["thinking"], "Select the tool.");
+        assert_eq!(blocks[0]["signature"], "sig-1");
     }
 }

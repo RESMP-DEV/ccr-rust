@@ -85,6 +85,29 @@ fn app_for_mock(mock_server: &MockServer) -> Router {
     build_app(config)
 }
 
+fn minimax_app_for_mock(mock_server: &MockServer) -> Router {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&json!({
+            "Providers": [{
+                "name": "mock",
+                "api_base_url": mock_server.uri(),
+                "api_key": "test-key",
+                "models": ["MiniMax-M3.1-Flash"],
+                "protocol": "anthropic",
+                "transformer": {"use": ["minimax"]}
+            }],
+            "Router": {"default": "mock,MiniMax-M3.1-Flash"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    build_app(config)
+}
+
 async fn mount_anthropic_json_success(mock_server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/messages"))
@@ -451,6 +474,232 @@ async fn native_messages_round_trip_preserves_signed_thinking_and_tool_result() 
             "content": "12:34"
         })
     );
+}
+
+#[tokio::test]
+async fn responses_tool_round_trip_preserves_signed_interleaved_thinking() {
+    let mock_server = MockServer::start().await;
+    let signed_thinking = json!({
+        "type": "thinking",
+        "thinking": "Synthetic reasoning for the tool call.",
+        "signature": "signed-minimax-reasoning"
+    });
+    let tool_use = json!({
+        "type": "tool_use",
+        "id": "toolu_signed_responses",
+        "name": "get_time",
+        "input": {"timezone": "UTC"}
+    });
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_signed_responses",
+            "type": "message",
+            "role": "assistant",
+            "model": "MiniMax-M3.1-Flash",
+            "content": [signed_thinking.clone(), tool_use.clone()],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 9, "output_tokens": 5}
+        })))
+        .expect(2)
+        .mount(&mock_server)
+        .await;
+
+    let app = minimax_app_for_mock(&mock_server);
+    let request = json!({
+        "model": "mock,MiniMax-M3.1-Flash",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "What time is it in UTC?"}]
+        }],
+        "tools": [{
+            "type": "function",
+            "name": "get_time",
+            "parameters": {
+                "type": "object",
+                "properties": {"timezone": {"type": "string"}}
+            }
+        }],
+        "reasoning": {"effort": "max"},
+        "max_output_tokens": 128_000,
+        "stream": false
+    });
+
+    let first_response = send_json(app.clone(), "/v1/responses", request).await;
+    let first = successful_json_response(first_response).await;
+    let reasoning = first["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("signed reasoning item must be exposed");
+    let replay_blocks: Vec<Value> =
+        serde_json::from_str(reasoning["encrypted_content"].as_str().unwrap()).unwrap();
+    assert_eq!(replay_blocks[0]["signature"], "signed-minimax-reasoning");
+    assert!(
+        !first.to_string().contains("[Thinking]"),
+        "hidden reasoning must not become visible assistant text"
+    );
+
+    let mut continuation_input = vec![json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "What time is it in UTC?"}]
+    })];
+    continuation_input.extend(first["output"].as_array().unwrap().clone());
+    continuation_input.push(json!({
+        "type": "function_call_output",
+        "call_id": "toolu_signed_responses",
+        "output": "12:34 UTC"
+    }));
+    let continuation = json!({
+        "model": "mock,MiniMax-M3.1-Flash",
+        "input": continuation_input,
+        "tools": [{
+            "type": "function",
+            "name": "get_time",
+            "parameters": {
+                "type": "object",
+                "properties": {"timezone": {"type": "string"}}
+            }
+        }],
+        "reasoning": {"effort": "max"},
+        "max_output_tokens": 128_000,
+        "stream": false
+    });
+    let second_response = send_json(app, "/v1/responses", continuation).await;
+    successful_json_response(second_response).await;
+
+    let requests = mock_server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let second_upstream: Value =
+        serde_json::from_slice(&requests[1].body).expect("second request is JSON");
+    let messages = second_upstream["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[1]["content"], json!([signed_thinking, tool_use]));
+    assert_eq!(
+        messages[2]["content"][0]["tool_use_id"],
+        "toolu_signed_responses"
+    );
+    assert_eq!(second_upstream["output_config"], json!({"effort": "max"}));
+}
+
+#[tokio::test]
+async fn responses_stream_preserves_signed_interleaved_thinking() {
+    let mock_server = MockServer::start().await;
+    let events = [
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_signed_stream",
+                "model": "MiniMax-M3.1-Flash",
+                "usage": {"input_tokens": 8, "output_tokens": 0}
+            }
+        }),
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""}
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Select the tool."}
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "signed-stream-reasoning"}
+        }),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_signed_stream",
+                "name": "get_time",
+                "input": {}
+            }
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": "{\"timezone\":\"UTC\"}"
+            }
+        }),
+        json!({"type": "content_block_stop", "index": 1}),
+        json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 5}
+        }),
+        json!({"type": "message_stop"}),
+    ];
+    let payload = events
+        .iter()
+        .map(|event| format!("event: {}\ndata: {event}\n\n", event["type"]))
+        .collect::<String>();
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(payload),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let app = minimax_app_for_mock(&mock_server);
+    let request = json!({
+        "model": "mock,MiniMax-M3.1-Flash",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "What time is it in UTC?"}]
+        }],
+        "tools": [{
+            "type": "function",
+            "name": "get_time",
+            "parameters": {
+                "type": "object",
+                "properties": {"timezone": {"type": "string"}}
+            }
+        }],
+        "reasoning": {"effort": "max"},
+        "max_output_tokens": 128_000,
+        "stream": true
+    });
+    let response = send_json(app, "/v1/responses", request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let stream = String::from_utf8_lossy(&body).to_string();
+
+    let mut done_item = None;
+    for line in stream.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if event["type"] == "response.output_item.done" && event["item"]["type"] == "reasoning" {
+            done_item = Some(event["item"].clone());
+        }
+    }
+    let item = done_item.expect("streaming reasoning item should complete");
+    assert_eq!(item["type"], "reasoning");
+    assert_eq!(item["content"][0]["text"], "Select the tool.");
+    let replay_blocks: Vec<Value> =
+        serde_json::from_str(item["encrypted_content"].as_str().unwrap()).unwrap();
+    assert_eq!(replay_blocks[0]["signature"], "signed-stream-reasoning");
+    assert!(!stream.contains("[Thinking]"));
 }
 
 #[tokio::test]

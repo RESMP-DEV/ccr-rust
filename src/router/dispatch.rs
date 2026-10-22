@@ -809,6 +809,19 @@ pub(super) async fn try_request_via_openai_protocol(
             serde_json::to_value(&openai_request).map_err(|e| TryRequestError::Other(e.into()))?;
         (value, stream)
     };
+    if let Some(messages) = openai_request_value
+        .get_mut("messages")
+        .and_then(|messages| messages.as_array_mut())
+    {
+        for message in messages {
+            if let Some(message_obj) = message.as_object_mut() {
+                // `reasoning_blocks` is an internal round-trip carrier. OpenAI
+                // and Responses providers receive their native reasoning items
+                // or fields, not CCR's Anthropic-signature compatibility shape.
+                message_obj.remove("reasoning_blocks");
+            }
+        }
+    }
     if provider.protocol != ProviderProtocol::Responses {
         if let Some(object) = openai_request_value.as_object_mut() {
             object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
@@ -1554,6 +1567,8 @@ mod tests {
     use super::*;
     use crate::config::Provider;
 
+    mod endpoint_tests;
+
     fn anthropic_provider(auth_header: Option<&str>) -> Provider {
         let mut value = serde_json::json!({
             "name": "test-anthropic",
@@ -1825,23 +1840,6 @@ mod tests {
     #[test]
     fn hostile_reset_timestamp_does_not_panic_dispatch() {
         assert_eq!(reset_at_from_unix_timestamp(u64::MAX), None);
-    }
-
-    #[test]
-    fn provider_endpoint_suffix_requires_a_path_boundary() {
-        let provider: crate::config::Provider = serde_json::from_value(serde_json::json!({
-            "name": "suffix",
-            "api_base_url": "https://example.test/fooresponses",
-            "api_key": "test",
-            "protocol": "responses",
-            "models": []
-        }))
-        .unwrap();
-
-        assert_eq!(
-            provider_endpoint_url(&provider, "responses"),
-            "https://example.test/fooresponses/responses"
-        );
     }
 
     #[test]

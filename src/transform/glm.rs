@@ -36,6 +36,38 @@ fn supports_reasoning_effort(model: &str) -> bool {
         .any(|m| model.eq_ignore_ascii_case(m) || model.starts_with(&format!("{m}-")))
 }
 
+fn move_assistant_thinking_to_reasoning_content(request: &mut Value) {
+    let Some(messages) = request.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("assistant")
+            || message
+                .get("reasoning_content")
+                .is_some_and(|value| !value.is_null())
+        {
+            continue;
+        }
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut reasoning = Vec::new();
+        blocks.retain(|block| {
+            if block.get("type").and_then(Value::as_str) == Some("thinking") {
+                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                    reasoning.push(text.to_string());
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if !reasoning.is_empty() {
+            message["reasoning_content"] = Value::String(reasoning.join("\n\n"));
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct StreamState {
     in_think: bool,
@@ -218,32 +250,35 @@ impl Transformer for GlmTransformer {
     }
 
     fn transform_request(&self, mut request: Value) -> Result<Value> {
-        let Some(obj) = request.as_object_mut() else {
+        let model = if let Some(obj) = request.as_object_mut() {
+            let model = obj
+                .get("model")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Inject reasoning_effort for supported models if not already set
+            if supports_reasoning_effort(&model) && !obj.contains_key("reasoning_effort") {
+                // Default to "medium" effort for balanced performance
+                obj.insert(
+                    "reasoning_effort".to_string(),
+                    Value::String("medium".to_string()),
+                );
+                trace!("Injected reasoning_effort=medium for model {}", model);
+            }
+
+            obj.remove("metadata");
+            obj.remove("anthropic-beta");
+            obj.remove("anthropic-version");
+            obj.remove("anthropic_version");
+            model
+        } else {
             return Ok(request);
         };
 
-        // Clone model name to avoid borrow issues during mutation
-        let model = obj
-            .get("model")
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        // Inject reasoning_effort for supported models if not already set
-        if supports_reasoning_effort(&model) && !obj.contains_key("reasoning_effort") {
-            // Default to "medium" effort for balanced performance
-            obj.insert(
-                "reasoning_effort".to_string(),
-                Value::String("medium".to_string()),
-            );
-            trace!("Injected reasoning_effort=medium for model {}", model);
-        }
-
-        // Strip Anthropic-specific passthrough fields
-        obj.remove("metadata");
-        obj.remove("anthropic-beta");
-        obj.remove("anthropic-version");
-        obj.remove("anthropic_version");
+        // GLM's Chat API expects prior assistant reasoning at
+        // `message.reasoning_content`, not Anthropic-style content blocks.
+        move_assistant_thinking_to_reasoning_content(&mut request);
 
         trace!("GLM request transformed for model {}", model);
         Ok(request)
@@ -274,6 +309,40 @@ impl Transformer for GlmTransformer {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn glm53_uses_provider_default_max_effort() {
+        let transformer = GlmTransformer::default();
+        let request = json!({
+            "model": "glm-5.3",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let transformed = transformer.transform_request(request).unwrap();
+        assert!(transformed.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn assistant_thinking_moves_to_glm_reasoning_content() {
+        let transformer = GlmTransformer::default();
+        let request = json!({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Select the tool."},
+                    {"type": "tool_use", "id": "call", "name": "get_weather", "input": {}}
+                ]
+            }]
+        });
+
+        let transformed = transformer.transform_request(request).unwrap();
+        let message = &transformed["messages"][0];
+        assert_eq!(message["reasoning_content"], "Select the tool.");
+        let blocks = message["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "tool_use");
+    }
 
     #[test]
     fn extracts_single_think_block() {

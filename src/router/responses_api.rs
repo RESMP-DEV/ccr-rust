@@ -18,9 +18,15 @@ use tracing::error;
 
 use crate::sse::SseFrameDecoder;
 
+#[cfg(test)]
+mod agent_message_tests;
 mod content_part_events;
 mod handler;
 mod incremental_stream;
+#[cfg(test)]
+mod reasoning_tests;
+#[cfg(test)]
+mod request_edge_tests;
 
 pub use handler::handle_responses;
 use incremental_stream::ResponsesStreamConverter;
@@ -246,6 +252,32 @@ fn responses_reasoning_item(response_id: &str, reasoning: &str) -> serde_json::V
     })
 }
 
+fn responses_reasoning_item_from_blocks(
+    response_id: &str,
+    blocks: &[serde_json::Value],
+) -> serde_json::Value {
+    let text = blocks
+        .iter()
+        .filter_map(|block| block.get("thinking").and_then(serde_json::Value::as_str))
+        .filter(|thinking| !thinking.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut item = serde_json::json!({
+        "id": format!("rs_{response_id}"),
+        "type": "reasoning",
+        "summary": [],
+        "content": [{
+            "type": "reasoning_text",
+            "text": text
+        }]
+    });
+    if let Ok(encrypted) = serde_json::to_string(blocks) {
+        item["encrypted_content"] = serde_json::Value::String(encrypted);
+    }
+    item
+}
+
 fn openai_chat_completion_to_responses_json(
     openai: &serde_json::Value,
     preserved_response: Option<&serde_json::Value>,
@@ -303,7 +335,13 @@ fn openai_chat_completion_to_responses_json(
                 }
             }
 
-            if let Some(reasoning) = message
+            if let Some(blocks) = message
+                .get("reasoning_blocks")
+                .and_then(|value| value.as_array())
+                .filter(|blocks| !blocks.is_empty())
+            {
+                output_items.push(responses_reasoning_item_from_blocks(response_id, blocks));
+            } else if let Some(reasoning) = message
                 .get("reasoning_content")
                 .and_then(|v| v.as_str())
                 .filter(|reasoning| !reasoning.is_empty())
@@ -508,6 +546,81 @@ fn normalize_continuation_output(item: &serde_json::Value) -> String {
     serde_json::Value::Object(payload).to_string()
 }
 
+fn responses_reasoning_text(item: &serde_json::Value) -> String {
+    item.get("content")
+        .and_then(|content| content.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|part| {
+            part.get("text")
+                .and_then(|value| value.as_str())
+                .filter(|text| !text.is_empty())
+        })
+        .chain(
+            item.get("summary")
+                .and_then(|summary| summary.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|part| {
+                    part.get("text")
+                        .and_then(|value| value.as_str())
+                        .filter(|text| !text.is_empty())
+                }),
+        )
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn reasoning_blocks_from_responses_item(item: &serde_json::Value) -> Vec<serde_json::Value> {
+    let text = responses_reasoning_text(item);
+    if let Some(encrypted) = item
+        .get("encrypted_content")
+        .and_then(|value| value.as_str())
+        .filter(|encrypted| !encrypted.is_empty())
+    {
+        if let Ok(blocks) = serde_json::from_str::<Vec<serde_json::Value>>(encrypted) {
+            let blocks = blocks
+                .into_iter()
+                .filter(|block| {
+                    block
+                        .get("thinking")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                })
+                .collect::<Vec<_>>();
+            if !blocks.is_empty() {
+                return blocks;
+            }
+        }
+        if text.is_empty() {
+            return Vec::new();
+        }
+        return vec![serde_json::json!({
+            "thinking": text,
+            "signature": encrypted
+        })];
+    }
+
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![serde_json::json!({"thinking": text})]
+    }
+}
+
+fn append_assistant_tool_call(message: &mut serde_json::Value, tool_call: serde_json::Value) {
+    if !message
+        .get("tool_calls")
+        .is_some_and(|calls| calls.is_array())
+    {
+        message["tool_calls"] = serde_json::json!([]);
+    }
+    if let Some(calls) = message["tool_calls"].as_array_mut() {
+        calls.push(tool_call);
+    }
+}
+
 fn normalize_responses_message_role(role: &str) -> &str {
     match role {
         // OpenAI Responses API `developer` role should be treated as `system`
@@ -622,10 +735,42 @@ pub(super) fn responses_request_to_openai_chat_request(
                         .get("content")
                         .map(responses_content_to_openai_content)
                         .unwrap_or_else(|| serde_json::Value::String(String::new()));
-                    messages.push(serde_json::json!({
-                        "role": role,
-                        "content": content
-                    }));
+                    if role == "assistant"
+                        && messages
+                            .last()
+                            .is_some_and(|message| message["role"] == "assistant")
+                    {
+                        let last = messages.last_mut().expect("checked assistant message");
+                        let previous = std::mem::take(&mut last["content"]);
+                        last["content"] = merge_chat_contents(previous, content);
+                    } else {
+                        messages.push(serde_json::json!({
+                            "role": role,
+                            "content": content
+                        }));
+                    }
+                }
+                "reasoning" => {
+                    let blocks = reasoning_blocks_from_responses_item(item);
+                    if blocks.is_empty() {
+                        continue;
+                    }
+                    if messages
+                        .last()
+                        .is_some_and(|message| message["role"] == "assistant")
+                    {
+                        let last = messages.last_mut().expect("checked assistant message");
+                        let previous = std::mem::take(&mut last["reasoning_blocks"]);
+                        let mut combined = previous.as_array().cloned().unwrap_or_default();
+                        combined.extend(blocks);
+                        last["reasoning_blocks"] = serde_json::Value::Array(combined);
+                    } else {
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_blocks": blocks
+                        }));
+                    }
                 }
                 "function_call_output"
                 | "custom_tool_call_output"
@@ -693,18 +838,29 @@ pub(super) fn responses_request_to_openai_chat_request(
                             .to_string(),
                     };
 
-                    messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [{
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": arguments
-                            }
-                        }]
-                    }));
+                    let tool_call = serde_json::json!({
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments
+                        }
+                    });
+                    if messages
+                        .last()
+                        .is_some_and(|message| message["role"] == "assistant")
+                    {
+                        append_assistant_tool_call(
+                            messages.last_mut().expect("checked assistant message"),
+                            tool_call,
+                        );
+                    } else {
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [tool_call]
+                        }));
+                    }
                 }
                 // Codex V2 multi-agent turns describe an agent's message with
                 // `agent_message` items instead of plain `message` items.
@@ -2045,43 +2201,6 @@ mod tests {
     }
 
     #[test]
-    fn continuation_fallback_omits_identity_metadata() {
-        let item = serde_json::json!({
-            "type": "mcp_approval_response",
-            "approval_request_id": "approval_1",
-            "approve": true
-        });
-
-        assert_eq!(normalize_continuation_output(&item), "{\"approve\":true}");
-    }
-
-    #[test]
-    fn rejects_non_object_responses_reasoning() {
-        let request = serde_json::json!({
-            "model": "auto",
-            "input": "Think",
-            "reasoning": "high"
-        });
-
-        let error = responses_request_to_openai_chat_request(&request).unwrap_err();
-
-        assert_eq!(error, "responses request 'reasoning' must be an object");
-    }
-
-    #[test]
-    fn drops_null_previous_response_id() {
-        let request = serde_json::json!({
-            "model": "auto",
-            "input": "Continue",
-            "previous_response_id": null
-        });
-
-        let converted = responses_request_to_openai_chat_request(&request).unwrap();
-
-        assert!(converted.get("previous_response_id").is_none());
-    }
-
-    #[test]
     fn accepts_native_continuation_results_for_passthrough() {
         let cases = [
             (
@@ -2162,44 +2281,6 @@ mod tests {
                 .is_empty());
             assert_eq!(converted["previous_response_id"], "resp_previous");
         }
-    }
-
-    #[test]
-    fn chat_refusal_serializes_as_responses_refusal_block() {
-        let openai = serde_json::json!({
-            "id": "resp_refusal",
-            "object": "chat.completion",
-            "created": 42,
-            "model": "muse",
-            "response_status": "incomplete",
-            "incomplete_details": {"reason": "content_filter"},
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "refusal": "I cannot help with that."
-                },
-                "finish_reason": "content_filter"
-            }]
-        });
-
-        let response = openai_chat_completion_to_responses_json(&openai, None);
-
-        assert_eq!(
-            response["output"][0]["content"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(response["output"][0]["content"][0]["type"], "refusal");
-        assert_eq!(
-            response["output"][0]["content"][0]["refusal"],
-            "I cannot help with that."
-        );
-        assert_eq!(response["status"], "incomplete");
-        assert_eq!(
-            response["incomplete_details"],
-            serde_json::json!({"reason": "content_filter"})
-        );
     }
 
     #[test]
@@ -2455,135 +2536,5 @@ mod tests {
             assert_eq!(terminal["response"]["status"], status);
             assert_eq!(terminal["response"]["output"][0]["id"], "msg_resp_original");
         }
-    }
-}
-
-#[cfg(test)]
-mod image_content_tests {
-    use super::*;
-
-    #[test]
-    fn input_image_accepts_string_and_object_forms() {
-        let content = serde_json::json!([
-            {"type": "input_text", "text": "see:"},
-            {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
-            {"type": "input_image", "image_url": {"url": "https://example.test/x.png", "detail": "low"}}
-        ]);
-        let converted = responses_content_to_openai_content(&content);
-        let blocks = converted.as_array().unwrap();
-        assert_eq!(blocks[0]["type"], "text");
-        assert_eq!(blocks[1]["type"], "image_url");
-        assert_eq!(blocks[1]["image_url"]["url"], "data:image/png;base64,AAAA");
-        assert_eq!(blocks[2]["type"], "image_url");
-        assert_eq!(blocks[2]["image_url"]["url"], "https://example.test/x.png");
-    }
-
-    #[test]
-    fn input_image_without_url_is_dropped() {
-        let content = serde_json::json!([
-            {"type": "input_text", "text": "hi"},
-            {"type": "input_image"}
-        ]);
-        let converted = responses_content_to_openai_content(&content);
-        // The surviving single text block collapses to a plain string.
-        assert_eq!(converted, serde_json::json!("hi"));
-    }
-}
-
-#[cfg(test)]
-mod agent_message_tests {
-    use super::*;
-
-    #[test]
-    fn agent_message_items_convert_to_assistant_messages() {
-        let body = serde_json::json!({
-            "model": "m",
-            "input": [{
-                "type": "agent_message",
-                "author": "worker",
-                "recipient": "user",
-                "content": [{"type": "output_text", "text": "task done"}]
-            }]
-        });
-        let request = responses_request_to_openai_chat_request(&body)
-            .expect("agent_message-only input must convert");
-        let messages = request["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "user");
-        assert_eq!(
-            messages[0]["content"],
-            "Message from agent 'worker' to 'user':"
-        );
-        assert_eq!(messages[1]["role"], "assistant");
-        assert_eq!(messages[1]["content"], "task done");
-    }
-
-    #[test]
-    fn consecutive_agent_messages_merge_into_one_assistant_turn() {
-        let body = serde_json::json!({
-            "model": "m",
-            "input": [
-                {"type": "agent_message", "author": "worker", "recipient": "user",
-                 "content": [{"type": "output_text", "text": "first"}]},
-                {"type": "agent_message", "author": "worker", "recipient": "user",
-                 "content": [{"type": "output_text", "text": "second"}]}
-            ]
-        });
-        let request = responses_request_to_openai_chat_request(&body).unwrap();
-        let messages = request["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "user");
-        assert_eq!(messages[1]["role"], "assistant");
-        assert_eq!(messages[1]["content"], "first\n\nsecond");
-    }
-
-    #[test]
-    fn merging_into_array_content_keeps_existing_blocks() {
-        let image_block = serde_json::json!({
-            "type": "image_url",
-            "image_url": {"url": "data:image/png;base64,AAAA"}
-        });
-        let body = serde_json::json!({
-            "model": "m",
-            "input": [
-                {"type": "agent_message", "author": "w", "recipient": "user",
-                 "content": [
-                     {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
-                     {"type": "output_text", "text": "screenshot"}
-                 ]},
-                {"type": "agent_message", "author": "w", "recipient": "user",
-                 "content": [{"type": "output_text", "text": "follow-up"}]}
-            ]
-        });
-        let request = responses_request_to_openai_chat_request(&body).unwrap();
-        let messages = request["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1]["role"], "assistant");
-        let blocks = messages[1]["content"].as_array().expect("array content");
-        assert_eq!(
-            blocks.len(),
-            3,
-            "must keep image, first text, and appended text"
-        );
-        assert_eq!(blocks[0], image_block);
-        assert_eq!(blocks[1]["text"], "screenshot");
-        assert_eq!(blocks[2]["text"], "follow-up");
-    }
-
-    #[test]
-    fn agent_message_mixed_input_preserves_order() {
-        let body = serde_json::json!({
-            "model": "m",
-            "input": [
-                {"type": "message", "role": "user", "content": "run it"},
-                {"type": "agent_message", "author": "worker", "recipient": "user",
-                 "content": [{"type": "output_text", "text": "ran"}]}
-            ]
-        });
-        let request = responses_request_to_openai_chat_request(&body).unwrap();
-        assert_eq!(request["messages"].as_array().unwrap().len(), 2);
-        assert_eq!(request["messages"][0]["role"], "user");
-        assert_eq!(request["messages"][1]["role"], "assistant");
-        assert_eq!(request["messages"][1]["content"], "ran");
     }
 }

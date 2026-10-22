@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Preserved signed interleaved thinking across Codex Responses tool loops.
+  MiniMax thinking blocks remain hidden and ordered, their opaque signatures
+  round-trip through Responses `encrypted_content`, adjacent reasoning/message
+  function-call items are regrouped into one Anthropic assistant turn, and
+  streaming signature deltas survive through the completed reasoning item.
+  M3.1 also normalizes Anthropic `thinking.type: "enabled"` to the hosted API's
+  `adaptive` spelling and preserves supported request metadata.
 - Hardened worker recovery and authority handling. The inspector now prefers
   timestamped run directories for `latest`, excludes malformed manual
   directories from that selector, and surfaces launcher salvage evidence
