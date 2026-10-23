@@ -201,3 +201,54 @@ interactive Codex lane stays on GLM-5.3; tune the delegation lane for effectiven
   operator-directed operational change, with the PR as the codification path.
 - Worker timeouts (58/476 runs, 12% over 7 days) were not addressed; separate concern.
 - The `.worktrees/token-admission` worktree is retained until PR #77 merges.
+
+---
+
+# DeepSeek Utilization Diagnosis — 2026-10-23
+
+Operator question during the Z.AI window exhaustion: whether DeepSeek had any
+utilization. Read-only diagnosis; no state changed.
+
+## Findings
+
+1. **DeepSeek is utilized and funded.** Since the listener restarts (~2026-10-22
+   19:40 local): main lane 285 successful requests / 112.0M input tokens; review
+   lane 38 requests / 2.3M tokens. Balance endpoint: `total_balance $6.35,
+   is_available true` (all topped-up). The workers lane shows zero DeepSeek since
+   restart because MiniMax is primary there with quota remaining — expected, not a
+   fault. Historical `code=402` rejections on the workers lane cluster entirely in
+   the 2026-10-08/09 PAYG-exhaustion era (446 in the sampled tail); none recent.
+2. **~56% of main-lane DeepSeek attempts fail one deterministic 400**: `The
+   "content[].thinking" in the thinking mode must be passed back to the API.
+   (invalid_request_error)`. Counters since restart: 356 provider_rejected vs 285
+   successes. This is the cross-provider thinking-block hazard from the
+   2026-10-21 prefill-cascade assessment, live: GLM-served sessions carry thinking
+   blocks in assistant history; when the request spills mid-session to DeepSeek's
+   Anthropic endpoint, the normalized history does not satisfy DeepSeek's
+   thinking-mode pass-back requirement and the tier is deterministically rejected.
+   Rejections skew to long histories (>=100K tokens: 155 rejected vs 388 OK;
+   <100K: 17 rejected), consistent with thinking-block accumulation rather than
+   size limits.
+3. **What "out of tokens" was**: the Z.AI 5-hour prompt window read 0.0%
+   (reset 2026-10-23 18:18 PDT; monthly window resets 2026-10-28). MiniMax was
+   NOT exhausted (40% interval / 31% weekly at probe).
+4. **Adjacent degradation**: the local crawl-back tiers failed 100% of attempts
+   on the main lane since restart (strata-b550 2,669 and local27 2,803
+   request_failed, zero successes) — the B550 tunnel and local27 server were not
+   serving, so requests that exhausted MiniMax + DeepSeek died outright.
+
+## Proposed fix (not applied)
+
+A DeepSeek-tier request normalization (transformer or provider config) that
+strips `thinking` blocks from replayed assistant history and disables thinking
+mode for that tier, mirroring the existing minimax transformer precedent. This
+would recover the ~56% wasted attempt volume during Z.AI window walls. Recorded
+for a future reviewed change; not implemented in this diagnosis.
+
+## Non-claims
+
+- No DeepSeek request-shape change was tested live; the proposed fix is inferred
+  from the error taxonomy, not validated.
+- Pricing/burn rate of the $6.35 balance was not projected.
+- The crawl-back tier outage (strata-b550/local27) was observed but not
+  investigated further here.
