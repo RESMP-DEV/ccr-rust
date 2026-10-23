@@ -827,6 +827,19 @@ fn emit_anthropic_sse_events(
                 });
                 events.push(format!("event: content_block_delta\ndata: {}\n\n", delta));
             }
+            AnthropicContentBlock::RedactedThinking { data } => {
+                // Redacted thinking arrives whole and emits no deltas; only
+                // the block start carries the opaque payload.
+                let block_start = serde_json::json!({
+                    "type": "content_block_start",
+                    "index": idx,
+                    "content_block": {"type": "redacted_thinking", "data": data}
+                });
+                events.push(format!(
+                    "event: content_block_start\ndata: {}\n\n",
+                    block_start
+                ));
+            }
             AnthropicContentBlock::Thinking {
                 thinking,
                 signature,

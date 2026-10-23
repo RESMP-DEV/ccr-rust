@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added Meta Model API (Muse) as the last cloud fallback tier for the main
+  interactive, auth, and worker lanes, behind MiniMax, GLM-5.3 Flash, and
+  DeepSeek and ahead of the local crawl-backs. The provider speaks the
+  native Anthropic-compatible Messages endpoint at `https://api.meta.ai/v1`
+  with Bearer authorization and the only-if-missing output-limit injection.
+  Anthropic-surface parsing now understands `redacted_thinking` content
+  blocks: previously a provider response containing one failed the typed
+  parse in the Chat Completions handler and leaked the raw Anthropic envelope
+  to OpenAI-surface clients; the blocks are now kept faithful for
+  Anthropic-surface clients and dropped from OpenAI-surface serializations,
+  matching the streaming path.
 - Specialized SenseNova support for image understanding instead of generic code
   review. The shared worker chain no longer contains SenseNova, and the
   code-review listener remains on its existing primary. A distinct

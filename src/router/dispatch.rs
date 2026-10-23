@@ -1477,6 +1477,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
                     .map(|block| match block {
                         AnthropicContentBlock::Text { text } => text.len(),
                         AnthropicContentBlock::Thinking { thinking, .. } => thinking.len(),
+                        AnthropicContentBlock::RedactedThinking { data } => data.len(),
                         AnthropicContentBlock::ToolUse { input, .. } => input.to_string().len(),
                     })
                     .sum();

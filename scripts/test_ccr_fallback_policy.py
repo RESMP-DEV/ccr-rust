@@ -496,9 +496,7 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(provider["models"], ["holo4-35b-a3b"])
         self.assertEqual(provider["maxInflight"], 1)
         self.assertEqual(provider["api_key"], "${CCR_HOLO4_API_KEY}")
-        self.assertNotIn(
-            "holo4,holo4-35b-a3b", policy.MACHINE_ROUTE_CHAIN
-        )
+        self.assertNotIn("holo4,holo4-35b-a3b", policy.MACHINE_ROUTE_CHAIN)
         for consumer in ("config.json", "config-auth.json", "glm-workers.json"):
             self.assertIn(
                 "holo4,holo4-35b-a3b",
