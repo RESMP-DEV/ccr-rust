@@ -164,6 +164,13 @@ lazy_static! {
     )
     .unwrap();
 
+    static ref TIER_INFLIGHT_TOKENS: GaugeVec = register_gauge_vec!(
+        "ccr_tier_inflight_tokens",
+        "Current in-flight estimated prompt tokens per tier",
+        &["tier"]
+    )
+    .unwrap();
+
     static ref ADMISSION_DEFERS: CounterVec = register_counter_vec!(
         "ccr_admission_defers_total",
         "Attempts deferred because a tier was at its AIMD admission limit",
@@ -292,6 +299,7 @@ const METRIC_RETRY_SWEEPS_TOTAL: &str = "ccr_retry_sweeps_total";
 const METRIC_DETERMINISTIC_REJECTIONS_TOTAL: &str = "ccr_deterministic_rejections_total";
 const METRIC_TIER_INFLIGHT: &str = "ccr_tier_inflight";
 const METRIC_TIER_LIMIT: &str = "ccr_tier_limit";
+const METRIC_TIER_INFLIGHT_TOKENS: &str = "ccr_tier_inflight_tokens";
 const METRIC_ADMISSION_DEFERS_TOTAL: &str = "ccr_admission_defers_total";
 const METRIC_RETRY_BUDGET_OVERFLOW_TOTAL: &str = "ccr_retry_budget_overflow_total";
 const METRIC_HEDGES_LAUNCHED_TOTAL: &str = "ccr_hedges_launched_total";
@@ -484,6 +492,18 @@ pub fn record_tier_limit(tier: &str, value: u64) {
     persist_gauge_set(METRIC_TIER_LIMIT, &[("tier", tier)], value as f64);
 }
 
+/// Record the estimated prompt tokens currently in flight for one tier.
+///
+/// This is the token-budget counterpart of `ccr_tier_inflight`: a provider
+/// that 429s on concurrent prefill volume shows a low request count next to
+/// a high token total, so the two gauges have to be read together.
+pub fn record_tier_inflight_tokens(tier: &str, value: u64) {
+    TIER_INFLIGHT_TOKENS
+        .with_label_values(&[tier])
+        .set(value as f64);
+    persist_gauge_set(METRIC_TIER_INFLIGHT_TOKENS, &[("tier", tier)], value as f64);
+}
+
 pub fn record_admission_defer(tier: &str) {
     ADMISSION_DEFERS.with_label_values(&[tier]).inc();
     persist_counter_inc(METRIC_ADMISSION_DEFERS_TOTAL, &[("tier", tier)], 1.0);
@@ -528,6 +548,33 @@ pub fn increment_active_streams(delta: i64) {
         }
     } else {
         ACTIVE_STREAMS.sub((-delta) as f64);
+    }
+}
+
+/// RAII active-stream marker.
+///
+/// Creating the guard increments the gauge once; dropping it on any early
+/// return, timeout, client disconnect, or task completion decrements exactly
+/// once. Streaming tasks must create it inside the spawned task so the gauge
+/// covers the actual producer lifetime rather than only response construction.
+#[derive(Debug)]
+pub struct ActiveStreamGuard {
+    _private: (),
+}
+
+impl ActiveStreamGuard {
+    // `Default` must not create an active-stream guard implicitly because
+    // construction has an observable metrics side effect.
+    #[expect(clippy::new_without_default)]
+    pub fn new() -> Self {
+        increment_active_streams(1);
+        Self { _private: () }
+    }
+}
+
+impl Drop for ActiveStreamGuard {
+    fn drop(&mut self) {
+        increment_active_streams(-1);
     }
 }
 
@@ -647,6 +694,40 @@ fn count_tokens_json(value: &serde_json::Value) -> u64 {
     BPE.encode_ordinary(&text).len() as u64
 }
 
+/// Per-component token counts for one request body.
+///
+/// The audit records the three components separately, but every caller that
+/// needs a total must derive it from these same numbers: the admission
+/// token budget and the pre-request audit have to agree on what a request
+/// costs, or a budget would be checked against a different estimate than the
+/// one the request was admitted on.
+fn request_token_components(
+    messages: &[serde_json::Value],
+    system: Option<&serde_json::Value>,
+    tools: Option<&[serde_json::Value]>,
+) -> (u64, u64, u64) {
+    let msg_tokens: u64 = messages.iter().map(count_tokens_json).sum();
+    let sys_tokens = system.map(count_tokens_json).unwrap_or(0);
+    let tool_tokens = tools
+        .map(|t| t.iter().map(count_tokens_json).sum())
+        .unwrap_or(0);
+    (msg_tokens, sys_tokens, tool_tokens)
+}
+
+/// Estimate a request's input tokens without recording any metric.
+///
+/// The admission pass needs a request-level estimate before any tier is
+/// attempted, while the per-tier audit runs only once a tier is dispatched;
+/// both read the same request body, so both use this estimator.
+pub fn estimate_request_tokens(
+    messages: &[serde_json::Value],
+    system: Option<&serde_json::Value>,
+    tools: Option<&[serde_json::Value]>,
+) -> u64 {
+    let (msg_tokens, sys_tokens, tool_tokens) = request_token_components(messages, system, tools);
+    msg_tokens + sys_tokens + tool_tokens
+}
+
 /// Pre-request token audit: estimate the number of input tokens from the
 /// request body before dispatching to the backend. Logs per-component counts
 /// and records them to Prometheus for observability.
@@ -663,8 +744,11 @@ pub fn record_pre_request_tokens(
 ) -> u64 {
     let mut total: u64 = 0;
 
+    // The same three component counts the pure estimator uses, so the audit
+    // total and an admission-time estimate can never disagree.
+    let (msg_tokens, sys_tokens, tool_tokens) = request_token_components(messages, system, tools);
+
     // Messages
-    let msg_tokens: u64 = messages.iter().map(count_tokens_json).sum();
     if msg_tokens > 0 {
         PRE_REQUEST_TOKENS
             .with_label_values(&[tier, "messages"])
@@ -678,7 +762,6 @@ pub fn record_pre_request_tokens(
     total += msg_tokens;
 
     // System prompt
-    let sys_tokens = system.map(count_tokens_json).unwrap_or(0);
     if sys_tokens > 0 {
         PRE_REQUEST_TOKENS
             .with_label_values(&[tier, "system"])
@@ -692,9 +775,6 @@ pub fn record_pre_request_tokens(
     total += sys_tokens;
 
     // Tool definitions
-    let tool_tokens: u64 = tools
-        .map(|t| t.iter().map(count_tokens_json).sum())
-        .unwrap_or(0);
     if tool_tokens > 0 {
         PRE_REQUEST_TOKENS
             .with_label_values(&[tier, "tools"])
@@ -906,7 +986,10 @@ pub fn verify_token_usage(tier: &str, local_estimate: u64, upstream_input: u64) 
 
 #[cfg(test)]
 mod tests {
-    use super::{key_matches_persistence_prefix, record_pre_request_tokens, AUDIT_LOG};
+    use super::{
+        estimate_request_tokens, key_matches_persistence_prefix, record_pre_request_tokens,
+        AUDIT_LOG,
+    };
 
     #[test]
     fn key_prefix_match_accepts_prefix_root_and_namespace() {
@@ -990,6 +1073,30 @@ mod tests {
             entry.total_tokens, total,
             "returned total should match audit entry total"
         );
+    }
+
+    /// The admission token budget is checked against the pure estimator,
+    /// while the admitted attempt is measured by the audit. Both must read
+    /// the same request body, so the two totals have to be identical.
+    #[test]
+    fn estimate_request_tokens_matches_the_audit_total() {
+        use serde_json::json;
+
+        let body: serde_json::Value = serde_json::from_value(json!({
+            "messages": [{"role": "user", "content": "Hello there"}],
+            "system": "You are a helpful assistant.",
+            "tools": [{"type": "function", "function": {"name": "calculator"}}]
+        }))
+        .unwrap();
+
+        let messages = body["messages"].as_array().unwrap().clone();
+        let system = Some(&body["system"]);
+        let tools = Some(body["tools"].as_array().unwrap().as_slice());
+
+        let audited = record_pre_request_tokens("estimate_tier", &messages, system, tools);
+        let estimated = estimate_request_tokens(&messages, system, tools);
+
+        assert_eq!(estimated, audited);
     }
 
     #[test]

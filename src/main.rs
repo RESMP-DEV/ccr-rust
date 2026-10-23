@@ -122,6 +122,34 @@ Examples:
     /// Validate config file syntax and providers
     #[command(after_help = "Example:\n  ccr-rust --config examples/config.minimal.json validate")]
     Validate,
+    /// Diagnose config, provider credentials/catalogs, and listener health
+    #[command(after_help = "\
+Examples:
+  ccr-rust doctor                        Probe default listener on 127.0.0.1:3456
+  ccr-rust doctor --json                 Machine-readable report
+  ccr-rust doctor --skip-providers       Config + listener only, no network probes
+  ccr-rust doctor -p 3457                Probe a specific listener port")]
+    Doctor {
+        /// Listener host to probe
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Listener port to probe
+        #[arg(short, long, default_value = "3456")]
+        port: u16,
+
+        /// Per-probe timeout in seconds
+        #[arg(long, default_value = "10")]
+        timeout: u64,
+
+        /// Skip live provider credential/catalog probes (config + listener only)
+        #[arg(long)]
+        skip_providers: bool,
+
+        /// Emit one JSON report instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect saved worker runs without loading full transcripts
     Workers(ccr_rust::workers::WorkerArgs),
     #[cfg(feature = "dashboard")]
@@ -409,7 +437,7 @@ async fn run_server(
     telemetry_enabled: bool,
 ) -> anyhow::Result<()> {
     let config = Config::from_file(config_path)?;
-    ensure_gp_build_support(&config)?;
+    config.validate_build_support()?;
     tracing::info!("Loaded config from {}", config_path);
     tracing::info!("Tier order: {:?}", config.backend_tiers());
     tracing::info!("Max concurrent streams: {}", max_streams);
@@ -544,7 +572,7 @@ fn build_router(
             get(metrics::frontend_metrics_handler),
         )
         .route("/v1/tool-metrics", get(metrics::tool_metrics_handler))
-        .route("/health", get(health))
+        .route("/health", get(router::health))
         .route("/metrics", get(metrics::metrics_handler));
     let app = if authenticated {
         app.route_layer(axum::middleware::from_fn_with_state(
@@ -572,7 +600,7 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     println!("Validating: {}", config_path);
 
     let config = Config::from_file(config_path)?;
-    ensure_gp_build_support(&config)?;
+    config.validate_build_support()?;
 
     let providers = config.providers();
     println!("✓ {} provider(s)", providers.len());
@@ -596,34 +624,97 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn ensure_gp_build_support(config: &Config) -> anyhow::Result<()> {
-    #[cfg(not(feature = "gp"))]
-    if config.router().gp_routing.enabled {
-        anyhow::bail!(
-            "Router.gpRouting.enabled=true requires a CCR-Rust build with the `gp` feature"
-        );
+async fn run_doctor(
+    config_path: &str,
+    host: &str,
+    port: u16,
+    timeout: std::time::Duration,
+    skip_providers: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let report = ccr_rust::doctor::run(config_path, host, port, timeout, skip_providers).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        render_doctor(&report);
     }
 
-    #[cfg(feature = "gp")]
-    if config.router().gp_routing.enabled {
-        validate_gp_runtime_config(&config.router().gp_routing)?;
+    if !report.ok {
+        anyhow::bail!("doctor found one or more problems");
     }
-
-    let _ = config;
     Ok(())
 }
 
-#[cfg(feature = "gp")]
-fn validate_gp_runtime_config(config: &config::GpRoutingRuntimeConfig) -> anyhow::Result<()> {
-    if let Some(kpls_dim) = config.kpls_dim {
-        let feature_dim = gp_routing::features::FEATURE_DIM;
-        if kpls_dim == 0 || kpls_dim > feature_dim {
-            anyhow::bail!(
-                "Router.gpRouting.kplsDim must be between 1 and {feature_dim}; got {kpls_dim}"
+fn render_doctor(report: &ccr_rust::doctor::DoctorReport) {
+    use ccr_rust::doctor::ProviderStatus;
+    println!("Doctor: {}", report.config_path);
+    println!(
+        "{} config parsed; {} unresolved tier(s)",
+        if report.config_valid {
+            "\u{2713}"
+        } else {
+            "\u{2717}"
+        },
+        report.unresolved_tiers.len()
+    );
+    for tier in &report.unresolved_tiers {
+        println!("  \u{2717} tier '{tier}' names no configured provider/model");
+    }
+    if report.providers.is_empty() {
+        println!("\u{2022} provider probes skipped");
+    } else {
+        println!("Providers:");
+        for p in &report.providers {
+            let mark = match p.status {
+                ProviderStatus::Ok => "\u{2713}",
+                ProviderStatus::NoCatalog => "\u{25cb}",
+                ProviderStatus::Error => "\u{2717}",
+            };
+            println!(
+                "  {mark} {} ({}){}",
+                p.name,
+                p.protocol,
+                p.http_status
+                    .map(|c| format!(" HTTP {c}"))
+                    .unwrap_or_default()
             );
+            println!("      {}", p.detail);
+            if !p.stale_models.is_empty() {
+                println!(
+                    "      \u{26a0} pinned but absent from live catalog: {}",
+                    p.stale_models.join(", ")
+                );
+            }
         }
     }
-    Ok(())
+    println!("Listener: {}", report.listener.url);
+    println!(
+        "  {} {}",
+        if report.listener.healthy {
+            "\u{2713}"
+        } else if !report.listener.reachable {
+            "\u{25cb}"
+        } else {
+            "\u{2717}"
+        },
+        report.listener.detail
+    );
+    if !report.warnings.is_empty() {
+        println!("Warnings:");
+        for w in &report.warnings {
+            println!("  \u{26a0} {w}");
+        }
+    }
+    println!(
+        "\n{} doctor {}",
+        if report.ok { "\u{2713}" } else { "\u{2717}" },
+        if report.ok {
+            "healthy"
+        } else {
+            "found problems"
+        }
+    );
 }
 
 async fn check_status(host: &str, port: u16) -> anyhow::Result<()> {
@@ -731,6 +822,23 @@ async fn main() -> Result<()> {
             Some(Commands::Validate) => {
                 validate_config(&config_path)?;
             }
+            Some(Commands::Doctor {
+                host,
+                port,
+                timeout,
+                skip_providers,
+                json,
+            }) => {
+                run_doctor(
+                    &config_path,
+                    &host,
+                    port,
+                    std::time::Duration::from_secs(timeout),
+                    skip_providers,
+                    json,
+                )
+                .await?;
+            }
             Some(Commands::Workers(args)) => ccr_rust::workers::run(args)?,
             #[cfg(feature = "dashboard")]
             Some(Commands::Dashboard { host, port }) => {
@@ -804,6 +912,32 @@ async fn main() -> Result<()> {
     }
 }
 
+async fn shutdown_signal(timeout: u64) {
+    let ctrl_c = async { ctrl_c().await.expect("failed to listen for ctrl+c") };
+    #[cfg(unix)]
+    let terminate = async {
+        signal(SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received SIGINT"),
+        _ = terminate => tracing::info!("Received SIGTERM"),
+    }
+    tracing::info!(
+        "Received shutdown signal, draining connections (timeout {}s)...",
+        timeout
+    );
+}
+
+async fn latencies_handler(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    axum::Json(metrics::get_latency_entries(&state.ewma_tracker))
+}
+
 #[cfg(test)]
 mod client_listener_tests {
     use super::*;
@@ -859,57 +993,5 @@ mod client_listener_tests {
             .await
             .unwrap();
         assert_eq!(authenticated.status(), StatusCode::UNAUTHORIZED);
-    }
-}
-
-async fn shutdown_signal(timeout: u64) {
-    let ctrl_c = async { ctrl_c().await.expect("failed to listen for ctrl+c") };
-    #[cfg(unix)]
-    let terminate = async {
-        signal(SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => tracing::info!("Received SIGINT"),
-        _ = terminate => tracing::info!("Received SIGTERM"),
-    }
-    tracing::info!(
-        "Received shutdown signal, draining connections (timeout {}s)...",
-        timeout
-    );
-}
-
-async fn latencies_handler(State(state): State<AppState>) -> impl axum::response::IntoResponse {
-    axum::Json(metrics::get_latency_entries(&state.ewma_tracker))
-}
-
-async fn health() -> &'static str {
-    "ok"
-}
-
-#[cfg(all(test, feature = "gp"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn gp_runtime_validation_rejects_invalid_kpls_dimensions() {
-        for kpls_dim in [0, gp_routing::features::FEATURE_DIM + 1] {
-            let config = config::GpRoutingRuntimeConfig {
-                kpls_dim: Some(kpls_dim),
-                ..Default::default()
-            };
-            assert!(validate_gp_runtime_config(&config).is_err());
-        }
-
-        let config = config::GpRoutingRuntimeConfig {
-            kpls_dim: Some(gp_routing::features::FEATURE_DIM),
-            ..Default::default()
-        };
-        assert!(validate_gp_runtime_config(&config).is_ok());
     }
 }

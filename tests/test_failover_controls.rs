@@ -63,6 +63,13 @@ async fn spawn_fixed_upstream(status: u16, body: Value) -> (String, Arc<AtomicUs
 }
 
 fn build_app(config: ccr_rust::config::Config) -> Router {
+    build_app_with_retry_budget(config, Arc::new(ccr_rust::retry_budget::RetryBudget::new()))
+}
+
+fn build_app_with_retry_budget(
+    config: ccr_rust::config::Config,
+    retry_budget: Arc<ccr_rust::retry_budget::RetryBudget>,
+) -> Router {
     let state = ccr_rust::router::AppState {
         config,
         ewma_tracker: Arc::new(ccr_rust::routing::EwmaTracker::new()),
@@ -72,7 +79,7 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
         max_streams: 0,
         ratelimit_tracker: Arc::new(ccr_rust::ratelimit::RateLimitTracker::new()),
         admission_tracker: Arc::new(ccr_rust::admission::AdmissionTracker::new()),
-        retry_budget: Arc::new(ccr_rust::retry_budget::RetryBudget::new()),
+        retry_budget,
         sticky_sessions: Arc::new(ccr_rust::stickiness::StickySessionTracker::new(
             std::time::Duration::from_secs(3600),
         )),
@@ -80,6 +87,7 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
         debug_capture: None,
     };
     Router::new()
+        .route("/health", get(ccr_rust::router::health))
         .route("/v1/messages", post(ccr_rust::router::handle_messages))
         .route("/metrics", get(ccr_rust::metrics::metrics_handler))
         .with_state(state)
@@ -260,6 +268,302 @@ async fn zero_retry_budget_disables_retry_attempts() {
         1,
         "a zero retry budget must prevent every retry attempt"
     );
+}
+
+/// A request that finds every tier admission-deferred must remain held and
+/// re-sweep until the existing permit releases; it must not terminate just
+/// because no upstream attempt was possible.
+#[tokio::test]
+async fn all_admission_deferred_requests_re_sweep_until_permit_release() {
+    if skip_if_localhost_bind_unavailable("all_admission_deferred_re_sweep") {
+        return;
+    }
+    let (url, hits) = spawn_delayed_success_upstream(100).await;
+    let config = load_config(&json!({
+        "Providers": [
+            {"name": "mock", "api_base_url": url, "api_key": "k", "models": ["m"], "maxInflight": 1}
+        ],
+        "Router": {
+            "default": "mock,m",
+            "strictTierOrder": true,
+            "retrySweeps": {
+                "enabled": true,
+                "maxSweeps": 0,
+                "sweepCooldownMs": 1,
+                "maxHoldMs": 2000
+            },
+            "tierRetries": {"mock": {"max_retries": 0}}
+        },
+        "API_TIMEOUT_MS": 5000
+    }));
+    let app = build_app(config);
+    let body = json!({"model": "mock,m", "messages": [user_message()], "max_tokens": 16});
+
+    let (first, second) = tokio::join!(send(&app, body.clone()), send(&app, body));
+
+    assert_eq!(first.0, StatusCode::OK, "body: {}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "body: {}", second.1);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+/// A saturated process-wide retry budget must stop retries on a tier, but it
+/// must never suppress the first attempt on a later fallback tier. This is
+/// the regression for the client-visible "exceeded retry limit" path where a
+/// healthy MiniMax fallback was never attempted.
+#[tokio::test]
+async fn exhausted_retry_budget_still_fails_over_to_the_next_tier() {
+    if skip_if_localhost_bind_unavailable("exhausted_retry_budget_still_fails_over") {
+        return;
+    }
+    let (limited_url, limited_hits) =
+        spawn_fixed_upstream(429, json!({"error": {"message": "limited"}})).await;
+    let (healthy_url, healthy_hits) = spawn_fixed_upstream(200, json!({})).await;
+    let config = load_config(&json!({
+        "Providers": [
+            {"name": "limited", "api_base_url": limited_url, "api_key": "k", "models": ["m"]},
+            {"name": "healthy", "api_base_url": healthy_url, "api_key": "k", "models": ["m"]}
+        ],
+        "Router": {
+            "default": "limited,m",
+            "tiers": ["limited,m", "healthy,m"],
+            "strictTierOrder": true,
+            "retryBudgetPercent": 20,
+            "tierRetries": {"limited": {"max_retries": 2}, "healthy": {"max_retries": 2}}
+        },
+        "API_TIMEOUT_MS": 5000
+    }));
+
+    let retry_budget = Arc::new(ccr_rust::retry_budget::RetryBudget::new());
+    let _active_request = retry_budget.request_started();
+    let _exhausting_permits: Vec<_> = (0..3)
+        .map(|_| retry_budget.acquire_retry(20).unwrap())
+        .collect();
+
+    let (status, body) = send(
+        &build_app_with_retry_budget(config, retry_budget),
+        json!({"model": "limited,m", "messages": [user_message()], "max_tokens": 16}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(limited_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(healthy_hits.load(Ordering::SeqCst), 1);
+}
+
+/// Budget exhaustion must still bound hold-open amplification: finish the
+/// current cascade once, but do not start exempt first-attempt sweeps forever.
+#[tokio::test]
+async fn exhausted_retry_budget_completes_the_cascade_without_extra_sweeps() {
+    if skip_if_localhost_bind_unavailable("exhausted_retry_budget_bounds_sweeps") {
+        return;
+    }
+    let (first_url, first_hits) =
+        spawn_fixed_upstream(500, json!({"error": {"message": "first"}})).await;
+    let (second_url, second_hits) =
+        spawn_fixed_upstream(500, json!({"error": {"message": "second"}})).await;
+    let config = load_config(&json!({
+        "Providers": [
+            {"name": "first", "api_base_url": first_url, "api_key": "k", "models": ["m"]},
+            {"name": "second", "api_base_url": second_url, "api_key": "k", "models": ["m"]}
+        ],
+        "Router": {
+            "default": "first,m",
+            "tiers": ["first,m", "second,m"],
+            "strictTierOrder": true,
+            "retryBudgetPercent": 20,
+            "retrySweeps": {
+                "enabled": true,
+                "maxSweeps": 5,
+                "sweepCooldownMs": 1,
+                "maxHoldMs": 5000
+            },
+            "tierRetries": {"first": {"max_retries": 2}, "second": {"max_retries": 2}}
+        },
+        "API_TIMEOUT_MS": 5000
+    }));
+
+    let retry_budget = Arc::new(ccr_rust::retry_budget::RetryBudget::new());
+    let _active_request = retry_budget.request_started();
+    let _exhausting_permits: Vec<_> = (0..3)
+        .map(|_| retry_budget.acquire_retry(20).unwrap())
+        .collect();
+
+    let (status, body) = send(
+        &build_app_with_retry_budget(config, retry_budget),
+        json!({"model": "first,m", "messages": [user_message()], "max_tokens": 16}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+}
+
+/// A provider with a configured `tier_name` must keep that display name in
+/// `x-ccr-tier`. This is the contract dispatch already uses, and it is what a
+/// provider-prefix implementation would silently break.
+#[tokio::test]
+async fn terminal_rate_limit_keeps_the_configured_tier_display_name() {
+    if skip_if_localhost_bind_unavailable("terminal_rate_limit_tier_display_name") {
+        return;
+    }
+    let (url, hits) = spawn_fixed_upstream(429, json!({"error": {"message": "limited"}})).await;
+    let config = load_config(&json!({
+        "Providers": [{
+            "name": "primary",
+            "api_base_url": url,
+            "api_key": "k",
+            "models": ["m"],
+            "tier_name": "glm-fast"
+        }],
+        "Router": {
+            "default": "primary,m",
+            "tiers": ["primary,m"],
+            "tierRetries": {"primary": {"max_retries": 0}}
+        },
+        "API_TIMEOUT_MS": 5000
+    }));
+    let app = build_app(config);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "primary,m",
+                        "messages": [user_message()],
+                        "max_tokens": 16
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ccr-tier")
+            .and_then(|value| value.to_str().ok()),
+        Some("glm-fast")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ccr-rate-limited-tiers")
+            .and_then(|value| value.to_str().ok()),
+        Some("primary,m")
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+/// A terminal all-rate-limited response must identify every route that was
+/// tried or skipped, not only the final route.
+#[tokio::test]
+async fn terminal_rate_limit_response_reports_tier_provenance() {
+    if skip_if_localhost_bind_unavailable("terminal_rate_limit_provenance") {
+        return;
+    }
+    let (first_url, first_hits) =
+        spawn_fixed_upstream(429, json!({"error": {"message": "first"}})).await;
+    let (second_url, second_hits) =
+        spawn_fixed_upstream(429, json!({"error": {"message": "second"}})).await;
+    let config = load_config(&json!({
+        "Providers": [
+            {"name": "first", "api_base_url": first_url, "api_key": "k", "models": ["m"]},
+            {"name": "second", "api_base_url": second_url, "api_key": "k", "models": ["m"]}
+        ],
+        "Router": {
+            "default": "first,m",
+            "tiers": ["first,m", "second,m"],
+            "strictTierOrder": true,
+            "tierRetries": {"first": {"max_retries": 0}, "second": {"max_retries": 0}}
+        },
+        "API_TIMEOUT_MS": 5000
+    }));
+    let app = build_app(config);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "first,m",
+                        "messages": [user_message()],
+                        "max_tokens": 16
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    // The established header carries the last rate-limited tier's configured
+    // display name, not the provider prefix or the full route.
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ccr-tier")
+            .and_then(|value| value.to_str().ok()),
+        Some("second")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ccr-rate-limited-tiers")
+            .and_then(|value| value.to_str().ok()),
+        Some("first,m,second,m")
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        payload["error"]["details"],
+        json!([
+            {"tier": "first,m", "reason": "rate_limited", "retry_after_ms": Value::Null},
+            {"tier": "second,m", "reason": "rate_limited", "retry_after_ms": Value::Null}
+        ])
+    );
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+
+    // The tracker now skips both routes without another upstream round trip.
+    // Provenance must survive that path and expose the local backoff hint.
+    let (second_status, second_payload) = send(
+        &app,
+        json!({"model": "first,m", "messages": [user_message()], "max_tokens": 16}),
+    )
+    .await;
+    assert_eq!(second_status, StatusCode::TOO_MANY_REQUESTS);
+    let second_details = second_payload["error"]["details"].clone();
+    assert_eq!(second_details.as_array().map(Vec::len), Some(2));
+    for (detail, route) in second_details
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(["first,m", "second,m"])
+    {
+        assert_eq!(detail["tier"], route);
+        assert_eq!(detail["reason"], "rate_limited");
+        assert!(
+            detail["retry_after_ms"]
+                .as_u64()
+                .is_some_and(|ms| (1..=1000).contains(&ms)),
+            "detail: {detail}"
+        );
+    }
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
 }
 
 /// Held requests must record their wait so hold time is visible separately

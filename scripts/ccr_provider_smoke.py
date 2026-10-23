@@ -21,8 +21,7 @@ from dataclasses import dataclass
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="CCR multi-provider smoke matrix")
+    parser = argparse.ArgumentParser(description="CCR multi-provider smoke matrix")
     parser.add_argument(
         "--base-url",
         default="http://127.0.0.1:3456",
@@ -98,7 +97,7 @@ def run_curl(
             url,
         ]
     )
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
     stdout = proc.stdout or ""
     stderr = proc.stderr or ""
 
@@ -125,7 +124,7 @@ def http_get_json(url: str, api_key: str, timeout_s: int) -> dict:
         f"authorization: Bearer {api_key}",
         url,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"GET {url} failed: {proc.stderr.strip()}")
     try:
@@ -139,7 +138,7 @@ def discover_models(base_url: str, api_key: str, timeout_s: int) -> list[str]:
     payload = http_get_json(models_url, api_key, timeout_s)
     data = payload.get("data")
     if not isinstance(data, list):
-        raise RuntimeError("Unexpected /v1/models payload: missing data array")
+        raise TypeError("Unexpected /v1/models payload: missing data array")
 
     ids = []
     for entry in data:
@@ -198,13 +197,14 @@ def run_chat_nonstream(
         "temperature": temperature,
     }
     start = time.time()
-    status, body, stderr = run_curl(
-        url, payload, api_key, timeout_s, streaming=False)
+    status, body, stderr = run_curl(url, payload, api_key, timeout_s, streaming=False)
     latency = time.time() - start
 
     if status != 200:
         msg = stderr.strip() or body[:220]
-        return ProbeResult(model, "chat/non-stream", False, latency, f"HTTP {status}: {msg}")
+        return ProbeResult(
+            model, "chat/non-stream", False, latency, f"HTTP {status}: {msg}"
+        )
 
     try:
         parsed = json.loads(body)
@@ -248,13 +248,14 @@ def run_chat_stream(
         "temperature": temperature,
     }
     start = time.time()
-    status, body, stderr = run_curl(
-        url, payload, api_key, timeout_s, streaming=True)
+    status, body, stderr = run_curl(url, payload, api_key, timeout_s, streaming=True)
     latency = time.time() - start
 
     if status != 200:
         msg = stderr.strip() or body[:220]
-        return ProbeResult(model, "chat/stream", False, latency, f"HTTP {status}: {msg}")
+        return ProbeResult(
+            model, "chat/stream", False, latency, f"HTTP {status}: {msg}"
+        )
 
     frames = parse_sse_frames(body)
     bad = 0
@@ -287,7 +288,9 @@ def run_chat_stream(
             latency,
             f"expected 1 [DONE] marker, got {done}",
         )
-    return ProbeResult(model, "chat/stream", True, latency, f"ok ({len(frames)} frame(s))")
+    return ProbeResult(
+        model, "chat/stream", True, latency, f"ok ({len(frames)} frame(s))"
+    )
 
 
 def run_responses_nonstream(
@@ -312,8 +315,7 @@ def run_responses_nonstream(
         "stream": False,
     }
     start = time.time()
-    status, body, stderr = run_curl(
-        url, payload, api_key, timeout_s, streaming=False)
+    status, body, stderr = run_curl(url, payload, api_key, timeout_s, streaming=False)
     latency = time.time() - start
 
     if status != 200:
@@ -370,8 +372,7 @@ def run_responses_stream(
         "stream": True,
     }
     start = time.time()
-    status, body, stderr = run_curl(
-        url, payload, api_key, timeout_s, streaming=True)
+    status, body, stderr = run_curl(url, payload, api_key, timeout_s, streaming=True)
     latency = time.time() - start
 
     if status != 200:
@@ -475,7 +476,10 @@ def main() -> int:
         models = discover_models(base_url, args.api_key, args.timeout)
 
     if not models:
-        print("No provider routes discovered (expected ids like provider,model).", file=sys.stderr)
+        print(
+            "No provider routes discovered (expected ids like provider,model).",
+            file=sys.stderr,
+        )
         return 2
 
     print(f"Discovered {len(models)} route(s): {', '.join(models)}")

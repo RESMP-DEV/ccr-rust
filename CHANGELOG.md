@@ -19,6 +19,260 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The new `/v1/tool-metrics` endpoint and Prometheus series never retain or
   return tool payloads, and Redis persistence carries the aggregates across
   restarts.
+- Specialized SenseNova support for image understanding instead of generic code
+  review. The shared worker chain no longer contains SenseNova, and the
+  code-review listener remains on its existing primary. A distinct
+  non-thinking `sensenova-vision` provider is a direct-only seat on the worker
+  listener: present in `Providers`, absent from `Router.tiers`, so generic
+  worker fallback and code review cannot spend it. The new
+  `force_adaptive_thinking` override emits the live API's required
+  `thinking: {"type":"adaptive"}` marker alongside
+  `reasoning_effort: none`, reducing the measured image-extraction probe from
+  6.7s/446 completion tokens to 1.6s/72.
+- Raised the Rust SLOC ratchet after moving provider request overrides out of
+  the Dispatch hotspot into their own module, and re-pinned it around the
+  merged token-aware admission code.
+- Added a SenseNova Token Plan provider recipe using the existing OpenAI Chat
+  protocol and `reasoning` field alias, with a dedicated example/config guide.
+  The provider was live-qualified after the real key arrived and never placed
+  in the code-review lane.
+- Corrected the first SenseNova routing attempt after live measurements: the
+  temporary generic fallback seat produced deterministic 400s on tool-bearing
+  Codex traffic and had no quota advantage for review work. The final policy
+  keeps SenseNova out of every fallback chain and exposes only a direct-only
+  non-thinking vision/extraction seat on the worker listener.
+- Added per-provider `maxInflightTokens` admission control. MiniMax 429s were
+  measured (2026-10-22) as token-volume collisions: identical dispatch rates
+  in minutes with and without 429s, ten concurrent small requests clean, and
+  three ~150K-token prefills colliding. A route with a token budget defers a
+  request when its pre-request estimate plus the route's reserved in-flight
+  tokens would exceed the budget, cascading without an upstream attempt or an
+  AIMD cut. The governed policy sets 250,000 for shared MiniMax.
+
+- Made concurrent recovery snapshots race-safe. Each final snapshot name is now claimed with an exclusive lock before staging, so simultaneous listener activations cannot select or overwrite the same suffix.
+
+- Fixed launchd-invoked Python helpers for the macOS system interpreter. `ccr-recovery` now uses the 3.9-compatible timezone API, `ccr-fallback-policy` imports with deferred annotations, and regression tests import both modules through `/usr/bin/python3` with the launchd PATH.
+
+- Hardened listener activation and configuration recovery. Activation now
+  captures and verifies a complete snapshot before restart, proves the listener
+  is executing the installed Rust binary's vnode rather than only checking
+  liveness, compares runtime tiers with its consumer config, and can optionally
+  make one bounded low-effort completion with `--live-check`. Recovery snapshots
+  now include the deployed recovery implementation as well as its local wrapper.
+- Preserved signed interleaved thinking across Codex Responses tool loops.
+  MiniMax thinking blocks remain hidden and ordered, their opaque signatures
+  round-trip through Responses `encrypted_content`, adjacent reasoning/message
+  function-call items are regrouped into one Anthropic assistant turn, and
+  streaming signature deltas survive through the completed reasoning item.
+  M3.1 also normalizes Anthropic `thinking.type: "enabled"` to the hosted API's
+  `adaptive` spelling and preserves supported request metadata.
+  GLM Chat responses retain Anthropic-shaped thinking blocks so their signed
+  content is translated once by the shared OpenAI layer rather than dropped.
+- Hardened worker recovery and authority handling. The inspector now prefers
+  timestamped run directories for `latest`, excludes malformed manual
+  directories from that selector, and surfaces launcher salvage evidence
+  (`cwd`, brief path, partial report, changed-path count, and resume command)
+  without marking a task verified. Usage summaries now include timestamped run
+  directories whose receipts are absent instead of silently omitting them.
+  Repository instructions now define worker reports as untrusted evidence
+  rather than parent directives.
+- Pinned generated Codex model metadata for GLM-5.3 to the provider-native
+  `low`, `high`, and `max` reasoning labels with `max` as the default. This
+  removes the advertised `xhigh` alias while preserving the live Coding Plan
+  behavior that normalizes it to `max`.
+- Added the keyed B550 Strata Coder service as a local coding crawl-back tier
+  (`strata-b550,qwen3.8-flash-next-coder`) ahead of `local27`. The provider uses
+  a ZeroTier-first localhost SSH tunnel with authenticated LAN and Strix-jump
+  fallbacks rather than pinning a LAN address. It forces
+  `reasoning_effort: none` so an omitted setting cannot consume the reply
+  budget and limits the current FIFO engine to one in-flight request. Its
+  16384-token context remains narrower than `local27`, so over-long requests
+  can continue to the final resident tier.
+- Added native DeepSeek (`deepseek,deepseek-flash`) back to the shared chain
+  as the last cloud tier, directly ahead of the local model, by user direction
+  dated 2026-10-21. A live probe authenticated and completed a real request, so
+  the 2026-10-11 balance cordon is lifted. It matters because the local model
+  prefills about 115 tok/s: when MiniMax and both GLM tiers were rate-limited,
+  ~200k-token requests fell through to local and held the single backend for
+  tens of minutes.
+- Added the resident local Qwen3.8-27B MXFP4 MLX server as the final shared
+  crawl-back tier (`local27,qwen3.8-27b-mxfp4`) by user direction dated
+  2026-10-21. It sits after DeepSeek for the standard (`config.json`),
+  interactive (`config-auth.json`), worker (`glm-workers.json`) and OCR
+  listeners, so it only serves once every cloud tier has failed. The provider
+  targets the streaming backend (`127.0.0.1:8081`) rather than the admission
+  proxy (`:8080`, which rejects `stream:true`) and carries `maxInflight: 4` to
+  match the proxy's backend bound. Receipt:
+  `evidence/local27-final-fallback-20261021.md`.
+- Clarified the scoped-worker delegation contract: every parent-created brief
+  must be mechanically executable with one bounded outcome, exact ownership,
+  acceptance commands, report evidence, and a stop condition. Ambiguous work
+  is split or retained by the parent, while workers execute exactly one brief
+  and neither decide their role nor decompose the assignment.
+- Changed the governed CCR worker routing by user authorization dated
+  2026-10-21: MiniMax M3.1 Flash is now the scoped-worker primary
+  (`glm-workers.json`), and Z.AI GLM-5.3 Flash moved from the chain head to
+  the final shared fallback. The Z.AI plan kept exhausting its monthly
+  utilization window, so GLM Flash is only spent after MiniMax. Main/auth
+  remain GLM-5.3 primary with the MiniMax and GLM Flash shared tiers; OCR
+  retains its OpenRouter primary with the same shared chain. This is a
+  source-policy change only: live deployment, listener restarts, and live
+  completion verification are still required before the new order takes
+  effect.
+- Replaced the initial broad/size delegation heuristic with decomposition
+  first: enumerate every task piece before work and send every piece that can
+  carry its own bounded scope, ownership, acceptance check, and finish line to
+  a worker, including a one-piece task. The parent may read only what the
+  briefs need and retains conversation, cross-piece judgment, credentials and
+  other irreversible actions, live-service coordination, tools unreachable by
+  worker infrastructure, and final integration; size, file count, elapsed
+  time, and effort already spent are not delegation criteria. The worker guide
+  also records the compact XML brief contract and foreground-session launch
+  pattern without raising the 12-worker ceiling.
+- Added `scripts/ccr_worker_usage.py`, a read-only adoption summary that joins
+  the worker listener's active-request and per-tier request metrics with local
+  launcher receipt outcomes, timeout profiles, permissions, requested routes,
+  and elapsed-time totals. It accepts `--runs-only` and `--listener-only` for
+  partial-live diagnostics and never treats a requested route as served-route
+  proof.
+- Changed how a streaming response reports route health. A truncated
+  upstream stream is no longer recorded as a clean route success, so a
+  provider disconnect can no longer grow the AIMD admission limit or clear a
+  route's rate-limit backoff. An OpenAI stream now requires `[DONE]` or a
+  `finish_reason`, and an Anthropic stream requires `message_stop`.
+- Changed active-stream accounting to an RAII guard, so the gauge is
+  decremented exactly once on every exit path, including idle timeout and
+  client disconnect.
+- Fixed a provider-controlled `x-ratelimit-reset` value being able to
+  overflow the reset-time computation and abort dispatch. An impossible
+  horizon is now ignored.
+- Fixed provider base-URL matching so a URL that merely ends with the
+  endpoint text no longer suppresses the required path, and invalid
+  configured `extra_headers` now fail at config load instead of being
+  silently dropped.
+- Changed the reported attempt count so an admission deferral, which
+  launches no upstream request, is no longer counted as an attempt.
+- Bounded the buffered bytes of one incomplete SSE frame, and made the
+  decoder discard bytes through the next frame boundary after an oversized
+  frame so a malformed frame tail is never forwarded as a new frame.
+
+- Raised the repository quality standard and made it enforceable. The
+  offline dispatcher now also runs Ruff format and lint over the shipped
+  Python trees, `ty` type checks the helper scripts, and ShellCheck covers
+  the tracked shell entry points; `ruff.toml` is the single source of truth
+  for the Python rules. Dependency advisories are documented as a release
+  gate with their own commands, since they need advisory-database access.
+- Removed the GitHub Actions release workflow. The organization's Actions
+  billing is intentionally unresolved, so CI and verification run locally
+  and the release commands are documented in
+  `docs/dependency-security.md`.
+- Repaired the defects the wider checks exposed: unquoted shell expansion in
+  the stress-test orchestrator, an unused `cleanup` handler warning, blind
+  exception handling and formatting drift in the benchmark and provider
+  validation helpers, missing explicit `check=False` on subprocess calls, and
+  three type errors in the helper test suite.
+- Updated the locked dependency graph to `rustls` 0.23.46 and `quinn-proto`
+  0.11.19, clearing the RUSTSEC-2026-0346 through RUSTSEC-2026-0349 and
+  RUSTSEC-2026-0338 through RUSTSEC-2026-0342 advisories.
+
+- Removed the Qwen token-plan lane from every governed fallback chain and
+  from the main/auth private seat, because the plan's monthly utilization
+  window was exhausted and each dispatch paid a guaranteed refusal before a
+  tier that could still serve. The provider, credential, endpoint, and
+  `maxtoken` transformer stay registered so a dated re-approval restores the
+  lane without rewiring; preflight reports it as `registered_not_routed`.
+
+- Fixed retry-budget saturation synthesizing a terminal 429 before later
+  fallback tiers were attempted. The budget now bounds retries of a tier,
+  while each tier's initial failover attempt remains eligible; overflow stops
+  retrying that tier, completes the current cascade, and suppresses further
+  retry sweeps. Synthesized terminal 429s also include an `error.details`
+  array and an `x-ccr-rate-limited-tiers` header naming every rate-limited
+  route and its retry hint, while `x-ccr-tier` keeps its provider-name
+  contract. Hedged parallel attempts remain budget-controlled.
+
+- Documented that Claude Code through CCR stays opt-in per machine. The
+  maintainer's Mac retired `claude-ccr` on October 19, 2026 because Claude Code
+  there runs as a native Anthropic subscription client, so the guides now
+  record that a client's global settings must not carry an `apiKeyHelper`, a
+  localhost base URL, or a CCR model pin. Routing behavior is unchanged.
+- Stopped `ccr-recovery` from restoring the retired `claude-ccr` wrapper. The
+  wrapper left the recovery inventory, so a snapshot taken before the
+  retirement now reports it as unmapped instead of writing the pre-retirement
+  launcher back onto the machine and silently undoing the retirement.
+
+- Added `ccr-recovery`, a governed snapshot/restore surface for consumer
+  configs, credentials, launchd jobs, operator wrappers, tunnels, and Codex
+  route metadata. Snapshots are hash-verified, restore defaults to dry run and
+  writes atomically before re-parsing configs, restarts are idle-gated, and
+  sanitized replication copies omit secret-bearing files entirely.
+- Added `ccr-catalog-sync` to derive Codex metadata for the governed primary,
+  Flash, Qwen, MiniMax non-preview, and dual Qwen DeepSeek routes, reject
+  duplicate slugs, and snapshot before writes. Policy `sync` and governed
+  launchers also take a pre-write recovery snapshot.
+- Added a whole-body SHA-256 integrity pin to the machine fallback policy so a
+  direct JSON edit cannot change an unconstrained field without a reviewed
+  source change.
+- Fixed `/metrics` returning an empty Prometheus exposition immediately after
+  startup by materializing the idle request/stream gauges, keeping fresh
+  listeners safe for `ccr-wait-idle`.
+- Added `ccr-rust doctor`, a single read-only runtime diagnosis: it validates
+  config including feature-dependent GP routing support, probes each provider's
+  credential against its live model catalog using the same auth headers and
+  canonical model ID the dispatch path sends, flags any configured model id
+  the catalog no longer lists (catching a rotated or unlisted id such as a
+  dropped `-Preview` suffix before it silently serves another deployment), and
+  reports listener health and whether its in-memory tier order is stale versus
+  the config file. Providers are classified `ok`/`no_catalog`/`error`; stale
+  models warn without failing the run. The listener exposes routing details
+  only through `/health?details=1`, preserving the content-free `/health`
+  liveness contract.
+  `--json`, `--skip-providers`, and `--timeout` are supported. The command
+  issues no completions and never prints credentials or response bodies.
+
+- Added a current OpenRouter free-inference example and operator guide. The
+  catalog-checked routes include OpenRouter's free router, MiniMax M3.1 Flash,
+  XingChen Xing4.0, NVIDIA Nemotron 3.5 Super VL/Lightning, Cohere North Mini
+  Code, Poolside Laguna XS, and Inkling Small. The guide documents the
+  account-wide free-tier 429 boundary and the agent `User-Agent` requirement
+  used by some free endpoints.
+- Split the Qwen DeepSeek fallback by exact served ID. Qwen's published
+  current checkpoint is `deepseek-v4.1-flash-1017`, while the undated
+  `deepseek-v4.1-flash` ID also remains live and self-reports separately.
+  The governed chain now tries the dated checkpoint first and retains the
+  undated deployment as its final fallback; both remain explicit catalog
+  routes rather than silently aliasing one to the other.
+- Hardened the Qwen Token Plan lane for Codex: Qwen requires Anthropic's
+  `max_tokens` field, while Codex can omit it. The `maxtoken` transformer now
+  supports `only_if_missing`, and the governed Qwen provider injects a 32,768
+  output limit without changing a client's explicit lower cap. The shared chain
+  also adds Qwen's stronger `qwen3.8-max` seat immediately after GLM-5.3 on
+  main/auth, keeps Qwen Flash as the worker volume lane, and places Qwen
+  `deepseek-v4.1-flash` after MiniMax as the last general fallback. MiniMax
+  M3-family dispatch now canonicalizes legacy aliases and preview pins to the
+  officially launched `MiniMax-M3.1-Flash` ID after live catalog and
+  served-model checks.
+- Added Qwen Token Plan routing as a governed credit lane. The provider uses
+  the live-tested Anthropic-compatible `token-plan.maas.qwencloudapi.com`
+  endpoint with an `sk-sp-` plan key, exposes the verified current model IDs,
+  and slots `qwen,qwen3.8-flash` between the Flash volume tier and MiniMax
+  final fallback so worker traffic no longer consumes the GLM-5.3 judgment
+  seat. Replaced the stale request-quota Coding Plan guide with a Token Plan
+  runbook covering the required `/v1`, response verification, thinking budget,
+  authoritative `Asia/Shanghai`/UTC off-peak windows, Pacific-Time DST
+  conversion, and cold versus cache-heavy lane selection.
+- Restored the GLM-5.3-Flash and GLM-5.3 chain tiers and their consumer
+  primaries (main/auth GLM-5.3, workers GLM-5.3-Flash), reversing the
+  2026-10-18 quota cordon after its premise was disproved: the Z.AI monthly
+  tool quota gates tool usage, not model completions, and GLM kept serving
+  (the router completed thousands of GLM calls after the probe read
+  4000/4000, and the ZCode app served GLM on the same plan). Completions
+  stay limited by the rolling 5-hour prompt window and concurrency caps,
+  with refusals cascading to the MiniMax final tier. Derived consumer
+  configs now also expose a stable `ccr-primary` alias mapped to each
+  listener's primary tier, so clients pinned to it follow routing changes
+  without restarting long-lived sessions.
+
 - Changed guidance-free 429 backoff to be starvation-aware. A 429 without a
   server Retry-After still paces a route for one second while the route keeps
   admitting requests (concurrency-style caps must not blanket-skip a partially

@@ -136,11 +136,15 @@ Each provider entry configures an upstream API endpoint.
 | `model_pricing` | object | No | - | Model-keyed price overrides using the same rate fields. |
 | `transformer` | object | No | - | Request/response transformation configuration. |
 | `force_reasoning_effort` | string | No | - | Force `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` on every OpenAI-protocol request. |
+| `force_adaptive_thinking` | boolean | No | false | Insert `thinking: {"type":"adaptive"}` after protocol normalization. Pair it with `force_reasoning_effort: "none"` for providers whose non-thinking mode requires the adaptive marker. |
 | `maxInflight` | number | No | 8 | Initial and maximum per-route in-flight attempts for AIMD admission control. Values must be from 1 through 64. A 429 halves the current route limit; a clean completion grows it by one. |
+| `maxInflightTokens` | number | No | - | Optional per-route in-flight prefill-token budget. Admission defers a request (it falls to the next eligible tier without an upstream attempt) when the route's reserved in-flight token total plus the request's pre-request estimate would exceed this budget. Use for providers whose 429s are token-volume collisions rather than request-count limits (measured for MiniMax 2026-10-22). Values must be from 1,000 through 4,000,000. The budget is static; the count AIMD continues to run alongside it. |
 
 `force_reasoning_effort` is valid only for the default `openai` provider
 protocol. Configuration validation rejects unsupported values and other
-protocols before the router starts.
+protocols before the router starts. `force_adaptive_thinking` applies on the
+same OpenAI-protocol path and is intended for providers that require the
+adaptive marker together with `reasoning_effort: "none"` to disable reasoning.
 
 ### Reasoning controls across protocols
 
@@ -167,11 +171,16 @@ protocol's native controls on passthrough requests.
 Provider-specific reasoning controls are not interchangeable. MiniMax-M3 uses
 `{"thinking":{"type":"adaptive"}}`: CCR does not convert a numeric depth or
 effort setting into that mode, and its signed thinking blocks must be replayed
-unchanged on the next native Messages request. Native Anthropic clients
-preserve MiniMax's signed thinking during tool continuations. GLM 5.3 supports
-the `max` effort label; a Chat `reasoning_effort` or Responses
-`reasoning.effort` value of `max` maps to `output_config.effort: "max"`, while
-a native Messages client supplies that same `output_config` directly.
+unchanged on the next native Messages request. The Responses adapter carries
+the same ordered blocks in a reasoning item's opaque `encrypted_content` and
+restores them before an Anthropic provider receives tool results. GLM-5.3
+accepts only the `low`, `high`, and `max` effort labels and defaults to `max`
+when no control is supplied. A Chat `reasoning_effort` or Responses
+`reasoning.effort` value
+of `max` maps to `output_config.effort: "max"`, while a native Messages client
+supplies that same `output_config` directly. Z.AI's Coding Plan accepts
+additional Codex labels such as `xhigh` but normalizes them to these native
+levels; do not describe such aliases as distinct GLM-5.3 model levels.
 
 Non-streaming native Messages responses that contain JSON, including a raw
 JSON fallback with a non-Anthropic schema, use `application/json`. Responses
@@ -441,8 +450,13 @@ right trade for long-lived agent sessions.
 
 `Router.retryBudgetPercent` (default 20, range 0..100) bounds global retry
 attempts to a percentage of active client requests, with a floor of three.
-Zero disables retries after each request's first upstream attempt. Rejected
-retries increment `ccr_retry_budget_overflow_total`.
+The budget applies to retries of a tier that already attempted; the first
+attempt on each fallback tier is not charged, so budget saturation cannot end
+the cascade before a later tier is tried. Once the budget rejects a retry,
+CCR completes the current cascade but does not start additional retry sweeps.
+Tail-latency hedges remain budget-controlled because they intentionally add a
+parallel upstream attempt. Zero disables same-tier retries. Rejected retries
+increment `ccr_retry_budget_overflow_total`.
 
 ### Conversation stickiness
 

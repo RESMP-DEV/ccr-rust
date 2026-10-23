@@ -356,11 +356,27 @@ pub struct Provider {
     #[serde(default)]
     pub force_reasoning_effort: Option<String>,
 
+    /// Force providers whose non-thinking mode requires adaptive thinking
+    /// state, such as SenseNova with `reasoning_effort: none`.
+    #[serde(default)]
+    pub force_adaptive_thinking: bool,
+
     /// Initial and maximum in-flight attempts for AIMD admission control.
     /// Omitting it uses the global default of 8 with a minimum of 1 and
     /// maximum of 64.
     #[serde(default, alias = "maxInflight")]
     pub max_inflight: Option<usize>,
+
+    /// Optional in-flight token budget for this provider.
+    ///
+    /// Admission control then admits a request only while the provider's
+    /// in-flight token total stays inside this budget, which is what
+    /// providers whose 429s come from concurrent prefill volume need: their
+    /// request count stays low while their token volume collides. The budget
+    /// is static, never AIMD-adjusted, and must be between 1,000 and
+    /// 4,000,000 tokens.
+    #[serde(default, alias = "maxInflightTokens")]
+    pub max_inflight_tokens: Option<u64>,
 }
 
 fn default_honor_ratelimit_headers() -> bool {
@@ -383,7 +399,7 @@ impl Provider {
         if crate::transform::minimax::is_minimax_provider_name(&self.name, &self.api_base_url)
             && crate::transform::minimax::is_m3_model(model)
         {
-            crate::transform::minimax::MINIMAX_M3_1_FLASH_PREVIEW
+            crate::transform::minimax::MINIMAX_M3_1_FLASH
         } else {
             model
         }

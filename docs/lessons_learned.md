@@ -126,6 +126,14 @@ AnthropicContentBlock::Thinking { .. } => { /* emit thinking */ }
 
 ---
 
+## 6. Tier cordons must sweep client model pins, not just router configs (October 2026)
+
+**Pattern:** An idle-gated deploy changes the machine configs hours before the main router restarts, so a cordoned tier keeps serving from the old in-memory config until the restart lands. Clients pinned to an explicit `provider,model` that the new config removes then fail deterministically: direct routing replaces the candidate list with the requested tier alone (the "not in tier list" path in `src/router/mod.rs`), there is no chain fallback, and the sweep machinery retries the config miss ~84 times across ~22 sweeps before returning `All N backend tier(s) failed`. No upstream provider is ever contacted.
+
+**Rule:** When cordoning or renaming a tier, update client pins in the same change (`~/.codex/config.toml` `model =`, Claude `ANTHROPIC_*_MODEL` env vars). Treat `Direct routing: <tier> (not in tier list)` in the service log as a stale client pin, not a provider outage. Evidence 2026-10-18: cordoned configs deployed 01:32 local (commit a0fe126), workers listener restarted 01:34, main router idle-gated restart 03:04:22-27; every subsequent `frontend: Codex` request for `zai,glm-5.3` returned 503 (5,408 provider-lookup misses, 1,353 terminal failures) while chain-routed clients kept serving via the minimax tier.
+
+---
+
 ## Appendix: Diagnostic Cheat Sheet
 
 | Symptom                                                                      | Likely Cause                        | Check                                                           |
@@ -136,3 +144,4 @@ AnthropicContentBlock::Thinking { .. } => { /* emit thinking */ }
 | 429 on all requests                                                          | Provider rate limit                 | `curl localhost:3456/metrics \| grep rate_limit`                |
 | Exit code 1, events=[init, result] (no assistant)                            | Response conversion failure         | HTTP capture shows valid response but SSE conversion mangled it |
 | Exit code 1, events=[init, api_retry×N, result]                              | API error after retries             | Check `error_status` in api_retry events                        |
+| `All N backend tier(s) failed after X attempt(s) across Y sweep(s)`           | Client pinned to a removed tier     | Log: `Direct routing: <tier> (not in tier list)` + `Provider not found for tier` |

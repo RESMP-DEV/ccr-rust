@@ -12,6 +12,9 @@ mod translate_response;
 
 mod dispatch;
 use dispatch::*;
+pub(crate) use dispatch::{
+    build_anthropic_headers, build_openai_headers, canonical_model_name, provider_endpoint_url,
+};
 
 mod streaming;
 pub use streaming::{
@@ -34,6 +37,24 @@ const RESPONSES_RESPONSE_PASSTHROUGH_KEY: &str = "__ccr_responses_response";
 #[derive(Clone, Debug)]
 struct TrustedResponsesResponse(serde_json::Value);
 
+/// Content-free liveness by default; opt in to routing details for doctor.
+pub async fn health(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    if query.contains_key("details") {
+        let router = state.config.router();
+        Json(serde_json::json!({
+            "status": "ok",
+            "tiers": state.config.backend_tiers(),
+            "default": router.default,
+        }))
+        .into_response()
+    } else {
+        "ok".into_response()
+    }
+}
+
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -49,10 +70,10 @@ use crate::config::ModelAliasTarget;
 use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::record_deterministic_rejection;
 use crate::metrics::{
-    increment_active_requests, record_anthropic_request_tools, record_failure,
-    record_hedge_launched, record_hedge_win, record_hold_wait, record_pre_request_tokens,
-    record_primary_hedge_win, record_request_duration_with_frontend, record_request_with_frontend,
-    record_retry_sweep, sync_ewma_gauge,
+    estimate_request_tokens, increment_active_requests, record_anthropic_request_tools,
+    record_failure, record_hedge_launched, record_hedge_win, record_hold_wait,
+    record_pre_request_tokens, record_primary_hedge_win, record_request_duration_with_frontend,
+    record_request_with_frontend, record_retry_sweep, sync_ewma_gauge,
 };
 use crate::routing::AttemptTimer;
 
@@ -125,8 +146,15 @@ async fn execute_attempt<'a>(
 ) -> Option<SelectedAttempt<'a>> {
     let primary_request = request_for_tier(request, tier, client_wants_stream, config);
     let retry_config = config.get_tier_retry(tier_name);
-    let provider_limit = config.resolve_provider(tier).and_then(|p| p.max_inflight);
-    let admission_permit = state.admission_tracker.acquire(tier, provider_limit)?;
+    let provider = config.resolve_provider(tier);
+    let provider_limit = provider.and_then(|p| p.max_inflight);
+    let provider_token_limit = provider.and_then(|p| p.max_inflight_tokens);
+    let admission_permit = state.admission_tracker.acquire(
+        tier,
+        provider_limit,
+        local_estimate,
+        provider_token_limit,
+    )?;
     let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
     let primary_future = try_request(TryRequestArgs {
         config,
@@ -191,12 +219,18 @@ async fn execute_attempt<'a>(
                 });
             };
             let _hedge_retry_permit = hedge_retry_permit;
-            let hedge_provider_limit = config
-                .resolve_provider(hedge_tier)
-                .and_then(|provider| provider.max_inflight);
+            let hedge_provider = config.resolve_provider(hedge_tier);
+            let hedge_provider_limit = hedge_provider.and_then(|provider| provider.max_inflight);
+            let hedge_provider_token_limit =
+                hedge_provider.and_then(|provider| provider.max_inflight_tokens);
             let Some(hedge_admission_permit) = state
                 .admission_tracker
-                .acquire(hedge_tier, hedge_provider_limit)
+                .acquire(
+                    hedge_tier,
+                    hedge_provider_limit,
+                    local_estimate,
+                    hedge_provider_token_limit,
+                )
             else {
                 let result = primary_future.await;
                 return Some(SelectedAttempt {
@@ -352,15 +386,48 @@ fn strip_search_tags(request: &mut AnthropicRequest) {
     }
 }
 
+/// One route observed rate-limited by this request, with the configured
+/// display name used by `x-ccr-tier` and the route's own retry hint.
+type RateLimitedRoute = (String, String, Option<std::time::Duration>);
+
+/// Record that one route was rate-limited, keeping the first observation of
+/// each full `provider,model` route. The terminal 429 reports this list, so a
+/// client-visible failure names every exhausted candidate without conflating
+/// sibling models on one provider. The configured `tier_name` travels with the
+/// route because that display name, not the provider prefix, is the documented
+/// `x-ccr-tier` contract.
+fn note_rate_limited_tier(
+    tiers: &mut Vec<RateLimitedRoute>,
+    route: &str,
+    tier_name: &str,
+    retry_after: Option<std::time::Duration>,
+) {
+    if tiers.iter().any(|(tier, _, _)| tier == route) {
+        return;
+    }
+    tiers.push((route.to_string(), tier_name.to_string(), retry_after));
+}
+
 fn rate_limit_exhausted_response(
     retry_after: Option<std::time::Duration>,
-    tier_name: Option<&str>,
+    rate_limited_tiers: &[RateLimitedRoute],
 ) -> Response {
+    let details: Vec<_> = rate_limited_tiers
+        .iter()
+        .map(|(tier, _, tier_retry_after)| {
+            serde_json::json!({
+                "tier": tier,
+                "reason": "rate_limited",
+                "retry_after_ms": tier_retry_after.map(|duration| duration.as_millis() as u64),
+            })
+        })
+        .collect();
     let error_resp = serde_json::json!({
         "error": {
             "type": "rate_limit_error",
             "message": "All candidate backend tiers are currently rate limited",
-            "code": "rate_limited"
+            "code": "rate_limited",
+            "details": details
         }
     });
 
@@ -370,10 +437,23 @@ fn rate_limit_exhausted_response(
             response.headers_mut().insert("retry-after", value);
         }
     }
-    if let Some(tier_name) = tier_name {
+    // `x-ccr-tier` carries the same configured display name dispatch uses, so
+    // a provider with a custom `tier_name` keeps its established value. The
+    // dedicated provenance header below carries the unambiguous full route.
+    if let Some((_, tier_name, _)) = rate_limited_tiers.last() {
         if let Ok(value) = tier_name.parse() {
             response.headers_mut().insert("x-ccr-tier", value);
         }
+    }
+    let provenance = rate_limited_tiers
+        .iter()
+        .map(|(route, _, _)| route.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    if let Ok(value) = provenance.parse::<axum::http::HeaderValue>() {
+        response
+            .headers_mut()
+            .insert("x-ccr-rate-limited-tiers", value);
     }
     response
 }
@@ -520,7 +600,11 @@ pub async fn handle_messages(
     // deterministic rejections; only these justify another retry sweep.
     let mut saw_retryable_failure;
     let mut retry_after_hint: Option<std::time::Duration> = None;
-    let mut last_rate_limited_tier: Option<String> = None;
+    // Every route this request saw rate-limited, with the reason it was
+    // unavailable. The synthesized terminal 429 reports this list so a
+    // client-visible failure explains which candidates were exhausted and
+    // why, instead of a bare "all candidates rate limited".
+    let mut rate_limited_tiers: Vec<RateLimitedRoute> = Vec::new();
 
     // Serialize messages to JSON values once for pre-request token audit
     let msg_values: Vec<serde_json::Value> = request
@@ -529,6 +613,14 @@ pub async fn handle_messages(
         .filter_map(|m| serde_json::to_value(m).ok())
         .collect();
     let tool_values: Option<Vec<serde_json::Value>> = request.tools.clone();
+
+    // Request-level token estimate for admission. The per-tier pre-request
+    // audit below runs when a tier is attempted, but the admission pass
+    // orders the tiers before any attempt, so both read the same estimate:
+    // a token budget has to be checked against the same number the attempt
+    // was admitted on.
+    let admission_token_estimate =
+        estimate_request_tokens(&msg_values, request.system.as_ref(), tool_values.as_deref());
 
     // One sweep = one full pass over the ordered tier list. With retrySweeps
     // enabled, a sweep that exhausts without success sleeps for a cooldown
@@ -568,7 +660,7 @@ pub async fn handle_messages(
         saw_non_rate_limit_failure = false;
         saw_retryable_failure = false;
         retry_after_hint = None;
-        last_rate_limited_tier = None;
+        rate_limited_tiers.clear();
         let mut retry_budget_exhausted = false;
 
         // A tier at its AIMD limit is deferred to the end of this pass. This
@@ -577,11 +669,15 @@ pub async fn handle_messages(
         let mut admission_ready: Vec<&(String, String)> = Vec::new();
         let mut admission_deferred: Vec<&(String, String)> = Vec::new();
         for entry @ (tier, _) in &ordered {
-            let provider_limit = config.resolve_provider(tier).and_then(|p| p.max_inflight);
-            if state
-                .admission_tracker
-                .at_capacity(tier.as_str(), provider_limit)
-            {
+            let provider = config.resolve_provider(tier);
+            let provider_limit = provider.and_then(|p| p.max_inflight);
+            let provider_token_limit = provider.and_then(|p| p.max_inflight_tokens);
+            if state.admission_tracker.at_capacity(
+                tier.as_str(),
+                provider_limit,
+                admission_token_estimate,
+                provider_token_limit,
+            ) {
                 admission_deferred.push(entry);
             } else {
                 admission_ready.push(entry);
@@ -595,7 +691,7 @@ pub async fn handle_messages(
             .collect();
 
         // Try each tier with retries.
-        'tier_pass: for (pass_index, (tier, tier_name)) in pass_order.iter().enumerate() {
+        for (pass_index, (tier, tier_name)) in pass_order.iter().enumerate() {
             if rejected_tiers.contains(tier) {
                 tracing::debug!(tier = %tier_name, "Skipping deterministically rejected tier");
                 continue;
@@ -611,7 +707,12 @@ pub async fn handle_messages(
                 .should_skip_tier(tier.as_str(), honor_remaining)
             {
                 saw_rate_limit = true;
-                last_rate_limited_tier = Some(tier_name.to_string());
+                note_rate_limited_tier(
+                    &mut rate_limited_tiers,
+                    tier,
+                    tier_name,
+                    state.ratelimit_tracker.backoff_remaining(tier.as_str()),
+                );
                 // Carry the tracker's live backoff window into this sweep's
                 // Retry-After hint so an all-skipped sweep still cools down
                 // for the actual recovery time (and the terminal 429 keeps
@@ -648,27 +749,32 @@ pub async fn handle_messages(
             };
 
             for attempt in 0..=max_retries {
-                let retry_permit = if total_attempts > 0 {
+                // The retry budget bounds retry amplification, which is the
+                // repeated attempt on a tier that already failed. A cascade
+                // to a different tier is not amplification: it is the
+                // failover contract, and charging it here meant a saturated
+                // budget abandoned the request before a healthy later tier
+                // was ever tried, turning a recoverable 429 into a terminal
+                // one. Only a retry of the same tier draws from the budget.
+                let retry_permit = if attempt > 0 {
                     match state
                         .retry_budget
                         .acquire_retry(config.router().retry_budget_percent)
                     {
                         Some(permit) => Some(permit),
                         None => {
-                            // Budget exhaustion is a cascade-level stop, not a
-                            // tier failure. Recording it as a non-rate-limit
-                            // failure would turn a purely 429 sweep into a
-                            // synthesized 503 below, so only the terminal
-                            // synthesis decides between 429 and 503 from the
-                            // sweep's actual failure mix.
+                            // Stop retrying this tier, continue through the
+                            // remaining tiers' first attempts, and then stop
+                            // additional sweeps. The budget limits retry
+                            // amplification without hiding an eligible
+                            // fallback in the current cascade.
                             retry_budget_exhausted = true;
-                            break 'tier_pass;
+                            break;
                         }
                     }
                 } else {
                     None
                 };
-                total_attempts += 1;
                 info!(
                     sweep,
                     "Trying {} ({}), attempt {}/{}",
@@ -703,10 +809,13 @@ pub async fn handle_messages(
                 )
                 .await
                 else {
+                    // Admission deferral launched no primary attempt, so it
+                    // must not be reported as an upstream attempt.
                     saw_non_rate_limit_failure = true;
                     saw_retryable_failure = true;
                     continue;
                 };
+                total_attempts += 1;
                 total_attempts += usize::from(hedge_launched);
                 let tier = tier.as_str();
                 let tier_name = tier_name.as_str();
@@ -749,7 +858,12 @@ pub async fn handle_messages(
                             crate::metrics::record_rate_limit_hit(tier);
                             crate::metrics::record_rate_limit_backoff(tier);
                             saw_rate_limit = true;
-                            last_rate_limited_tier = Some(tier_name.to_string());
+                            note_rate_limited_tier(
+                                &mut rate_limited_tiers,
+                                tier,
+                                tier_name,
+                                retry_after,
+                            );
                             retry_after_hint = match (retry_after_hint, retry_after) {
                                 (Some(current), Some(candidate)) => Some(current.max(candidate)),
                                 (None, some) => some,
@@ -820,7 +934,12 @@ pub async fn handle_messages(
                             gp_router.record_attempt(plan, tier, attempt, None, config);
                         }
                         saw_rate_limit = true;
-                        last_rate_limited_tier = Some(tier_name.to_string());
+                        note_rate_limited_tier(
+                            &mut rate_limited_tiers,
+                            tier,
+                            tier_name,
+                            retry_after,
+                        );
                         retry_after_hint = match (retry_after_hint, retry_after) {
                             (Some(current), Some(candidate)) => Some(current.max(candidate)),
                             (None, some) => some,
@@ -900,10 +1019,11 @@ pub async fn handle_messages(
         // hold the request open and cascade again (retrySweeps) or fall
         // through to the synthesized terminal response below.
         if !sweeps.enabled || retry_budget_exhausted || !(saw_rate_limit || saw_retryable_failure) {
-            // Sweeps disabled, the retry budget is spent, or every tier
-            // failed deterministically (401/402/403/404): another sweep
-            // cannot change that outcome. The terminal response still
-            // reflects this sweep's own failure mix (429 vs 503).
+            // Sweeps disabled, the retry budget is spent after completing
+            // this cascade, or every tier failed deterministically
+            // (401/402/403/404): another sweep cannot change that outcome.
+            // The terminal response still reflects this sweep's own failure
+            // mix (429 vs 503).
             break;
         }
         if sweeps.max_sweeps > 0 && sweep >= sweeps.max_sweeps {
@@ -960,7 +1080,7 @@ pub async fn handle_messages(
             retry_after = ?retry_after_hint,
             "All candidate tiers exhausted due to rate limits"
         );
-        return rate_limit_exhausted_response(retry_after_hint, last_rate_limited_tier.as_deref());
+        return rate_limit_exhausted_response(retry_after_hint, &rate_limited_tiers);
     }
 
     // All tiers exhausted due to non-rate-limit failures (5xx, timeouts, etc.).

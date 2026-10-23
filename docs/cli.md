@@ -70,6 +70,45 @@ Validate configuration file syntax and providers.
 ccr-rust validate
 ```
 
+### `doctor`
+Diagnose the full runtime in one read-only pass: config validity, per-provider
+credential/catalog probes, and listener health. Unlike `validate` (config
+syntax only) and `status` (liveness only), `doctor` contacts each provider's
+model-listing endpoint with the same auth headers the dispatch path uses and
+flags any configured model id that the live catalog no longer lists, so a
+rotated or unlisted id (for example a vendor dropping a `-Preview` suffix) is
+surfaced before a request silently serves a different deployment. Catalog
+matching honors dispatch model canonicalization (including legacy MiniMax M3
+aliases), provider `extra_headers` such as a required `User-Agent` are
+preserved, and configuration checks include feature-dependent GP routing
+support.
+
+```bash
+ccr-rust doctor                    # probe default listener on 127.0.0.1:3456
+ccr-rust doctor --json             # machine-readable report
+ccr-rust doctor --skip-providers   # config + listener only, no network probes
+ccr-rust doctor -p 3457            # probe a specific listener port
+```
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--host` | - | `127.0.0.1` | Listener host to probe |
+| `--port` | `-p` | `3456` | Listener port to probe |
+| `--timeout` | - | `10` | Per-probe timeout in seconds |
+| `--skip-providers` | - | `false` | Skip live provider catalog probes |
+| `--json` | - | `false` | Emit one JSON report instead of text |
+
+Each provider reports `ok` (credential authenticated and catalog compared),
+`no_catalog` (provider has no listing endpoint, e.g. HTTP 404/405, credential
+not exercised), or `error` (rejected or unreachable). Stale models are a
+warning, not a hard failure. An absent listener is also a warning so offline
+config/provider diagnosis remains useful; `ok=false` is reserved for
+credential errors, unsupported or invalid configuration, unresolved tiers, a
+listener that answers `/health` with an HTTP error, or a listener whose
+in-memory tier order is stale (restart pending). `doctor` never issues a
+completion and never prints credentials or response bodies. Exit code is 0
+when healthy and 1 when problems are found.
+
 ### `dashboard`
 Launch the interactive TUI dashboard (requires the default `dashboard` feature).
 
@@ -224,7 +263,7 @@ Once running, the server exposes the following endpoints:
 | `/v1/token-audit` | GET | Recent pre-request token audit entries |
 | `/v1/throughput` | GET | Throughput statistics |
 | `/v1/frontend-metrics` | GET | Per-frontend request/latency metrics |
-| `/health` | GET | Health check |
+| `/health` | GET | Content-free liveness check; `?details=1` returns JSON default/tier state |
 | `/metrics` | GET | Prometheus-style metrics |
 
 ## Signals

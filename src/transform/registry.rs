@@ -149,6 +149,7 @@ impl Default for TransformerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn registry_new_registers_provider_transformers() {
@@ -219,6 +220,31 @@ mod tests {
 
         let chain = registry.build_chain(&entries);
         assert_eq!(chain.len(), 2);
+    }
+
+    #[test]
+    fn registry_builds_qwen_only_if_missing_maxtoken() {
+        let registry = TransformerRegistry::new();
+        let entries = vec![serde_json::from_value::<TransformerEntry>(json!([
+            "maxtoken",
+            {"max_tokens": 32768, "only_if_missing": true}
+        ]))
+        .unwrap()];
+        let chain = registry.build_chain(&entries);
+
+        let missing = chain
+            .apply_request(json!({"model": "qwen3.8-flash", "messages": []}))
+            .unwrap();
+        let present = chain
+            .apply_request(json!({
+                "model": "qwen3.8-flash",
+                "messages": [],
+                "max_tokens": 512
+            }))
+            .unwrap();
+
+        assert_eq!(missing["max_tokens"], 32768);
+        assert_eq!(present["max_tokens"], 512);
     }
 
     #[test]

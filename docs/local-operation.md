@@ -8,6 +8,10 @@ See [Switching plans](switching-plans.md) for Kimi/GLM commands and the
 configuration needed for Codex tool calls through Kimi.
 Use [Shared fallback policy](shared-fallback-policy.md) when several local
 listeners should reuse one approved fallback chain.
+Use [Configuration recovery](config-recovery.md) before and after changing the
+routing surface, launchd jobs, or Codex model catalog.
+Use [Qwen Token Plan](qwen-token-plan.md) when adding the live `sk-sp-`
+credit-plan provider or choosing its day/night lane.
 Use [Worker inspection](worker-inspection.md) for bounded, offline summaries
 and incremental event inspection instead of loading full subagent transcripts.
 
@@ -25,20 +29,23 @@ ccr-local validate
 
 | Command | Purpose |
 | --- | --- |
-| `claude-ccr` | Start the local service if needed, launch Claude Code through CCR |
+| `claude-ccr` | Start the local service if needed, launch Claude Code through CCR. Retired on the maintainer's Mac (October 19, 2026), where native `claude` uses the Anthropic subscription login |
 | `codex-ccr` | Start the local service if needed, launch Codex with the `ccr` profile |
 | `ccr-local start` / `stop` / `restart` / `restart-now` | Control the launchd service; `restart` waits for idle, `restart-now` is the emergency override |
 | `ccr-local status` / `validate` | Check the listener or load and validate its configuration |
 | `ccr-wait-idle` | Require two consecutive samples with zero active requests and streams |
+| `ccr-recovery` | Snapshot, verify, restore, and detect file or in-memory route drift |
+| `ccr-recovery activate --listener <name>` | Snapshot, verify, idle-gate, restart, and runtime-check main, worker, auth, or OCR |
+| `ccr-catalog-sync` | Align Codex CCR route metadata with the approved primary and fallback routes |
 
 The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
-Ordinary Claude and Codex sessions, worker sessions, and governed OCR fallback
-currently start at MiniMax-M3.1-Flash-Preview. GLM 5.3 and GLM 5.3-Flash are
-cordoned until the exhausted Z.AI monthly tool quota resets; FlashX remains
-absent after its coding-plan trial expired.
-Inspect the active config and live route counters before claiming which
-backend served a request.
+Main/auth sessions start at GLM-5.3 and then follow the shared chain: MiniMax
+M3.1 Flash, GLM-5.3 Flash, DeepSeek Flash, the keyed B550 Strata Coder tunnel,
+and finally the resident local27 model. Worker sessions lead with MiniMax;
+OCR retains its distinct OpenRouter primary. FlashX remains absent after its
+coding-plan trial expired. Inspect the active config and live route counters
+before claiming which backend served a request.
 
 For MiniMax, follow [MiniMax setup and operations](minimax.md). Its transformer
 must be explicitly configured, source-policy changes must also update the
@@ -50,10 +57,16 @@ installed launcher module, and busy listeners must wait for an idle restart.
 | `~/.claude-code-router/runtime-credentials.json` | Private credential values, mode `0600`; never print or commit |
 | `~/.claude-code-router/serve*.py` | Load allowed credentials and execute governed CCR listeners |
 | `~/Library/LaunchAgents/com.kearm.ccr-rust.plist` | Start at login and restart after exit |
+| `~/Library/LaunchAgents/com.kearm.strata-b550-tunnel.plist` | Forward `127.0.0.1:18081` to the keyed B550 Strata service through the ZeroTier-first `strata_b550_tunnel.sh` fallback sequence |
 | `~/.claude-code-router/logs/` | Service logs; inspect locally, redact before sharing |
-| `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers |
+| `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers; `claude-ccr` is a retired stub on the maintainer's Mac |
 | `~/.codex/ccr.config.toml` | CCR provider profile for the installed Codex fork |
+| `~/.codex/ccr-live-model-catalog.json` | Codex model metadata; an unlisted slug falls back to generic metadata |
 | `~/.claude-code-router/LOCAL_SETUP.md` | Machine-specific setup and acceptance receipt |
+
+On the maintainer's Mac, Claude Code itself is deliberately not routed through
+CCR: it uses the native Anthropic subscription login, so no `apiKeyHelper`,
+localhost base URL, or CCR model pin belongs in its global settings.
 
 The service loads `runtime-credentials.json`, not older `.env` files. Changes
 to a file do not change a running process until it is restarted. Coordinate a

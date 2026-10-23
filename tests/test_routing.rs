@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 use serde_json::json;
 use tower::ServiceExt;
-use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ccr_rust::config::TierRetryConfig;
@@ -573,6 +573,7 @@ fn build_app(config: ccr_rust::config::Config) -> Router {
     };
     Router::new()
         .route("/v1/messages", post(ccr_rust::router::handle_messages))
+        .route("/health", get(ccr_rust::router::health))
         .with_state(state)
 }
 
@@ -635,6 +636,83 @@ async fn successful_request_no_retry() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn sensenova_base_url_dispatches_chat_completions_with_bearer_auth() {
+    if skip_if_localhost_bind_unavailable("sensenova_base_url_auth") {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer test-key"))
+        .and(body_partial_json(json!({
+            "model": "sensenova-6.8-flash-lite",
+            "thinking": {"type": "adaptive"},
+            "reasoning_effort": "none"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-sensenova-test",
+            "object": "chat.completion",
+            "created": 1776952631,
+            "model": "sensenova-6.8-flash-lite",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "SENSENOVA_OK"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 8,
+                "completion_tokens": 3,
+                "total_tokens": 11
+            }
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config_json = json!({
+        "Providers": [{
+            "name": "sensenova",
+            "api_base_url": format!("{}/v1", mock_server.uri()),
+            "api_key": "test-key",
+            "protocol": "openai",
+            "force_adaptive_thinking": true,
+            "force_reasoning_effort": "none",
+            "models": ["sensenova-6.8-flash-lite"]
+        }],
+        "Router": {"default": "sensenova,sensenova-6.8-flash-lite"},
+        "API_TIMEOUT_MS": 5000
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_string(&config_json).unwrap()).unwrap();
+
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "model": "sensenova,sensenova-6.8-flash-lite",
+                        "max_tokens": 32,
+                        "messages": [{"role": "user", "content": "ping"}]
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -2046,4 +2124,48 @@ fn strict_tier_order_with_top_k_rejected_at_config_load() {
         err.to_string().contains("cannot be combined"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn health_endpoint_preserves_liveness_and_adds_opt_in_details() {
+    if skip_if_localhost_bind_unavailable(
+        "health_endpoint_preserves_liveness_and_adds_opt_in_details",
+    ) {
+        return;
+    }
+    let mock_server = MockServer::start().await;
+    let config_json = make_test_config(&mock_server.uri(), HashMap::new());
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, &config_json).unwrap();
+    let config = ccr_rust::config::Config::from_file(config_path.to_str().unwrap()).unwrap();
+    let app = build_app(config);
+
+    let plain_resp = app
+        .clone()
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(plain_resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(plain_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(bytes, "ok");
+
+    let details_resp = app
+        .oneshot(
+            Request::get("/health?details=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(details_resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(details_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["default"], "mock,test-model");
+    assert_eq!(body["tiers"], json!(["mock,test-model"]));
 }
