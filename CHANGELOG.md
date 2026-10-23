@@ -13,10 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Added a credential-safe SenseNova Token Plan provider recipe. The provider
-  uses the existing OpenAI Chat protocol and `reasoning` field alias, has a
-  dedicated example/config guide, and is registered in the governed policy as
-  `registered_not_routed` until a real key completes live qualification.
+- Added a SenseNova Token Plan provider recipe using the existing OpenAI Chat
+  protocol and `reasoning` field alias, with a dedicated example/config guide.
+  It was first registered credential-safely as unrouted, then live-qualified
+  and activated after the real key arrived.
+- Activated the live SenseNova Token Plan tier by user direction dated
+  2026-10-23. The free lane sits immediately after MiniMax and before Z.AI GLM
+  Flash in every governed consumer; a real key authenticated `/models`, passed
+  the four-case CCR smoke matrix, and returned a native tool call.
 - Reconciled the governed source policy with the live 2026-10-22 MiniMax
   token-admission tuning by landing `maxInflightTokens: 250000` with a pinned
   regression test, preventing a source deploy from silently removing the live

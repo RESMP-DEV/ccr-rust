@@ -183,3 +183,104 @@ The implementation landed in RESMP-DEV/ccr-rust commit
 `464ce0ad8b7b2eb4fa91b93deaf89ef5b64ca476`
 (`feat: add sensenova token plan provider`) and was pushed to the owned
 `origin/main` remote.
+
+## Activation — 2026-10-23 (second session, after the key was issued)
+
+The SenseNova key was issued later the same day and stored in the governed
+credential store, never in a config file, a document, a log, or a commit:
+`~/.claude-code-router/runtime-credentials.json` (mode 0600) now holds
+`CCR_SENSENOVA_API_KEY`, written atomically with a staging file, `fsync`, and
+`os.replace` after refusing to run against a non-0600 target.
+
+### Live qualification before any route change
+
+- `GET https://token.sensenova.ai/v1/models` with the stored credential:
+  HTTP 200. The account catalog is `sensenova-6.7-flash-lite`,
+  `sensenova-u1-fast`, `sensenova-6.8-flash-lite`, and `sensenova-u1.5-lite`.
+- A scratch CCR listener on port 3472 (separate from every production port)
+  served the provider from `examples/sensenova.json`:
+  `python3 scripts/ccr_provider_smoke.py --base-url http://127.0.0.1:3472
+  --models sensenova,sensenova-6.8-flash-lite --prompt 'Reply with
+  SENSENOVA_OK.' --max-output-tokens 512 --verbose` reported 4/4 PASS for
+  chat/non-stream, chat/stream, responses/non-stream, and responses/stream.
+  `GET /v1/latencies` on that listener showed one tier, `ccr-sensenova`, with
+  4 samples and a 1.97 s EWMA.
+- A direct upstream streaming call showed the real wire shape of the terminal
+  usage frame: it carries `id`, `object`, `created`, `model`, `request_id`, and
+  `usage` alongside an empty `choices` array, so it parses as an OpenAI chunk
+  and CCR keeps the provider's usage. The abbreviated excerpt in the public
+  documentation is not what the server sends, so the usage-drop risk recorded
+  above does not materialize. The same call showed `delta.reasoning` frames,
+  which is the field CCR maps to `reasoning_content`.
+- A direct upstream tool request returned `finish_reason: tool_calls` with a
+  well-formed `get_weather` call and `{"city": "Paris"}` arguments, so the
+  provider supports function calling.
+
+### Route decision and deployment
+
+- The route was added to the governed chain directly behind MiniMax and ahead
+  of Z.AI GLM-5.3 Flash. SenseNova is a free Token Plan lane, so it absorbs
+  volume that would otherwise spend the scarce Z.AI window, while MiniMax
+  remains the worker primary and GLM-5.3 remains the main and auth primary.
+- Source policy `scripts/ccr_fallback_policy.py`:
+  `MACHINE_ROUTE_CHAIN` is now
+  `minimax,MiniMax-M3.1-Flash` -> `sensenova,sensenova-6.8-flash-lite` ->
+  `zai,glm-5.3-flash` -> `deepseek,deepseek-flash` ->
+  `strata-b550,qwen3.8-flash-next-coder` -> `local27,qwen3.8-27b-mxfp4`; the
+  provider entry carries the live catalog and `tier_name: ccr-sensenova`; the
+  integrity pin is
+  `6e81d0df79332595d6c84819d5877964b379f665f7200883e8c0c477eebad81d`.
+- `ccr-recovery snapshot --label pre-sensenova-route-activation` produced
+  `20261023T134612-0700` (44 files, verified, no missing or mismatched
+  entries) before any live write.
+- The live policy JSON was rewritten atomically from the reviewed source and
+  the source policy was deployed to
+  `~/.local/share/ccr-routing/ccr_fallback_policy.py`.
+- `ccr-fallback-policy preflight --json` authenticated SenseNova:
+  `{"provider": "sensenova", "ok": true, "status": 200, "detail":
+  "authenticated on models with Authorization"}`. The same run still reports
+  `local27` as a connection refusal and `strata-b550` as a connection reset;
+  both are the pre-existing local-tier conditions recorded in the registration
+  section and are not caused by this change.
+- `ccr-fallback-policy check --json` reported
+  `changed: ["config.json", "config-auth.json", "glm-workers.json",
+  "ocr-reviewers.json"]`, and `ccr-fallback-policy sync --json` rewrote those
+  four consumer configs with the SenseNova tier in position two behind each
+  consumer's own primary.
+- Listener activation is idle-gated through `ccr-recovery activate`, never an
+  ungated `launchctl kickstart`.
+
+### Live proof on the governed worker listener
+
+- After the idle-gated worker restart, `POST http://127.0.0.1:3457/v1/chat/completions`
+  with the explicit route `sensenova,sensenova-6.8-flash-lite` returned HTTP
+  200, served model `sensenova-6.8-flash-lite`, `x-ccr-tier: ccr-sensenova`,
+  and the content `SENSENOVA_LIVE_OK`. The first attempt with
+  `max_tokens: 128` ended as `finish_reason: length` with the whole budget
+  spent on reasoning tokens; `max_tokens: 512` produced a clean `stop`.
+- The same listener returned a native tool call for the same provider:
+  `finish_reason: tool_calls`, function `get_weather`, arguments
+  `{"city": "Paris"}`, which proves CCR's OpenAI tool-call path carries the
+  provider's tool calls unchanged.
+- The authenticated main listener on port 3461 was restarted idle-gated and
+  returned the same proof for the explicit route: HTTP 200,
+  `x-ccr-tier: ccr-sensenova`, served model
+  `sensenova-6.8-flash-lite`, and content `SENSENOVA_AUTH_OK`. A 512-token
+  request ended at `length` after reasoning consumed the cap; a 1024-token
+  request ended at `stop`, confirming the output cap must remain generous for
+  this thinking-by-default preview model.
+
+### Activation state at this receipt
+
+- Worker (`3457`) and auth (`3461`) restarted idle-gated and serve the new
+  chain; their live tier lists and explicit-route probes pass.
+- Main (`3456`) and OCR (`3458`) still had active non-streaming requests, so
+  the first main `ccr-recovery activate` timed out in the idle stage after 900
+  seconds (exit 75) and never restarted the listener. The same safe gate is now
+  retrying main and OCR in detached background processes with a 7200-second
+  idle timeout; receipts are
+  `build/reports/sensenova-activation/main-retry.json` and
+  `.../ocr-retry.json`. At the last check, `ccr-recovery doctor` reported
+  worker and auth clean and the expected new chain, while main and OCR reported
+  `listener has a stale in-memory tier order` because they have not yet
+  restarted. The on-disk configs for all four are already correct.

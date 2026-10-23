@@ -52,6 +52,11 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # without rewiring keys. Live utilization at removal is not re-checked here
     # on purpose: an exhausted window cannot be optimized around, only skipped.
     "minimax,MiniMax-M3.1-Flash",
+    # 2026-10-23 user direction: the free SenseNova Token Plan sits behind
+    # MiniMax and ahead of the scarce Z.AI window. A live key authenticated
+    # /models, completed the 4-case chat/responses matrix, and returned a
+    # native tool call, so its 429s can safely cascade like any other tier.
+    "sensenova,sensenova-6.8-flash-lite",
     "zai,glm-5.3-flash",
     # 2026-10-21 user direction: native DeepSeek returns as the last cloud
     # tier, ahead of the local model. A live probe the same day authenticated
@@ -117,7 +122,13 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "api_base_url": "https://token.sensenova.ai/v1",
         "api_key": "${CCR_SENSENOVA_API_KEY}",
         "protocol": "openai",
-        "models": ["sensenova-6.8-flash-lite"],
+        "models": [
+            "sensenova-6.8-flash-lite",
+            "sensenova-u1.5-lite",
+            "sensenova-u1-fast",
+            "sensenova-6.7-flash-lite",
+        ],
+        "tier_name": "ccr-sensenova",
     },
     # Routed again 2026-10-21 (balance topped up; unrouted 2026-10-11 to
     # 2026-10-21 after preflight 402).
@@ -226,7 +237,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "7500b006045c24aac70ae7e2528b51cb32ca4c19e1925c5626be6c9f828cb253"
+    "6e81d0df79332595d6c84819d5877964b379f665f7200883e8c0c477eebad81d"
 )
 
 

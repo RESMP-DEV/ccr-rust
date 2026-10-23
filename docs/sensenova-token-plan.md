@@ -30,6 +30,12 @@ console uses the `.ai` host:
 }
 ```
 
+On the governed workstation, the reviewed shared chain places
+`sensenova,sensenova-6.8-flash-lite` immediately after MiniMax and before the
+Z.AI GLM Flash window. Main and auth still begin with their GLM-5.3 primary;
+workers still begin with MiniMax. This spends the free SenseNova lane before
+scarce quota, while retaining the normal 429 cascade.
+
 Load the credential into the router process, not into the checked-in config:
 
 ```bash
@@ -46,6 +52,10 @@ than rewriting a key between regions.
 - Requests are OpenAI Chat Completions calls to `/v1/chat/completions`.
 - Authentication is `Authorization: Bearer <key>`.
 - `sensenova-6.8-flash-lite` is the exact preview model identifier.
+- The authenticated 2026-10-23 catalog also listed `sensenova-u1.5-lite`,
+  `sensenova-u1-fast`, and `sensenova-6.7-flash-lite`; the governed policy
+  registers those IDs but routes only Flash Lite until separate lanes are
+  qualified.
 - Non-streaming responses may include `choices[0].message.reasoning`; CCR
   accepts that field as the generic `reasoning_content` alias and does not
   fabricate an Anthropic thinking signature.
@@ -88,13 +98,16 @@ the explicit SenseNova route served the request. A provider/model pin still
 follows the configured retry policy; it does not isolate the account from other
 tiers.
 
+Keep output caps generous: the preview model thinks by default and consumed an
+entire 128-token cap before emitting text. A 512-token cap completed the short
+marker probe, while 1024 tokens provided comfortable headroom.
+
 ## Current status and non-claims
 
-The 2026-10-23 integration is credential-safe but not live-qualified: both
-hosts were probed without a valid key and returned HTTP 401 JSON errors, which
-proves endpoint and error reachability but not completion, tool-call, vision,
-or streaming behavior. The public streaming excerpt shows a usage-only final
-event with an empty `choices` array; confirm with one real stream that CCR
-records its exact usage rather than relying on the excerpt's abbreviated
-envelope. SenseNova remains registered-but-unrouted in the governed machine
-policy until a real key completes the matrix above.
+The 2026-10-23 qualification completed after the real key was loaded: the
+authenticated catalog returned four model IDs, the four-case matrix above
+passed, the served model matched `sensenova-6.8-flash-lite`, and a native
+weather-tool request returned `get_weather` with `{"city":"Paris"}`. A live
+stream also showed that its final usage-only event retains
+`id`, `object`, `created`, and `model`, so CCR can parse the exact usage
+instead of estimating it. Vision input and quota exhaustion remain unmeasured.

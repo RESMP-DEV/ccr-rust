@@ -382,6 +382,7 @@ class PolicyTests(unittest.TestCase):
             policy.MACHINE_ROUTE_CHAIN,
             (
                 "minimax,MiniMax-M3.1-Flash",
+                "sensenova,sensenova-6.8-flash-lite",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
                 "strata-b550,qwen3.8-flash-next-coder",
@@ -403,13 +404,24 @@ class PolicyTests(unittest.TestCase):
             "User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"]
         )
 
-    def test_sensenova_token_plan_is_registered_but_unrouted(self) -> None:
+    def test_sensenova_token_plan_is_routed_after_minimax(self) -> None:
         sensenova = policy.MACHINE_SHARED_PROVIDERS["sensenova"]
         self.assertEqual(sensenova["api_base_url"], "https://token.sensenova.ai/v1")
         self.assertEqual(sensenova["api_key"], "${CCR_SENSENOVA_API_KEY}")
         self.assertEqual(sensenova["protocol"], "openai")
-        self.assertEqual(sensenova["models"], ["sensenova-6.8-flash-lite"])
-        self.assertNotIn("sensenova", policy.MACHINE_ROUTE_CHAIN)
+        self.assertEqual(sensenova["tier_name"], "ccr-sensenova")
+        self.assertEqual(
+            sensenova["models"],
+            [
+                "sensenova-6.8-flash-lite",
+                "sensenova-u1.5-lite",
+                "sensenova-u1-fast",
+                "sensenova-6.7-flash-lite",
+            ],
+        )
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN[1], "sensenova,sensenova-6.8-flash-lite"
+        )
         self.assertNotIn(
             "sensenova", policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.values()
         )
@@ -446,6 +458,7 @@ class PolicyTests(unittest.TestCase):
             policy.MACHINE_ROUTE_CHAIN,
             (
                 "minimax,MiniMax-M3.1-Flash",
+                "sensenova,sensenova-6.8-flash-lite",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
                 "strata-b550,qwen3.8-flash-next-coder",
@@ -488,6 +501,7 @@ class PolicyTests(unittest.TestCase):
             [
                 "zai,glm-5.3",
                 "minimax,MiniMax-M3.1-Flash",
+                "sensenova,sensenova-6.8-flash-lite",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
                 "strata-b550,qwen3.8-flash-next-coder",
