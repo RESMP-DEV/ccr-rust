@@ -108,9 +108,85 @@ impl Transformer for AnthropicTransformer {
 #[derive(Debug, Clone)]
 pub struct DeepSeekTransformer;
 
+/// Insert a placeholder leading `thinking` block where DeepSeek requires one.
+///
+/// Empirical constraint captured from live traffic on 2026-10-23: with the
+/// DeepSeek Anthropic-compatible endpoint (`deepseek-flash`, always-thinking
+/// mode), an assistant turn is rejected with a deterministic 400
+/// ("The content[].thinking in the thinking mode must be passed back to the
+/// API") when it directly follows a `tool_result`-bearing user turn, or when
+/// it carries a `tool_use` block, unless that turn already opens with a
+/// `thinking` or `redacted_thinking` block.
+///
+/// The same capture validated the repair: injecting the placeholder below
+/// turned the real 231-message failing request into a 200 after 20
+/// injections (2026-10-23). Nothing else is mutated: the `thinking`
+/// parameter, `output_config`, `tools`, `system`, and string-content
+/// messages are left untouched.
+///
+/// Shared by both `DeepSeekTransformer` implementations (the dispatch
+/// registry here and the factory registry in `crate::transform::deepseek`)
+/// so the two construction paths cannot drift apart.
+pub(crate) fn inject_leading_thinking_blocks(request: &mut Value) {
+    let Some(messages) = request.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut prev_has_tool_result = false;
+    for message in messages.iter_mut() {
+        let (is_assistant, cur_has_tool_result, has_tool_use) = {
+            let role = message.get("role").and_then(Value::as_str);
+            let blocks = message.get("content").and_then(Value::as_array);
+            let has_block = |kind: &str| {
+                blocks.is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block.get("type").and_then(Value::as_str) == Some(kind))
+                })
+            };
+            (
+                role == Some("assistant"),
+                role == Some("user") && has_block("tool_result"),
+                has_block("tool_use"),
+            )
+        };
+
+        if is_assistant {
+            if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+                let leads_with_thinking = matches!(
+                    blocks
+                        .first()
+                        .and_then(|block| block.get("type"))
+                        .and_then(Value::as_str),
+                    Some("thinking") | Some("redacted_thinking")
+                );
+                if !blocks.is_empty()
+                    && !leads_with_thinking
+                    && (prev_has_tool_result || has_tool_use)
+                {
+                    blocks.insert(
+                        0,
+                        serde_json::json!({
+                            "type": "thinking",
+                            "thinking": "",
+                            "signature": ""
+                        }),
+                    );
+                }
+            }
+        }
+
+        prev_has_tool_result = cur_has_tool_result;
+    }
+}
+
 impl Transformer for DeepSeekTransformer {
     fn name(&self) -> &str {
         "deepseek"
+    }
+
+    fn transform_request(&self, mut request: Value) -> Result<Value> {
+        inject_leading_thinking_blocks(&mut request);
+        Ok(request)
     }
 
     fn transform_response(&self, mut response: Value) -> Result<Value> {
@@ -636,5 +712,136 @@ mod tests {
         let messages = result["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[test]
+    fn deepseek_injects_thinking_after_tool_result_turn() {
+        let transformer = DeepSeekTransformer;
+        let request = serde_json::json!({
+            "model": "deepseek-flash",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "run it"}]},
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call_2", "name": "bash", "input": {}}]
+                }
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let blocks = result["messages"][2]["content"].as_array().unwrap();
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "");
+        assert_eq!(blocks[0]["signature"], "");
+        assert_eq!(blocks[1]["type"], "tool_use");
+    }
+
+    #[test]
+    fn deepseek_keeps_existing_leading_thinking_block() {
+        let transformer = DeepSeekTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "prior reasoning", "signature": "sig"},
+                        {"type": "tool_use", "id": "call_2", "name": "bash", "input": {}}
+                    ]
+                }
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let blocks = result["messages"][1]["content"].as_array().unwrap();
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "prior reasoning");
+        assert_eq!(blocks[0]["signature"], "sig");
+    }
+
+    #[test]
+    fn deepseek_leaves_text_only_turn_untouched() {
+        let transformer = DeepSeekTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let blocks = result["messages"][1]["content"].as_array().unwrap();
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "hi");
+    }
+
+    #[test]
+    fn deepseek_injects_thinking_for_tool_use_without_tool_result() {
+        let transformer = DeepSeekTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "call_1", "name": "ls", "input": {}}]
+                }
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let blocks = result["messages"][1]["content"].as_array().unwrap();
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "");
+        assert_eq!(blocks[0]["signature"], "");
+        assert_eq!(blocks[1]["type"], "tool_use");
+    }
+
+    #[test]
+    fn deepseek_leaves_string_content_untouched() {
+        let transformer = DeepSeekTransformer;
+        let request = serde_json::json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]
+                },
+                {"role": "assistant", "content": "plain string answer"}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+
+        assert_eq!(result["messages"][1]["content"], "plain string answer");
+    }
+
+    #[test]
+    fn deepseek_returns_request_without_messages_unchanged() {
+        let transformer = DeepSeekTransformer;
+
+        let without_messages = serde_json::json!({"model": "deepseek-flash", "max_tokens": 100});
+        let result = transformer.transform_request(without_messages).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({"model": "deepseek-flash", "max_tokens": 100})
+        );
+
+        let non_array_messages = serde_json::json!({"messages": "not-an-array"});
+        let result = transformer.transform_request(non_array_messages).unwrap();
+        assert_eq!(result, serde_json::json!({"messages": "not-an-array"}));
     }
 }

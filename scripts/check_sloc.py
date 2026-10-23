@@ -20,8 +20,11 @@ SOURCE_ROOT = ROOT / "src"
 # redacted_thinking content-block support Muse needs on its Messages surface.
 # Ceilings sit at the measured counts with zero headroom.
 # A reduction should lower this number; another increase requires splitting a
-# hotspot first.
-TOTAL_CEILING = 40_746
+# hotspot first. Re-pinned 2026-10-23 for the DeepSeek leading-thinking
+# injection transformer (shared helper in transformer/mod.rs plus the
+# factory-registry path in transform/deepseek.rs) merged alongside the
+# Muse/Holo4 routing work.
+TOTAL_CEILING = 40_963
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
 # baseline. They may shrink or be split, but cannot grow while the ratchet is

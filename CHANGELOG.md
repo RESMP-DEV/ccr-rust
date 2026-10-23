@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed deterministic DeepSeek 400s on replayed tool-loop history. The DeepSeek
+  Anthropic endpoint rejects assistant turns that follow a `tool_result` turn,
+  or that contain `tool_use`, yet lack a leading thinking block ("The
+  `content[].thinking` in the thinking mode must be passed back"), which hit
+  ~56% of DeepSeek attempts during Z.AI window walls because cross-provider
+  spills replay GLM-served sessions with bare tool turns. The `deepseek`
+  transformer now injects a placeholder leading thinking block into exactly
+  those turns through one shared helper used by both registry construction
+  paths (validated against captured live traffic: a failing 231-message
+  request returned 200 after injection), and the governed policy wires it
+  into the shared deepseek provider.
+
 - Added Meta Model API (Muse) as the last cloud fallback tier for the main
   interactive, auth, and worker lanes, behind MiniMax, GLM-5.3 Flash, and
   DeepSeek and ahead of the local crawl-backs. The provider speaks the
