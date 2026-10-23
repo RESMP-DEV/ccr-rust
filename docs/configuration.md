@@ -138,6 +138,7 @@ Each provider entry configures an upstream API endpoint.
 | `force_reasoning_effort` | string | No | - | Force `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` on every OpenAI-protocol request. |
 | `force_adaptive_thinking` | boolean | No | false | Insert `thinking: {"type":"adaptive"}` after protocol normalization. Pair it with `force_reasoning_effort: "none"` for providers whose non-thinking mode requires the adaptive marker. |
 | `maxInflight` | number | No | 8 | Initial and maximum per-route in-flight attempts for AIMD admission control. Values must be from 1 through 64. A 429 halves the current route limit; a clean completion grows it by one. |
+| `maxInflightTokens` | number | No | - | Optional per-route in-flight prefill-token budget. Admission defers a request (it falls to the next eligible tier without an upstream attempt) when the route's reserved in-flight token total plus the request's pre-request estimate would exceed this budget. Use for providers whose 429s are token-volume collisions rather than request-count limits (measured for MiniMax 2026-10-22). Values must be from 1,000 through 4,000,000. The budget is static; the count AIMD continues to run alongside it. |
 
 `force_reasoning_effort` is valid only for the default `openai` provider
 protocol. Configuration validation rejects unsupported values and other

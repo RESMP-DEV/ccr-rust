@@ -16,14 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Specialized SenseNova support for image understanding instead of generic code
   review. The shared worker chain no longer contains SenseNova, and the
   code-review listener remains on its existing primary. A distinct
-  non-thinking `sensenova-vision` provider is registered but deliberately
-  unrouted until a real vision consumer exists. A new
-  `forceAdaptiveThinking` provider override emits the live API's required
+  non-thinking `sensenova-vision` provider is a direct-only seat on the worker
+  listener: present in `Providers`, absent from `Router.tiers`, so generic
+  worker fallback and code review cannot spend it. The new
+  `force_adaptive_thinking` override emits the live API's required
   `thinking: {"type":"adaptive"}` marker alongside
   `reasoning_effort: none`, reducing the measured image-extraction probe from
   6.7s/446 completion tokens to 1.6s/72.
 - Raised the Rust SLOC ratchet after moving provider request overrides out of
-  the Dispatch hotspot into their own module.
+  the Dispatch hotspot into their own module, and re-pinned it around the
+  merged token-aware admission code.
 - Added a SenseNova Token Plan provider recipe using the existing OpenAI Chat
   protocol and `reasoning` field alias, with a dedicated example/config guide.
   The provider was live-qualified after the real key arrived and never placed
@@ -33,10 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Codex traffic and had no quota advantage for review work. The final policy
   keeps SenseNova out of every fallback chain and exposes only a direct-only
   non-thinking vision/extraction seat on the worker listener.
-- Reconciled the governed source policy with the live 2026-10-22 MiniMax
-  token-admission tuning by landing `maxInflightTokens: 250000` with a pinned
-  regression test, preventing a source deploy from silently removing the live
-  collision-avoidance limit.
+- Added per-provider `maxInflightTokens` admission control. MiniMax 429s were
+  measured (2026-10-22) as token-volume collisions: identical dispatch rates
+  in minutes with and without 429s, ten concurrent small requests clean, and
+  three ~150K-token prefills colliding. A route with a token budget defers a
+  request when its pre-request estimate plus the route's reserved in-flight
+  tokens would exceed the budget, cascading without an upstream attempt or an
+  AIMD cut. The governed policy sets 250,000 for shared MiniMax.
 
 - Made concurrent recovery snapshots race-safe. Each final snapshot name is now claimed with an exclusive lock before staging, so simultaneous listener activations cannot select or overwrite the same suffix.
 

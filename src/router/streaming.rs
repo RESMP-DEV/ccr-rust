@@ -1016,7 +1016,7 @@ mod tests {
     ) {
         let admission = std::sync::Arc::new(crate::admission::AdmissionTracker::new());
         let permit = admission
-            .acquire("provider,model", Some(8))
+            .acquire("provider,model", Some(8), 1, None)
             .expect("admission fixture");
         let context = crate::sse::StreamVerifyCtx {
             tier_name: "provider".to_string(),

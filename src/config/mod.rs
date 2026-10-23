@@ -226,6 +226,14 @@ fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
                 max_inflight
             );
         }
+        if let Some(max_inflight_tokens) = provider.max_inflight_tokens {
+            anyhow::ensure!(
+                (1_000..=4_000_000).contains(&max_inflight_tokens),
+                "provider '{}' maxInflightTokens must be between 1000 and 4000000, got {}",
+                provider.name,
+                max_inflight_tokens
+            );
+        }
         let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
             continue;
         };
@@ -1095,6 +1103,66 @@ mod tests {
 
         assert_eq!(p.force_reasoning_effort.as_deref(), Some("max"));
         validate_provider_contracts(&[p]).unwrap();
+    }
+
+    /// The token budget is optional and configured under its camelCase name,
+    /// matching the `maxInflight` spelling convention. A route without one
+    /// keeps the count-only admission path.
+    #[test]
+    fn provider_with_inflight_token_budget() {
+        let p = parse_provider(
+            r#"{
+                "name": "minimax",
+                "api_base_url": "https://api.minimax.example/v1",
+                "api_key": "mm-test",
+                "models": ["m3"],
+                "maxInflight": 4,
+                "maxInflightTokens": 200000
+            }"#,
+        );
+
+        assert_eq!(p.max_inflight, Some(4));
+        assert_eq!(p.max_inflight_tokens, Some(200_000));
+        validate_provider_contracts(&[p]).unwrap();
+
+        let plain = parse_provider(
+            r#"{
+                "name": "plain",
+                "api_base_url": "https://api.example.test/v1",
+                "api_key": "test",
+                "models": ["model"]
+            }"#,
+        );
+
+        assert_eq!(plain.max_inflight_tokens, None);
+        validate_provider_contracts(&[plain]).unwrap();
+    }
+
+    /// The token budget is bounded: a budget small enough to reject every
+    /// request, or large enough to disable the gate, is a configuration
+    /// error rather than a silent no-op.
+    #[test]
+    fn inflight_token_budget_must_be_within_range() {
+        for value in [999, 4_000_001] {
+            let p = parse_provider(&format!(
+                r#"{{
+                    "name": "minimax",
+                    "api_base_url": "https://api.minimax.example/v1",
+                    "api_key": "mm-test",
+                    "models": ["m3"],
+                    "maxInflightTokens": {value}
+                }}"#
+            ));
+
+            let error = validate_provider_contracts(&[p]).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("maxInflightTokens must be between 1000 and 4000000"),
+                "unexpected error for {value}: {error}"
+            );
+        }
     }
 
     #[test]
