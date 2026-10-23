@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed deterministic DeepSeek 400s on replayed tool-loop history. The DeepSeek
+  Anthropic endpoint rejects assistant turns that follow a `tool_result` turn,
+  or that contain `tool_use`, yet lack a leading thinking block ("The
+  `content[].thinking` in the thinking mode must be passed back"), which hit
+  ~56% of DeepSeek attempts during Z.AI window walls because cross-provider
+  spills replay GLM-served sessions with bare tool turns. The `deepseek`
+  transformer now injects a placeholder leading thinking block into exactly
+  those turns (validated against captured live traffic: a failing 231-message
+  request returned 200 after injection), and the governed policy wires it into
+  the shared deepseek provider.
+
 - Specialized SenseNova support for image understanding instead of generic code
   review. The shared worker chain no longer contains SenseNova, and the
   code-review listener remains on its existing primary. A distinct

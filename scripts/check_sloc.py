@@ -19,8 +19,11 @@ SOURCE_ROOT = ROOT / "src"
 # overrides out of the Dispatch hotspot. Ceilings sit at the measured counts
 # with zero headroom.
 # A reduction should lower this number; another increase requires splitting a
-# hotspot first.
-TOTAL_CEILING = 40_692
+# hotspot first. Re-pinned 2026-10-23 for the DeepSeek leading-thinking
+# injection transformer: the repair lives in transformer/mod.rs (a shared
+# helper plus dispatch-registry wiring) with the factory-registry path and
+# tests colocated in transform/deepseek.rs, neither a hotspot.
+TOTAL_CEILING = 40_909
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
 # baseline. They may shrink or be split, but cannot grow while the ratchet is

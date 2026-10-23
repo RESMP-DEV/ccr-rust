@@ -105,7 +105,10 @@ MACHINE_CONSUMER_DIRECT_ROUTES: dict[str, tuple[str, ...]] = {
     # one-tier request, while normal failures keep using the shared chain.
     "config.json": ("holo4,holo4-35b-a3b",),
     "config-auth.json": ("holo4,holo4-35b-a3b",),
-    "glm-workers.json": ("sensenova-vision,sensenova-6.8-flash-lite", "holo4,holo4-35b-a3b"),
+    "glm-workers.json": (
+        "sensenova-vision,sensenova-6.8-flash-lite",
+        "holo4,holo4-35b-a3b",
+    ),
 }
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
     "zai": {
@@ -175,6 +178,15 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "api_key": "${CCR_DEEPSEEK_API_KEY}",
         "protocol": "anthropic",
         "models": ["deepseek-flash"],
+        # 2026-10-23 user-directed fix: the DeepSeek Anthropic endpoint
+        # deterministically 400s ("The `content[].thinking` in the thinking
+        # mode must be passed back") for replayed tool-loop assistant turns
+        # that lack a leading thinking block once any thinking appears in
+        # history; cross-provider spills (GLM-served sessions) hit this on
+        # ~56% of attempts. The transformer injects a placeholder leading
+        # thinking block into those turns (validated against captured live
+        # traffic: failing 231-message body returned 200 after injection).
+        "transformer": {"use": ["deepseek"]},
     },
     # Meta Model API (Muse). The Messages endpoint is an Anthropic-compatible
     # adapter on the same base as its OpenAI surfaces, with Bearer auth on the
@@ -310,7 +322,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "5a1270fe5626784d3555beffe64e01c79ac7e171b16fb628ad6b52e068b24205"
+    "d7fa0faaa87cd5b78291eeca7ef5bdded88e4070caa121dddd68fd051ce35ca8"
 )
 
 
