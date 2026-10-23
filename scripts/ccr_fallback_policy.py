@@ -175,6 +175,10 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "api_key": "${CCR_DEEPSEEK_API_KEY}",
         "protocol": "anthropic",
         "models": ["deepseek-flash"],
+        # DeepSeek's thinking blocks are normalized for CCR's surfaces; the
+        # transformer is required or the provider returns 400s on reasoning
+        # turns. This mirrors the live policy body.
+        "transformer": {"use": ["deepseek"]},
     },
     # Meta Model API (Muse). The Messages endpoint is an Anthropic-compatible
     # adapter on the same base as its OpenAI surfaces, with Bearer auth on the
@@ -310,7 +314,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "5a1270fe5626784d3555beffe64e01c79ac7e171b16fb628ad6b52e068b24205"
+    "d7fa0faaa87cd5b78291eeca7ef5bdded88e4070caa121dddd68fd051ce35ca8"
 )
 
 
