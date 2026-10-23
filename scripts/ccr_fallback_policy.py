@@ -193,6 +193,16 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         # injection and malformed-output sanitization live in the transformer.
         # Without this the registry builds an empty chain and neither runs.
         "transformer": {"use": ["minimax"]},
+        # 2026-10-22 user-directed delegation tuning: MiniMax 429s are
+        # token-volume collisions, not request-count limits (measured
+        # 2026-10-22: identical dispatch rates in minutes with and without
+        # 429s; ten concurrent small requests served cleanly; three ~150K
+        # token prefills collided), so the count-only AIMD cannot prevent
+        # them. A 250K in-flight prefill budget admits one large worker
+        # context plus a medium one and defers the next large preflight to
+        # the chain (GLM-5.3-Flash) instead of paying an upstream 429 and
+        # the AIMD cut cascade that follows it.
+        "maxInflightTokens": 250000,
     },
 }
 # os.umask is process-global and not atomic, so a set/restore dance inside each
@@ -206,7 +216,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "fc2f0bb724d044c4708cc3f5c869d62ccfff7836047a1cd1c0128c455d73c8a1"
+    "bfe649cf9f68aef0c591cec34811e31181594f814b0d3652b68f21ee76348cfe"
 )
 
 
