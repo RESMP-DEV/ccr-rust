@@ -70,8 +70,8 @@ use crate::config::ModelAliasTarget;
 use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::record_deterministic_rejection;
 use crate::metrics::{
-    increment_active_requests, record_failure, record_hedge_launched, record_hedge_win,
-    record_hold_wait, record_pre_request_tokens, record_primary_hedge_win,
+    estimate_request_tokens, increment_active_requests, record_failure, record_hedge_launched,
+    record_hedge_win, record_hold_wait, record_pre_request_tokens, record_primary_hedge_win,
     record_request_duration_with_frontend, record_request_with_frontend, record_retry_sweep,
     sync_ewma_gauge,
 };
@@ -146,8 +146,15 @@ async fn execute_attempt<'a>(
 ) -> Option<SelectedAttempt<'a>> {
     let primary_request = request_for_tier(request, tier, client_wants_stream, config);
     let retry_config = config.get_tier_retry(tier_name);
-    let provider_limit = config.resolve_provider(tier).and_then(|p| p.max_inflight);
-    let admission_permit = state.admission_tracker.acquire(tier, provider_limit)?;
+    let provider = config.resolve_provider(tier);
+    let provider_limit = provider.and_then(|p| p.max_inflight);
+    let provider_token_limit = provider.and_then(|p| p.max_inflight_tokens);
+    let admission_permit = state.admission_tracker.acquire(
+        tier,
+        provider_limit,
+        local_estimate,
+        provider_token_limit,
+    )?;
     let timer = AttemptTimer::start(&state.ewma_tracker, tier_name);
     let primary_future = try_request(TryRequestArgs {
         config,
@@ -212,12 +219,18 @@ async fn execute_attempt<'a>(
                 });
             };
             let _hedge_retry_permit = hedge_retry_permit;
-            let hedge_provider_limit = config
-                .resolve_provider(hedge_tier)
-                .and_then(|provider| provider.max_inflight);
+            let hedge_provider = config.resolve_provider(hedge_tier);
+            let hedge_provider_limit = hedge_provider.and_then(|provider| provider.max_inflight);
+            let hedge_provider_token_limit =
+                hedge_provider.and_then(|provider| provider.max_inflight_tokens);
             let Some(hedge_admission_permit) = state
                 .admission_tracker
-                .acquire(hedge_tier, hedge_provider_limit)
+                .acquire(
+                    hedge_tier,
+                    hedge_provider_limit,
+                    local_estimate,
+                    hedge_provider_token_limit,
+                )
             else {
                 let result = primary_future.await;
                 return Some(SelectedAttempt {
@@ -600,6 +613,14 @@ pub async fn handle_messages(
         .collect();
     let tool_values: Option<Vec<serde_json::Value>> = request.tools.clone();
 
+    // Request-level token estimate for admission. The per-tier pre-request
+    // audit below runs when a tier is attempted, but the admission pass
+    // orders the tiers before any attempt, so both read the same estimate:
+    // a token budget has to be checked against the same number the attempt
+    // was admitted on.
+    let admission_token_estimate =
+        estimate_request_tokens(&msg_values, request.system.as_ref(), tool_values.as_deref());
+
     // One sweep = one full pass over the ordered tier list. With retrySweeps
     // enabled, a sweep that exhausts without success sleeps for a cooldown
     // and re-cascades instead of synthesizing a terminal 429/503, keeping
@@ -647,11 +668,15 @@ pub async fn handle_messages(
         let mut admission_ready: Vec<&(String, String)> = Vec::new();
         let mut admission_deferred: Vec<&(String, String)> = Vec::new();
         for entry @ (tier, _) in &ordered {
-            let provider_limit = config.resolve_provider(tier).and_then(|p| p.max_inflight);
-            if state
-                .admission_tracker
-                .at_capacity(tier.as_str(), provider_limit)
-            {
+            let provider = config.resolve_provider(tier);
+            let provider_limit = provider.and_then(|p| p.max_inflight);
+            let provider_token_limit = provider.and_then(|p| p.max_inflight_tokens);
+            if state.admission_tracker.at_capacity(
+                tier.as_str(),
+                provider_limit,
+                admission_token_estimate,
+                provider_token_limit,
+            ) {
                 admission_deferred.push(entry);
             } else {
                 admission_ready.push(entry);

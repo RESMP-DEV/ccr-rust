@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added per-provider `maxInflightTokens` admission control. MiniMax 429s were
+  measured (2026-10-22) as token-volume collisions — identical dispatch rates
+  in minutes with and without 429s, ten concurrent small requests clean, three
+  ~150K-token prefills colliding — so the count-only AIMD could not prevent
+  them. A route with a token budget defers a request when its pre-request
+  estimate plus the route's reserved in-flight tokens would exceed the
+  budget, sending the request to the next eligible tier without an upstream
+  attempt and without the AIMD cut cascade a 429 triggers. The estimate
+  reuses the pre-request audit accounting through a shared
+  `estimate_request_tokens` helper, the token budget is static (count AIMD
+  unchanged), and a `ccr_tier_inflight_tokens` gauge exposes the reserved
+  total. The governed policy sets 250,000 for the shared MiniMax provider.
+
 - Made concurrent recovery snapshots race-safe. Each final snapshot name is now claimed with an exclusive lock before staging, so simultaneous listener activations cannot select or overwrite the same suffix.
 
 - Fixed launchd-invoked Python helpers for the macOS system interpreter. `ccr-recovery` now uses the 3.9-compatible timezone API, `ccr-fallback-policy` imports with deferred annotations, and regression tests import both modules through `/usr/bin/python3` with the launchd PATH.
