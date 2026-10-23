@@ -126,6 +126,37 @@ fn summarize_counts_failures_usage_and_bounds_final_report() {
     assert_eq!(shown["final_report"]["truncated"], true);
 }
 
+#[test]
+fn summarize_surfaces_recovery_artifacts_without_trusting_them() {
+    let directory = TempDir::new().unwrap();
+    let run = directory.path().join("recoverable");
+    write(
+        &run.join("status.json"),
+        &json!({
+            "outcome": "failed",
+            "cwd": "/tmp/project",
+            "brief_path": "/private/run/brief.txt",
+            "salvage": {
+                "partial_report_bytes": 42,
+                "changed_path_count": 2,
+                "resume_command": "ccr-worker --resume safe-to-display"
+            }
+        })
+        .to_string(),
+    );
+
+    let shown = summarize(&run, 240).unwrap();
+    assert_eq!(shown["cwd"], "/tmp/project");
+    assert_eq!(shown["brief_path"], "/private/run/brief.txt");
+    assert_eq!(shown["salvage"]["partial_report_bytes"], 42);
+    assert_eq!(shown["salvage"]["changed_path_count"], 2);
+    assert_eq!(
+        shown["salvage"]["resume_command"],
+        "ccr-worker --resume safe-to-display"
+    );
+    assert_eq!(shown["task_verified"], false);
+}
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_missing_run_paths_are_safe_for_summary_events_and_listing() {

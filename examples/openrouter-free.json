@@ -1,0 +1,54 @@
+{
+  "_readme": [
+    "OpenRouter current free-inference example, catalog-checked 2026-10-19.",
+    "Export OPENROUTER_API_KEY before validate/start.",
+    "The free tier is account-wide and can exhaust independently of these model IDs.",
+    "Some free endpoints gate non-agent User-Agent values; keep the header aligned with the coding agent you actually use."
+  ],
+  "HOST": "127.0.0.1",
+  "PORT": 3456,
+  "Providers": [
+    {
+      "name": "openrouter",
+      "api_base_url": "https://openrouter.ai/api/v1",
+      "api_key": "${OPENROUTER_API_KEY}",
+      "pricing": {
+        "input_per_million_tokens": 0.0,
+        "output_per_million_tokens": 0.0
+      },
+      "extra_headers": {
+        "User-Agent": "claude-cli/2.1.30 (external, cli)"
+      },
+      "models": [
+        "openrouter/free",
+        "minimax/minimax-m3.1-flash:free",
+        "xingchen-agi/xing4.0-29b-a4b:free",
+        "nvidia/nemotron-3.5-super-vl:free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "cohere/north-mini-code:free",
+        "poolside/laguna-xs-2.1:free",
+        "thinkingmachines/inkling-small:free"
+      ],
+      "transformer": {
+        "use": ["anthropic", "openrouter"]
+      }
+    }
+  ],
+  "Router": {
+    "default": "openrouter,openrouter/free",
+    "tiers": [
+      "openrouter,openrouter/free",
+      "openrouter,minimax/minimax-m3.1-flash:free",
+      "openrouter,nvidia/nemotron-3.5-super-vl:free",
+      "openrouter,cohere/north-mini-code:free",
+      "openrouter,poolside/laguna-xs-2.1:free",
+      "openrouter,xingchen-agi/xing4.0-29b-a4b:free",
+      "openrouter,nvidia/nemotron-3.5-lightning:free",
+      "openrouter,thinkingmachines/inkling-small:free"
+    ],
+    "strictTierOrder": true
+  },
+  "Persistence": {
+    "mode": "none"
+  }
+}

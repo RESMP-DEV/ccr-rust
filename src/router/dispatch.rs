@@ -22,9 +22,7 @@ use crate::metrics::{
 };
 use crate::ratelimit::RateLimitTracker;
 use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
-use crate::transform::minimax::{
-    is_m3_model, is_minimax_provider_name, MINIMAX_M3_1_FLASH_PREVIEW,
-};
+use crate::transform::minimax::{is_m3_model, is_minimax_provider_name, MINIMAX_M3_1_FLASH};
 use crate::transform::openai_to_anthropic::OpenAiToAnthropicTransformer;
 use crate::transformer::{Transformer, TransformerChain, TransformerRegistry};
 use futures::StreamExt;
@@ -285,19 +283,19 @@ pub(super) fn extract_rate_limit_headers(
         .get("x-ratelimit-reset")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok())
-        .map(|ts| {
-            std::time::Instant::now()
-                + std::time::Duration::from_secs(
-                    ts.saturating_sub(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    ),
-                )
-        });
+        .and_then(reset_at_from_unix_timestamp);
 
     (remaining, reset_at)
+}
+
+fn reset_at_from_unix_timestamp(timestamp: u64) -> Option<std::time::Instant> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    std::time::Instant::now().checked_add(std::time::Duration::from_secs(
+        timestamp.saturating_sub(now),
+    ))
 }
 
 pub(super) struct TryRequestArgs<'a> {
@@ -318,16 +316,18 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) render_refusal_as_anthropic_text: bool,
 }
 
-/// Pin every MiniMax M3-family request to the exact preview model ID.
+/// Pin every MiniMax M3-family request to the official M3.1 Flash ID.
 ///
-/// The shorter `MiniMax-M3.1-Flash` alias is accepted upstream but serves
-/// `MiniMax-M3`, so the alias cannot be forwarded as-is.
-fn canonical_model_name<'a>(
+/// MiniMax originally returned the older M3 model for the shorter M3.1 alias.
+/// On 2026-10-19 its catalog lists `MiniMax-M3.1-Flash` and both M3.1 IDs
+/// self-report distinctly. Canonicalize legacy M3 aliases and preview pins to
+/// the official non-preview deployment so existing routes follow the launch.
+pub(crate) fn canonical_model_name<'a>(
     provider: &crate::config::Provider,
     model_name: &'a str,
 ) -> Cow<'a, str> {
     if is_minimax_provider_name(&provider.name, &provider.api_base_url) && is_m3_model(model_name) {
-        Cow::Borrowed(MINIMAX_M3_1_FLASH_PREVIEW)
+        Cow::Borrowed(MINIMAX_M3_1_FLASH)
     } else {
         Cow::Borrowed(model_name)
     }
@@ -354,8 +354,8 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
     })?;
 
     // Extract the actual model name from the tier (format: "provider,model"),
-    // then pin the historical MiniMax M3 family to the qualified M3.1 preview
-    // ID. The shorter aliases have served different MiniMax generations.
+    // then pin the historical MiniMax M3 family to the official M3.1 Flash
+    // ID. MiniMax aliases have served different generations.
     let requested_model_name = tier.split(',').nth(1).unwrap_or(tier);
     let model_name = canonical_model_name(provider, requested_model_name);
 
@@ -472,12 +472,16 @@ pub(super) struct TryRequestProtocolArgs<'a> {
     pub(super) render_refusal_as_anthropic_text: bool,
 }
 
-pub(super) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(crate) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 
-pub(super) fn provider_endpoint_url(provider: &crate::config::Provider, endpoint: &str) -> String {
+mod provider_overrides;
+use provider_overrides::apply_provider_request_overrides;
+
+pub(crate) fn provider_endpoint_url(provider: &crate::config::Provider, endpoint: &str) -> String {
     let base = provider.api_base_url.trim_end_matches('/');
     let endpoint = endpoint.trim_start_matches('/');
-    if base.ends_with(endpoint) {
+    let endpoint_path = format!("/{endpoint}");
+    if base == endpoint || base.ends_with(&endpoint_path) {
         base.to_string()
     } else {
         format!("{}/{}", base, endpoint)
@@ -488,39 +492,7 @@ pub(super) fn provider_openai_chat_completions_url(provider: &crate::config::Pro
     provider_endpoint_url(provider, "chat/completions")
 }
 
-/// Apply validated provider-level request requirements immediately before dispatch.
-fn apply_provider_request_overrides(
-    provider: &crate::config::Provider,
-    request: &mut serde_json::Value,
-) -> Result<(), TryRequestError> {
-    let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
-        return Ok(());
-    };
-    if provider.protocol != ProviderProtocol::Openai {
-        return Err(TryRequestError::Other(anyhow::anyhow!(
-            "provider '{}' force_reasoning_effort requires protocol 'openai'",
-            provider.name
-        )));
-    }
-    let object = request.as_object_mut().ok_or_else(|| {
-        TryRequestError::Other(anyhow::anyhow!(
-            "provider '{}' request override requires a JSON object",
-            provider.name
-        ))
-    })?;
-    object.insert(
-        "reasoning_effort".to_string(),
-        serde_json::Value::String(reasoning_effort.to_string()),
-    );
-    trace!(
-        provider = %provider.name,
-        reasoning_effort,
-        "forced provider reasoning effort"
-    );
-    Ok(())
-}
-
-pub(super) fn provider_anthropic_messages_url(provider: &crate::config::Provider) -> String {
+pub(crate) fn provider_anthropic_messages_url(provider: &crate::config::Provider) -> String {
     provider_endpoint_url(provider, "messages")
 }
 
@@ -537,7 +509,7 @@ pub(super) fn insert_ccr_tier_header(response: &mut Response, tier_name: &str) {
     );
 }
 
-pub(super) fn build_openai_headers(
+pub(crate) fn build_openai_headers(
     provider: &crate::config::Provider,
 ) -> Result<reqwest::header::HeaderMap, TryRequestError> {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -596,7 +568,7 @@ pub(super) fn build_openai_headers(
     Ok(headers)
 }
 
-pub(super) fn build_anthropic_headers(
+pub(crate) fn build_anthropic_headers(
     provider: &crate::config::Provider,
 ) -> Result<reqwest::header::HeaderMap, TryRequestError> {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -808,6 +780,19 @@ pub(super) async fn try_request_via_openai_protocol(
             serde_json::to_value(&openai_request).map_err(|e| TryRequestError::Other(e.into()))?;
         (value, stream)
     };
+    if let Some(messages) = openai_request_value
+        .get_mut("messages")
+        .and_then(|messages| messages.as_array_mut())
+    {
+        for message in messages {
+            if let Some(message_obj) = message.as_object_mut() {
+                // `reasoning_blocks` is an internal round-trip carrier. OpenAI
+                // and Responses providers receive their native reasoning items
+                // or fields, not CCR's Anthropic-signature compatibility shape.
+                message_obj.remove("reasoning_blocks");
+            }
+        }
+    }
     if provider.protocol != ProviderProtocol::Responses {
         if let Some(object) = openai_request_value.as_object_mut() {
             object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
@@ -1553,6 +1538,8 @@ mod tests {
     use super::*;
     use crate::config::Provider;
 
+    mod endpoint_tests;
+
     fn anthropic_provider(auth_header: Option<&str>) -> Provider {
         let mut value = serde_json::json!({
             "name": "test-anthropic",
@@ -1636,20 +1623,24 @@ mod tests {
 
         assert_eq!(
             canonical_model_name(&minimax, "MiniMax-M3"),
-            "MiniMax-M3.1-Flash-Preview"
+            "MiniMax-M3.1-Flash"
         );
         assert_eq!(
             canonical_model_name(&minimax, "minimax-m3.1-flash"),
-            "MiniMax-M3.1-Flash-Preview"
+            "MiniMax-M3.1-Flash"
         );
         assert_eq!(canonical_model_name(&other, "MiniMax-M3"), "MiniMax-M3");
         assert_eq!(
             canonical_model_name(&aliased, "MiniMax-M3.1-Flash"),
-            "MiniMax-M3.1-Flash-Preview"
+            "MiniMax-M3.1-Flash"
         );
         assert_eq!(
             canonical_model_name(&by_url, "MiniMax-M3"),
-            "MiniMax-M3.1-Flash-Preview"
+            "MiniMax-M3.1-Flash"
+        );
+        assert_eq!(
+            canonical_model_name(&minimax, "MiniMax-M3.1-Flash-Preview"),
+            "MiniMax-M3.1-Flash"
         );
         assert_eq!(
             canonical_model_name(&minimax, "MiniMax-M2.7"),
@@ -1688,9 +1679,9 @@ mod tests {
             "name": "minimax",
             "api_base_url": "https://api.minimax.example/anthropic/v1",
             "api_key": "test",
-            "models": ["MiniMax-M3.1-Flash-Preview"],
+            "models": ["MiniMax-M3.1-Flash"],
             "model_pricing": {
-                "MiniMax-M3.1-Flash-Preview": {
+                "MiniMax-M3.1-Flash": {
                     "input_per_million_tokens": 1.0,
                     "output_per_million_tokens": 2.0
                 }
@@ -1714,7 +1705,7 @@ mod tests {
             "api_key": "test",
             "models": ["MiniMax-M3"],
             "model_pricing": {
-                "MiniMax-M3.1-Flash-Preview": {
+                "MiniMax-M3.1-Flash": {
                     "input_per_million_tokens": 3.0,
                     "output_per_million_tokens": 6.0
                 }
@@ -1815,6 +1806,11 @@ mod tests {
             422,
             r#"{"error":"This model has a maximum context length of 100 tokens"}"#,
         );
+    }
+
+    #[test]
+    fn hostile_reset_timestamp_does_not_panic_dispatch() {
+        assert_eq!(reset_at_from_unix_timestamp(u64::MAX), None);
     }
 
     #[test]

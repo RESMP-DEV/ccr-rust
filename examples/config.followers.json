@@ -20,7 +20,10 @@
       "api_key": "${ZAI_API_KEY}",
       "protocol": "anthropic",
       "auth_header": "authorization",
-      "models": ["glm-5.3", "glm-5.3-flash"],
+      "models": [
+        "glm-5.3",
+        "glm-5.3-flash"
+      ],
       "honor_ratelimit_headers": false
     },
     {
@@ -29,22 +32,32 @@
       "api_base_url": "https://api.minimax.io/anthropic/v1",
       "api_key": "${MINIMAX_API_KEY}",
       "protocol": "anthropic",
-      "models": ["MiniMax-M3"]
+      "models": [
+        "MiniMax-M3.1-Flash"
+      ],
+      "auth_header": "authorization",
+      "transformer": {
+        "use": [
+          "minimax"
+        ]
+      }
     },
     {
       "name": "nvidia",
-      "_doc": "NVIDIA NIM free trial tier, opt-in overflow: 40 RPM, no card, and build.nvidia.com terms cover prototyping/evaluation, not production — remove this tier before routing real workloads if that matters to you. A single sub-agent burst can exhaust 40 RPM. Verification status: config-load validated only (loader, provider contract, and tier checks, 2026-09-30); no live probe of the endpoint, model id, or rate-limit headers is recorded — see docs/zai_minimax_setup.md for the repo's bar for calling a route tested.",
+      "_doc": "NVIDIA NIM free trial tier, opt-in overflow: 40 RPM, no card, and build.nvidia.com terms cover prototyping/evaluation, not production \u2014 remove this tier before routing real workloads if that matters to you. A single sub-agent burst can exhaust 40 RPM. Verification status: config-load validated only (loader, provider contract, and tier checks, 2026-09-30); no live probe of the endpoint, model id, or rate-limit headers is recorded \u2014 see docs/zai_minimax_setup.md for the repo's bar for calling a route tested.",
       "api_base_url": "https://integrate.api.nvidia.com/v1",
       "api_key": "${NVIDIA_API_KEY}",
       "protocol": "openai",
-      "models": ["deepseek-ai/deepseek-v4.1-flash"]
+      "models": [
+        "deepseek-ai/deepseek-v4.1-flash"
+      ]
     }
   ],
   "Router": {
     "default": "zai,glm-5.3",
     "tiers": [
       "zai,glm-5.3",
-      "minimax,MiniMax-M3",
+      "minimax,MiniMax-M3.1-Flash",
       "nvidia,deepseek-ai/deepseek-v4.1-flash"
     ],
     "retrySweeps": {
@@ -56,9 +69,18 @@
     }
   },
   "Presets": {
-    "flash": { "_doc": "Direct pin to zai,glm-5.3-flash for bulk/cheap labor. A preset route selects this provider and model directly — it bypasses the tier cascade, so there is no failover; use it when cheap-and-direct beats resilient.", "route": "zai,glm-5.3-flash" },
-    "m3": { "route": "minimax,MiniMax-M3" }
+    "flash": {
+      "_doc": "Direct pin to zai,glm-5.3-flash for bulk/cheap labor. A preset route selects this provider and model directly \u2014 it bypasses the tier cascade, so there is no failover; use it when cheap-and-direct beats resilient.",
+      "route": "zai,glm-5.3-flash"
+    },
+    "m3": {
+      "route": "minimax,MiniMax-M3.1-Flash"
+    }
   },
-  "Persistence": { "mode": "none" },
-  "DebugCapture": { "enabled": false }
+  "Persistence": {
+    "mode": "none"
+  },
+  "DebugCapture": {
+    "enabled": false
+  }
 }

@@ -22,6 +22,9 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 ## Client Integrations
 
 - [Z.AI Setup](zai_minimax_setup.md) — coding-plan endpoints, GLM-5.3, and protocol choices
+- [SenseNova Token Plan](sensenova-token-plan.md) — OpenAI-compatible endpoint, reasoning-field handling, and key-safe verification
+- [Qwen Token Plan](qwen-token-plan.md) — credit-plan endpoint, exact model routes, off-peak timezone table, and lane selection
+- [OpenRouter](openrouter.md) — current free-inference routes, account-wide limits, agent-header caveats, and tool verification
 - [MiniMax Setup and Operations](minimax.md) — exact M3.1 model ID, mandatory transformer, custom provider names, validation, and fallback-policy runbook
 - [Claude Code](claude_code_setup.md) — opt-in routing, provider credentials, and tool verification
 - [Codex](codex_setup.md) — Codex CLI routing
@@ -37,6 +40,7 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 - [Authentication suites](auth-suites.md) — separate API plans and native Claude/ChatGPT logins
 - [Switching plans](switching-plans.md) — Kimi/GLM selection, profiles, presets, and fallback
 - [Observability](observability.md) — Prometheus metrics, TUI dashboard, token/latency tracking
+- [Configuration recovery](config-recovery.md) — snapshots, verified restore, drift checks, and secret-free replication
 - [Quality matrix](quality-matrix.md) — offline quality checks, coverage/mutation modes, and receipts
 - [Idle restarts](idle-restart.md) — listener drain gate for preserving live LLM turns
 - [Dependency security](dependency-security.md) — resolved advisories and temporary transitive-risk decisions

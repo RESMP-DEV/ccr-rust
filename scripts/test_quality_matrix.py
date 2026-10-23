@@ -30,12 +30,39 @@ class QualityMatrixTests(unittest.TestCase):
             names,
             [
                 "format",
+                "python-format",
+                "python-lint",
+                "python-typecheck",
+                "rust-sloc-ratchet",
+                "shellcheck",
                 "clippy",
                 "rust-tests",
                 "no-default-features",
+                "debug-binary",
                 "python-helpers",
                 "vendored-gp-routing",
             ],
+        )
+
+    def test_python_runtime_uses_the_checkout_debug_binary(self) -> None:
+        checks = quality.selected_checks(fast=False, coverage=False, mutation=False)
+        by_name = {check.name: check for check in checks}
+        self.assertIn("debug-binary", by_name)
+        self.assertIn("python-helpers", by_name)
+        helpers_env = dict(by_name["python-helpers"].env)
+        self.assertEqual(
+            helpers_env.get("CCR_TEST_BINARY"),
+            str(quality.ROOT / "target" / "debug" / "ccr-rust"),
+        )
+        # The helper must use the same target directory the debug build
+        # writes to, or a caller-provided CARGO_TARGET_DIR would leave the
+        # tests pointing at a stale or missing binary.
+        self.assertEqual(
+            helpers_env.get("CARGO_TARGET_DIR"), str(quality.ROOT / "target")
+        )
+        self.assertEqual(
+            dict(by_name["debug-binary"].env).get("CARGO_TARGET_DIR"),
+            str(quality.ROOT / "target"),
         )
 
     def test_optional_modes_replace_or_add_expensive_checks(self) -> None:

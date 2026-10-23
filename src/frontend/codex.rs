@@ -69,15 +69,19 @@ fn convert_assistant_content_with_tool_calls(
                     "text": text
                 }));
             }
+            Value::String(_) => {}
             Value::Array(items) => {
                 for item in items {
                     if let Some(part_type) = item.get("type").and_then(|v| v.as_str()) {
                         match part_type {
                             "text" => {
-                                blocks.push(serde_json::json!({
-                                    "type": "text",
-                                    "text": item.get("text").and_then(|v| v.as_str()).unwrap_or("")
-                                }));
+                                let text = item.get("text").and_then(|v| v.as_str());
+                                if text.is_some_and(|text| !text.is_empty()) {
+                                    blocks.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": text.unwrap_or_default()
+                                    }));
+                                }
                             }
                             _ => blocks.push(item.clone()),
                         }
@@ -108,6 +112,52 @@ fn convert_assistant_content_with_tool_calls(
     }
 
     Value::Array(blocks)
+}
+
+fn reasoning_blocks_from_message(message: &Value) -> Vec<Value> {
+    if let Some(blocks) = message.get("reasoning_blocks").and_then(Value::as_array) {
+        return blocks
+            .iter()
+            .filter_map(|block| {
+                let thinking = block.get("thinking")?.as_str()?;
+                if thinking.is_empty() {
+                    return None;
+                }
+                let mut value = serde_json::json!({
+                    "type": "thinking",
+                    "thinking": thinking
+                });
+                if let Some(signature) = block
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .filter(|signature| !signature.is_empty())
+                {
+                    value["signature"] = Value::String(signature.to_string());
+                }
+                Some(value)
+            })
+            .collect();
+    }
+
+    let Some(reasoning) = message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .filter(|reasoning| !reasoning.is_empty())
+    else {
+        return Vec::new();
+    };
+    let mut block = serde_json::json!({
+        "type": "thinking",
+        "thinking": reasoning
+    });
+    if let Some(signature) = message
+        .get("reasoning_signature")
+        .and_then(Value::as_str)
+        .filter(|signature| !signature.is_empty())
+    {
+        block["signature"] = Value::String(signature.to_string());
+    }
+    vec![block]
 }
 
 impl Frontend for CodexFrontend {
@@ -186,37 +236,32 @@ impl Frontend for CodexFrontend {
                     msg.get("content").cloned().unwrap_or(Value::Null)
                 };
 
-                // Handle reasoning_content if present (for multi-turn conversations)
-                if let Some(reasoning) = msg.get("reasoning_content").and_then(|v| v.as_str()) {
-                    if !reasoning.is_empty() {
-                        let thinking_block = serde_json::json!({
-                            "type": "thinking",
-                            "thinking": reasoning
-                        });
-
-                        match content {
-                            Value::Array(mut blocks) => {
-                                blocks.insert(0, thinking_block);
-                                content = Value::Array(blocks);
+                // Preserve signed/provider reasoning on assistant history. The
+                // common `reasoning_content` shape is unsigned; `reasoning_blocks`
+                // carries the ordered opaque signatures used for replay.
+                let reasoning_blocks = reasoning_blocks_from_message(msg);
+                if !reasoning_blocks.is_empty() {
+                    match content {
+                        Value::Array(blocks) => {
+                            let mut ordered = reasoning_blocks;
+                            ordered.extend(blocks);
+                            content = Value::Array(ordered);
+                        }
+                        Value::String(text) => {
+                            let mut blocks = reasoning_blocks;
+                            if !text.is_empty() {
+                                blocks.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                }));
                             }
-                            Value::String(text) => {
-                                let mut blocks = Vec::new();
-                                blocks.push(thinking_block);
-                                if !text.is_empty() {
-                                    blocks.push(serde_json::json!({
-                                        "type": "text",
-                                        "text": text
-                                    }));
-                                }
-                                content = Value::Array(blocks);
-                            }
-                            Value::Null => {
-                                content = Value::Array(vec![thinking_block]);
-                            }
-                            _ => {
-                                // For other types, convert to array and prepend
-                                content = Value::Array(vec![thinking_block, content]);
-                            }
+                            content = Value::Array(blocks);
+                        }
+                        Value::Null => content = Value::Array(reasoning_blocks),
+                        other => {
+                            let mut blocks = reasoning_blocks;
+                            blocks.push(other);
+                            content = Value::Array(blocks);
                         }
                     }
                 }
@@ -337,6 +382,7 @@ impl Frontend for CodexFrontend {
         debug!(response_id = %response.id, content_blocks = response.content.len(), "serializing Codex response");
         let mut content = String::new();
         let mut reasoning_content = String::new();
+        let mut reasoning_blocks: Vec<Value> = Vec::new();
         let mut tool_calls: Vec<Value> = Vec::new();
 
         for block in &response.content {
@@ -375,12 +421,22 @@ impl Frontend for CodexFrontend {
                     }
                     content.push_str(&marker);
                 }
-                ContentBlock::Thinking { thinking, .. } => {
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
                     // Accumulate thinking content separately for the reasoning_content field
                     if !reasoning_content.is_empty() {
                         reasoning_content.push('\n');
                     }
                     reasoning_content.push_str(thinking);
+                    let mut reasoning_block = serde_json::json!({"thinking": thinking});
+                    if let Some(signature) =
+                        signature.as_ref().filter(|signature| !signature.is_empty())
+                    {
+                        reasoning_block["signature"] = Value::String(signature.clone());
+                    }
+                    reasoning_blocks.push(reasoning_block);
                 }
             }
         }
@@ -405,6 +461,9 @@ impl Frontend for CodexFrontend {
 
         if !reasoning_content.is_empty() {
             message["reasoning_content"] = Value::String(reasoning_content);
+        }
+        if !reasoning_blocks.is_empty() {
+            message["reasoning_blocks"] = Value::Array(reasoning_blocks);
         }
 
         // Also check for reasoning_content in extra_data (from non-Anthropic providers)
@@ -776,6 +835,42 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_request_preserves_signed_reasoning_blocks_before_tool_use() {
+        let frontend = create_frontend();
+        let body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_blocks": [
+                        {"thinking": "Select the tool.", "signature": "sig-1"}
+                    ],
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expression\":\"2+2\"}"
+                        }
+                    }]
+                }
+            ]
+        });
+
+        let request = frontend.parse_request(body).unwrap();
+        let blocks = request.messages[0]
+            .content
+            .as_array()
+            .expect("assistant content should be block array");
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "Select the tool.");
+        assert_eq!(blocks[0]["signature"], "sig-1");
+        assert_eq!(blocks[1]["type"], "tool_use");
+        assert_eq!(blocks[1]["id"], "call_abc");
+    }
+
+    #[test]
     fn test_parse_request_infers_tool_call_id_when_unambiguous() {
         let frontend = create_frontend();
         let body = json!({
@@ -958,6 +1053,41 @@ mod tests {
             json["choices"][0]["message"]["reasoning_content"],
             "Let me think...\nNeed one more step."
         );
+    }
+
+    #[test]
+    fn test_serialize_response_preserves_signed_reasoning_blocks() {
+        let frontend = create_frontend();
+        let response = InternalResponse {
+            id: "chatcmpl-signed".to_string(),
+            response_type: "message".to_string(),
+            role: "assistant".to_string(),
+            model: "MiniMax-M3.1-Flash".to_string(),
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "Select the tool.".to_string(),
+                    signature: Some("sig-1".to_string()),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_abc".to_string(),
+                    name: "calculator".to_string(),
+                    input: json!({"expression": "2+2"}),
+                },
+            ],
+            stop_reason: Some("tool_use".to_string()),
+            usage: None,
+            extra_data: None,
+        };
+
+        let bytes = frontend.serialize_response(response).unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        let message = &json["choices"][0]["message"];
+        assert_eq!(
+            message["reasoning_blocks"][0]["thinking"],
+            "Select the tool."
+        );
+        assert_eq!(message["reasoning_blocks"][0]["signature"], "sig-1");
+        assert_eq!(message["tool_calls"][0]["id"], "call_abc");
     }
 
     #[test]

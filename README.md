@@ -22,6 +22,7 @@ A router does not create capacity. It maximizes the availability of whatever cap
 - **Automatic failover** — providers are arranged in tiers; 5xx errors and timeouts cascade to the next tier automatically. Rate limits (429) are tracked and reported transparently.
 - **Multi-protocol** — one local endpoint speaks both the Anthropic API (`/v1/messages`) and the OpenAI API (`/v1/chat/completions`, `/v1/responses`), with request/response translation handled for you.
 - **Cost- and class-aware routing** — send different traffic classes (default / think / background / web search) to different models, optionally with GP-backed request-aware reranking.
+- **Off-peak lane playbooks** — pin credit-plan routes such as the Qwen Token Plan with timezone-safe day/night guidance instead of guessing which provider is cheapest.
 - **Observability** — Prometheus metrics, a live terminal dashboard, and token/latency/cost tracking per provider tier.
 - **MCP aggregation** — optional Model Context Protocol server and shared daemon for tool proxying.
 - **Compression** — response and tool-output compression transformers for long-running agent sessions.
@@ -89,17 +90,25 @@ Prebuilt release binaries are not published yet — build from source or use Doc
 Already set up locally? See [Local operation and agent use](docs/local-operation.md)
 for `claude-ccr`, `codex-ccr`, service control, and verification. To keep personal
 and corporate plans separate, follow [Authentication suites](docs/auth-suites.md).
+Claude Code routing through CCR is opt-in per machine: on the maintainer's Mac
+Claude Code uses a native Anthropic subscription login and `claude-ccr` is
+retired.
 The complete [documentation index](docs/index.md) covers setup and operations.
 
 Use [Switching coding plans](docs/switching-plans.md) to choose Kimi or Z.AI GLM
 per session, save Codex profiles, or configure deliberate fallback. A tested
 two-provider starting point is [examples/coding-plans.json](examples/coding-plans.json).
+To add the Qwen Token Plan as a credit lane, see
+[Qwen Token Plan integration](docs/qwen-token-plan.md).
 
 The recommended multi-provider starting point is
 [examples/config.followers.json](examples/config.followers.json): a GLM coding
 plan as the primary tier, MiniMax Token Plan as the second tier, the free NVIDIA
 NIM trial tier for overflow, and retry sweeps enabled with a bounded hold. See
 [Why route at all](#why-route-at-all) for the reasoning behind this shape.
+For an OpenRouter-only free-tier setup, see
+[examples/openrouter-free.json](examples/openrouter-free.json) and
+[OpenRouter setup](docs/openrouter.md).
 
 The minimal single-provider config gets a router running locally in about two minutes;
 the follower template needs three API keys and a validate run covering all three tiers.

@@ -50,15 +50,20 @@ pub(super) fn transform_message_content_to_anthropic(
     generated_tool_ids: &mut Vec<String>,
 ) -> Result<()> {
     let tool_calls = message_obj.remove("tool_calls");
+    let reasoning_blocks = message_obj.remove("reasoning_blocks");
 
     if let Some(content) = message_obj.get_mut("content") {
         match content {
             Value::String(text) => {
                 // Convert string to single text block
-                *content = serde_json::json!([{
-                    "type": "text",
-                    "text": text
-                }]);
+                if text.is_empty() {
+                    *content = Value::Array(Vec::new());
+                } else {
+                    *content = serde_json::json!([{
+                        "type": "text",
+                        "text": text
+                    }]);
+                }
             }
             Value::Null => {
                 *content = Value::Array(Vec::new());
@@ -139,6 +144,60 @@ pub(super) fn transform_message_content_to_anthropic(
                     "type": "text",
                     "text": content.to_string()
                 }]);
+            }
+        }
+    }
+
+    if let Some(blocks) = reasoning_blocks {
+        let thinking_blocks = blocks
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|block| {
+                let thinking = block.get("thinking")?.as_str()?.to_string();
+                if thinking.is_empty() {
+                    return None;
+                }
+                let mut value = serde_json::json!({
+                    "type": "thinking",
+                    "thinking": thinking
+                });
+                if let Some(signature) = block
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .filter(|signature| !signature.is_empty())
+                {
+                    value["signature"] = Value::String(signature.to_string());
+                }
+                Some(value)
+            })
+            .collect::<Vec<_>>();
+        if !thinking_blocks.is_empty() {
+            if !message_obj.contains_key("content") {
+                message_obj.insert("content".to_string(), Value::Array(Vec::new()));
+            }
+            let content = message_obj
+                .get_mut("content")
+                .expect("content should exist after insertion");
+            if content.is_null() {
+                *content = Value::Array(Vec::new());
+            } else if let Value::String(text) = content {
+                *content = serde_json::json!([{
+                    "type": "text",
+                    "text": text.clone()
+                }]);
+            } else if !content.is_array() {
+                let rendered = content.to_string();
+                *content = serde_json::json!([{
+                    "type": "text",
+                    "text": rendered
+                }]);
+            }
+            if let Some(content_array) = content.as_array_mut() {
+                for (index, block) in thinking_blocks.into_iter().enumerate() {
+                    content_array.insert(index, block);
+                }
             }
         }
     }
@@ -768,6 +827,36 @@ fn generated_tool_id(name: &str, arguments: &str, ordinal: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_reasoning_blocks_replay_before_tool_use() {
+        let mut message = serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "reasoning_blocks": [
+                {"thinking": "Select the tool.", "signature": "sig-1"}
+            ],
+            "tool_calls": [{
+                "id": "call_1",
+                "function": {"name": "get_weather", "arguments": "{}"}
+            }]
+        });
+        let message_obj = message
+            .as_object_mut()
+            .expect("message should be an object");
+        let mut ordinal = 0;
+        let mut generated_ids = Vec::new();
+        transform_message_content_to_anthropic(message_obj, &mut ordinal, &mut generated_ids)
+            .unwrap();
+
+        let blocks = message_obj["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "Select the tool.");
+        assert_eq!(blocks[0]["signature"], "sig-1");
+        assert_eq!(blocks[1]["type"], "tool_use");
+        assert_eq!(blocks[1]["id"], "call_1");
+        assert!(!message_obj.contains_key("reasoning_blocks"));
+    }
 
     #[test]
     fn assistant_tool_use_ids_deduplicates_repeated_ids() {

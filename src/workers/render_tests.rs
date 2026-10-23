@@ -103,6 +103,37 @@ fn human_metadata_cannot_inject_lines_or_terminal_controls() {
 }
 
 #[test]
+fn salvage_resume_command_cannot_inject_lines_or_terminal_controls() {
+    let value = json!({
+        "run_id": "run",
+        "outcome": "timed_out",
+        "needs_attention": true,
+        "commands_completed": 1,
+        "failed_commands": 0,
+        "failed_items": 0,
+        "file_changes": 0,
+        "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1, "reasoning_output_tokens": 0, "reported_turns": 1},
+        "active_items": [],
+        "failures": [],
+        "recent": [],
+        "warnings": [],
+        "final_report": null,
+        "salvage": {
+            "partial_report_bytes": 12,
+            "changed_path_count": 1,
+            "resume_command": "ccr-worker --resume x\nFORGED_RESUME\u{1b}"
+        },
+        "trace": {"file_bytes": 18, "next_cursor": 18},
+        "stderr_bytes": 0
+    });
+    let output = rendered(&value);
+    assert!(output.contains("Salvage: partial=12 bytes; changed_paths=1; resume="));
+    assert!(output.contains("ccr-worker --resume x FORGED_RESUME"));
+    assert!(!output.contains("\nFORGED_RESUME"));
+    assert!(!output.contains('\u{1b}'));
+}
+
+#[test]
 fn missing_human_fields_render_as_unknown_or_zero() {
     let value = json!({
         "run_id": "minimal",
