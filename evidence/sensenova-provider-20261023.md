@@ -314,7 +314,7 @@ list.
   not stop reasoning.
 - The effective non-thinking pair is `thinking: {"type":"adaptive"}` plus
   `reasoning_effort: "none"`. Under that pair the same 140-word task produced
-  164-200 output tokens and a clean `stop` in 4.1-4.9 s across three runs,
+  166-194 output tokens and a clean `stop` in 4.6-5.6 s across three runs,
   with zero reasoning tokens.
 - Image extraction through CCR from a 512x512 generated infographic was
   correct (`SENSENOVA QUOTA`, the three bar labels, and the caption) in

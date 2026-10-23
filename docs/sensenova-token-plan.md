@@ -119,6 +119,22 @@ Keep output caps generous: the preview model thinks by default and consumed an
 entire 128-token cap before emitting text. A 512-token cap completed the short
 marker probe, while 1024 tokens provided comfortable headroom.
 
+## Benchmark landscape
+
+No broad independent benchmark or third-party review was found for the hosted
+6.8 Flash Lite or U1.5 Lite as of 2026-10-23. SenseTime publishes image-only
+vendor comparison charts; its model repository still lists complete evaluation
+results as planned. Independent evaluations exist for adjacent SenseNova
+models, including SenseNova-MARS-32B on VistaHop and SI-1.2/SI-1.3 spatial
+fine-tunes, but those are different model families.
+
+Local evidence is also not directly comparable: GLM-5.3-family measurements are
+reasoning-heavy generation-span rates, MiniMax and DeepSeek lack matched
+throughput runs, local27 has prefill/cache measurements but no task-quality
+comparison, and no local model has been tested on the same image extraction.
+The operational decision therefore rests on the matched SenseNova measurements
+in this guide, not on a fleet-wide benchmark ranking.
+
 ## Current status and non-claims
 
 The 2026-10-23 qualification completed after the real key was loaded: the
@@ -130,7 +146,7 @@ the exact usage rather than estimating it.
 
 The measured fit is tool-less extraction, summarization, and image
 understanding, not code review or long-horizon worker fallback. Non-thinking
-text produced 164-200 output tokens in 4.1-4.9 s; image extraction produced 72
+text produced 166-194 output tokens in 4.6-5.6 s; image extraction produced 72
 output tokens in 1.6-1.9 s. Tool-bearing Codex worker traffic is structurally a
 bad fit: the upstream accepts only `function` and `custom` tools, while Codex
 sends built-in tool types, producing deterministic 400s. The generic fallback
