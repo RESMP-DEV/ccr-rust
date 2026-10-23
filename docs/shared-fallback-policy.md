@@ -97,7 +97,9 @@ requested `MiniMax-M3.1-Flash-Preview` was measured serving `zai,glm-5.3`
 before the alias existed). An operator alias entry is never overridden, and a
 model name offered by two providers stays unaliased rather than guessing.
 The approved main-machine shared chain is MiniMax `MiniMax-M3.1-Flash`,
-GLM-5.3-Flash, DeepSeek `deepseek-flash`, the keyed B550 Strata Coder
+GLM-5.3-Flash, DeepSeek `deepseek-flash`, Meta Model API
+(`meta,muse-spark-1.3`, added 2026-10-23 as the last cloud tier on a key
+with free credits), the keyed B550 Strata Coder
 (`strata-b550,qwen3.8-flash-next-coder`), and resident
 `local27,qwen3.8-27b-mxfp4`, with no private consumer seat. GLM-5.3 stays
 the main and auth primary and is not a worker fallback. The scoped-worker

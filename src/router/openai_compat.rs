@@ -93,24 +93,29 @@ pub(super) fn internal_request_to_anthropic_request(
 pub(super) fn anthropic_response_to_internal(
     response: AnthropicResponse,
 ) -> crate::frontend::InternalResponse {
+    // Redacted thinking has no readable text for the OpenAI surface; dropping
+    // it matches the streaming path, which never surfaces it either.
     let content = response
         .content
         .into_iter()
-        .map(|block| match block {
-            AnthropicContentBlock::Text { text } => crate::frontend::ContentBlock::Text { text },
+        .filter_map(|block| match block {
+            AnthropicContentBlock::Text { text } => {
+                Some(crate::frontend::ContentBlock::Text { text })
+            }
             AnthropicContentBlock::Thinking {
                 thinking,
                 signature,
-            } => crate::frontend::ContentBlock::Thinking {
+            } => Some(crate::frontend::ContentBlock::Thinking {
                 thinking,
                 signature: if signature.is_empty() {
                     None
                 } else {
                     Some(signature)
                 },
-            },
+            }),
+            AnthropicContentBlock::RedactedThinking { .. } => None,
             AnthropicContentBlock::ToolUse { id, name, input } => {
-                crate::frontend::ContentBlock::ToolUse { id, name, input }
+                Some(crate::frontend::ContentBlock::ToolUse { id, name, input })
             }
         })
         .collect();
@@ -582,6 +587,38 @@ mod tests {
         assert_eq!(output.matches("data: [DONE]").count(), 1);
         assert_eq!(output.matches("\"total_tokens\":3").count(), 1);
         assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn redacted_thinking_block_converts_to_openai_shape() {
+        // Muse's Messages-compatible surface returns opaque redacted_thinking
+        // blocks. The typed parse used to reject them and leak the raw
+        // Anthropic envelope to /v1/chat/completions clients.
+        let body = serde_json::json!({
+            "id": "msg_redacted_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "muse-spark-1.3",
+            "content": [
+                {"type": "redacted_thinking", "data": "opaque-reasoning-payload"},
+                {"type": "text", "text": "META_MUSE_OK"}
+            ],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 10, "output_tokens": 7}
+        });
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let converted = convert_anthropic_json_response_to_openai(response).await;
+        assert_eq!(converted.status(), StatusCode::OK);
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["choices"][0]["message"]["content"], "META_MUSE_OK");
+        assert_eq!(json["choices"][0]["finish_reason"], "stop");
+        assert_eq!(json["model"], "muse-spark-1.3");
     }
 
     #[tokio::test]

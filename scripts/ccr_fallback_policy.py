@@ -178,14 +178,9 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "api_key": "${CCR_DEEPSEEK_API_KEY}",
         "protocol": "anthropic",
         "models": ["deepseek-flash"],
-        # 2026-10-23 user-directed fix: the DeepSeek Anthropic endpoint
-        # deterministically 400s ("The `content[].thinking` in the thinking
-        # mode must be passed back") for replayed tool-loop assistant turns
-        # that lack a leading thinking block once any thinking appears in
-        # history; cross-provider spills (GLM-served sessions) hit this on
-        # ~56% of attempts. The transformer injects a placeholder leading
-        # thinking block into those turns (validated against captured live
-        # traffic: failing 231-message body returned 200 after injection).
+        # DeepSeek's thinking blocks are normalized for CCR's surfaces; the
+        # transformer is required or the provider returns 400s on reasoning
+        # turns. This mirrors the live policy body.
         "transformer": {"use": ["deepseek"]},
     },
     # Meta Model API (Muse). The Messages endpoint is an Anthropic-compatible
