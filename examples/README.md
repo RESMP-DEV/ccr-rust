@@ -11,6 +11,7 @@ before starting the router.
 | [`config.multitier.json`](config.multitier.json) | Three-provider failover cascade, traffic-class routes, per-tier retries, and presets. |
 | [`openrouter-free.json`](openrouter-free.json) | Current OpenRouter free-inference catalog with explicit model fallbacks. |
 | [`coding-plans.json`](coding-plans.json) | Explicit Kimi/GLM selection, named Anthropic presets, and Kimi's required output limit for Codex. |
+| [`sensenova.json`](sensenova.json) | SenseNova Token Plan's OpenAI-compatible Flash Lite route with no provider transformer. |
 | [`smoke-test.sh`](smoke-test.sh) | Checks a running router end-to-end: health, model list, and one Anthropic-style + one OpenAI-style request. |
 
 ## Try it

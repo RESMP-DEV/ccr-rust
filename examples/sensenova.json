@@ -1,0 +1,27 @@
+{
+  "_comment": "SenseNova Token Plan. Export CCR_SENSENOVA_API_KEY before validate/start.",
+  "Providers": [
+    {
+      "name": "sensenova",
+      "api_base_url": "https://token.sensenova.ai/v1",
+      "api_key": "${CCR_SENSENOVA_API_KEY}",
+      "protocol": "openai",
+      "models": [
+        "sensenova-6.8-flash-lite"
+      ],
+      "tier_name": "ccr-sensenova"
+    }
+  ],
+  "Router": {
+    "default": "sensenova,sensenova-6.8-flash-lite",
+    "tiers": [
+      "sensenova,sensenova-6.8-flash-lite"
+    ],
+    "strictTierOrder": true
+  },
+  "Persistence": {
+    "mode": "none"
+  },
+  "HOST": "127.0.0.1",
+  "PORT": 3456
+}

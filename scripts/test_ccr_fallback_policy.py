@@ -361,6 +361,9 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(minimax["auth_header"], "authorization")
         self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash"])
         self.assertEqual(minimax["transformer"], {"use": ["minimax"]})
+        # Live state landed 2026-10-22 after token-volume collision
+        # measurement; keep the repository source from erasing it.
+        self.assertEqual(minimax["maxInflightTokens"], 250_000)
 
     def test_probe_extra_headers_ride_with_the_credential(self) -> None:
         gmi = policy.MACHINE_SHARED_PROVIDERS["gmi"]
@@ -398,6 +401,17 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertIn(
             "User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"]
+        )
+
+    def test_sensenova_token_plan_is_registered_but_unrouted(self) -> None:
+        sensenova = policy.MACHINE_SHARED_PROVIDERS["sensenova"]
+        self.assertEqual(sensenova["api_base_url"], "https://token.sensenova.ai/v1")
+        self.assertEqual(sensenova["api_key"], "${CCR_SENSENOVA_API_KEY}")
+        self.assertEqual(sensenova["protocol"], "openai")
+        self.assertEqual(sensenova["models"], ["sensenova-6.8-flash-lite"])
+        self.assertNotIn("sensenova", policy.MACHINE_ROUTE_CHAIN)
+        self.assertNotIn(
+            "sensenova", policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.values()
         )
 
     def test_local_fallback_order_and_main_auth_primary_unchanged(

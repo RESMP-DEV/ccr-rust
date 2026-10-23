@@ -109,6 +109,16 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "extra_headers": {"User-Agent": "ccr-rust/1 (+gmi)"},
         "models": ["Qwen/Qwen3.8-Max-0902"],
     },
+    # SenseNova Token Plan (free public beta). Registered 2026-10-23 without a
+    # route because the API key had not yet been issued; both documented hosts
+    # answered an invalid-key probe with the same HTTP 401 JSON shape.
+    "sensenova": {
+        "name": "sensenova",
+        "api_base_url": "https://token.sensenova.ai/v1",
+        "api_key": "${CCR_SENSENOVA_API_KEY}",
+        "protocol": "openai",
+        "models": ["sensenova-6.8-flash-lite"],
+    },
     # Routed again 2026-10-21 (balance topped up; unrouted 2026-10-11 to
     # 2026-10-21 after preflight 402).
     "deepseek": {
@@ -193,6 +203,16 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         # injection and malformed-output sanitization live in the transformer.
         # Without this the registry builds an empty chain and neither runs.
         "transformer": {"use": ["minimax"]},
+        # 2026-10-22 user-directed delegation tuning: MiniMax 429s are
+        # token-volume collisions, not request-count limits (measured
+        # 2026-10-22: identical dispatch rates in minutes with and without
+        # 429s; ten concurrent small requests served cleanly; three ~150K
+        # token prefills collided), so the count-only AIMD cannot prevent
+        # them. A 250K in-flight prefill budget admits one large worker
+        # context plus a medium one and defers the next large preflight to
+        # the chain (GLM-5.3-Flash) instead of paying an upstream 429 and
+        # the AIMD cut cascade that follows it.
+        "maxInflightTokens": 250000,
     },
 }
 # os.umask is process-global and not atomic, so a set/restore dance inside each
@@ -206,7 +226,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "fc2f0bb724d044c4708cc3f5c869d62ccfff7836047a1cd1c0128c455d73c8a1"
+    "7500b006045c24aac70ae7e2528b51cb32ca4c19e1925c5626be6c9f828cb253"
 )
 
 
