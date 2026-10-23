@@ -3,7 +3,8 @@ mod handlers;
 pub use handlers::*;
 mod tool_telemetry;
 pub use tool_telemetry::{
-    record_anthropic_request_tools, record_anthropic_response_tools, record_streamed_tool_call,
+    record_anthropic_request_tools, record_anthropic_response_tools,
+    record_anthropic_response_tools_from_response, record_streamed_tool_call,
 };
 
 mod persistence;

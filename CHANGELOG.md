@@ -13,12 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Added metadata-only agent-tool telemetry. CCR counts request-history and
-  generated tool calls per sanitized frontend/tool label and buckets serialized
-  definition, argument, and result sizes, including streamed tool-call assembly.
-  The new `/v1/tool-metrics` endpoint and Prometheus series never retain or
-  return tool payloads, and Redis persistence carries the aggregates across
-  restarts.
+- Added metadata-only agent-tool telemetry. CCR counts each observed tool call
+  and result once per process, buckets serialized definition, argument, and
+  result sizes for native Anthropic and OpenAI-compatible traffic, and caps the
+  tool-label set at 128 names before folding new series into `other`. The new
+  `/v1/tool-metrics` endpoint and Prometheus series never retain or return tool
+  payloads, and Redis persistence restores counters, histogram buckets, and
+  averages across restarts.
 - Specialized SenseNova support for image understanding instead of generic code
   review. The shared worker chain no longer contains SenseNova, and the
   code-review listener remains on its existing primary. A distinct

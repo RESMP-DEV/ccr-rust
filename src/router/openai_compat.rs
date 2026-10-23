@@ -18,17 +18,16 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::error;
 
 use crate::frontend::codex::CodexFrontend;
+use crate::frontend::detect_frontend;
 use crate::frontend::Frontend;
-use crate::frontend::FrontendType;
-use crate::metrics::{
-    record_anthropic_response_tools, record_streamed_tool_call, ActiveStreamGuard,
-};
+use crate::metrics::ActiveStreamGuard;
 use crate::sse::SseFrameDecoder;
 use crate::transform::anthropic_to_openai::AnthropicToOpenAiResponseTransformer;
 use crate::transformer::Transformer;
 
 use super::{
-    handle_messages, AnthropicContentBlock, AnthropicRequest, AnthropicResponse, AppState, Message,
+    handle_messages_with_frontend, AnthropicContentBlock, AnthropicRequest, AnthropicResponse,
+    AppState, Message,
 };
 
 /// Rewrite OpenAI-style `image_url` content blocks into Anthropic `image`
@@ -216,7 +215,6 @@ async fn convert_anthropic_json_response_to_openai(response: Response) -> Respon
         }
     };
 
-    record_anthropic_response_tools(&anthropic_response.content, FrontendType::Codex);
     let internal_response = anthropic_response_to_internal(anthropic_response);
     let frontend = CodexFrontend::new();
     let serialized = match frontend.serialize_response(internal_response) {
@@ -339,7 +337,6 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         let mut next_tool_index = 0;
         let mut response_id = None;
         let mut response_model = None;
-        let mut streaming_tool_calls: HashMap<u64, (String, u64)> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -400,61 +397,6 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                         .and_then(serde_json::Value::as_str)
                                         .map(str::to_string);
                                 }
-                                if event_kind.as_deref() == Some("content_block_start")
-                                    && event_json
-                                        .pointer("/content_block/type")
-                                        .and_then(serde_json::Value::as_str)
-                                        == Some("tool_use")
-                                {
-                                    if let (Some(index), Some(name)) = (
-                                        event_json.get("index").and_then(serde_json::Value::as_u64),
-                                        event_json
-                                            .pointer("/content_block/name")
-                                            .and_then(serde_json::Value::as_str),
-                                    ) {
-                                        streaming_tool_calls.insert(index, (name.to_string(), 0));
-                                    }
-                                }
-                                if event_kind.as_deref() == Some("content_block_delta") {
-                                    if let Some(index) =
-                                        event_json.get("index").and_then(serde_json::Value::as_u64)
-                                    {
-                                        if let Some(partial_json) = event_json
-                                            .pointer("/delta/partial_json")
-                                            .and_then(serde_json::Value::as_str)
-                                        {
-                                            if let Some((_, bytes)) =
-                                                streaming_tool_calls.get_mut(&index)
-                                            {
-                                                *bytes += partial_json.len() as u64;
-                                            }
-                                        }
-                                    }
-                                }
-                                if event_kind.as_deref() == Some("content_block_stop") {
-                                    if let Some(index) =
-                                        event_json.get("index").and_then(serde_json::Value::as_u64)
-                                    {
-                                        // Start/delta events are remapped to dense OpenAI indices,
-                                        // while stop events retain Anthropic's original index.
-                                        let storage_index = tool_indices.get(&index).copied().unwrap_or(index);
-                                        if let Some((name, bytes)) =
-                                            streaming_tool_calls.remove(&storage_index)
-                                        {
-                                            record_streamed_tool_call(
-                                                FrontendType::Codex,
-                                                &name,
-                                                bytes,
-                                            );
-                                        }
-                                    }
-                                }
-
-                                remap_anthropic_tool_call_index(
-                                    &mut event_json,
-                                    &mut tool_indices,
-                                    &mut next_tool_index,
-                                );
                                 let event_usage = match event_kind.as_deref() {
                                     Some("message_start") => Some(&event_json["message"]["usage"]),
                                     Some("message_delta" | "message_stop") => {
@@ -559,6 +501,7 @@ async fn handle_chat_completions_inner(
     Json(mut request_body): Json<serde_json::Value>,
     native_responses_request: Option<serde_json::Value>,
 ) -> Response {
+    let frontend_type = detect_frontend(&headers, &request_body);
     if let Some(object) = request_body.as_object_mut() {
         object.remove(super::RESPONSES_REQUEST_PASSTHROUGH_KEY);
         object.remove(super::RESPONSES_RESPONSE_PASSTHROUGH_KEY);
@@ -575,8 +518,8 @@ async fn handle_chat_completions_inner(
         passthrough_body[super::RESPONSES_REQUEST_PASSTHROUGH_KEY] = native_responses_request;
     }
 
-    let frontend = CodexFrontend::new();
-    let internal_request = match frontend.parse_request(request_body) {
+    let codex_frontend = CodexFrontend::new();
+    let internal_request = match codex_frontend.parse_request(request_body) {
         Ok(req) => req,
         Err(e) => {
             error!("Failed to parse OpenAI request: {}", e);
@@ -590,7 +533,8 @@ async fn handle_chat_completions_inner(
     let stream_requested = internal_request.stream.unwrap_or(false);
     let mut anthropic_request = internal_request_to_anthropic_request(internal_request);
     anthropic_request.openai_passthrough_body = Some(passthrough_body);
-    let response = handle_messages(State(state), headers, Json(anthropic_request)).await;
+    let response =
+        handle_messages_with_frontend(state, headers, anthropic_request, frontend_type).await;
 
     if stream_requested {
         convert_anthropic_stream_response_to_openai(response).await
@@ -696,33 +640,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_tool_calls_record_metadata_only_metrics() {
+    async fn streaming_tool_calls_use_dense_indices_and_record_metadata_only_metrics() {
         let body = concat!(
-            "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"stream_exec\"}}\n\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_dense_1\",\"name\":\"stream_exec_dense_one\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"private-one\\\"}\"}}\n\n",
             "data: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":4,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_dense_2\",\"name\":\"stream_exec_dense_two\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":4,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"private-two\\\"}\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":4}\n\n",
             "data: {\"type\":\"message_stop\"}\n\n",
         );
         let response = Response::builder()
             .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
             .body(Body::from(body))
             .unwrap();
 
-        let converted = convert_anthropic_stream_response_to_openai(response).await;
-        let _ = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let observed = crate::metrics::record_anthropic_response_tools_from_response(
+            response,
+            crate::frontend::FrontendType::ClaudeCode,
+        )
+        .await;
+        let converted = convert_anthropic_stream_response_to_openai(observed).await;
+        let output_bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8_lossy(&output_bytes);
+        let indices: std::collections::BTreeSet<u64> = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .flat_map(|event| {
+                event
+                    .pointer("/choices/0/delta/tool_calls")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|call| call.get("index").and_then(serde_json::Value::as_u64))
+            .collect();
+        assert_eq!(indices, std::collections::BTreeSet::from([0, 1]));
+
         let metrics_response = crate::metrics::tool_metrics_handler().await.into_response();
         let bytes = to_bytes(metrics_response.into_body(), usize::MAX)
             .await
             .unwrap();
         let raw = String::from_utf8_lossy(&bytes).to_string();
         let metrics: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
-        let entry = metrics
-            .iter()
-            .find(|entry| entry["tool"] == "stream_exec")
-            .expect("streaming tool metric should exist");
-        assert!(entry["response_calls"].as_u64().unwrap_or(0) >= 1);
-        assert!(entry["avg_argument_bytes"].as_f64().unwrap_or(0.0) > 0.0);
-        assert!(!raw.contains("private"));
+        for tool in ["stream_exec_dense_one", "stream_exec_dense_two"] {
+            let entry = metrics
+                .iter()
+                .find(|entry| entry["tool"] == tool)
+                .expect("streaming tool metric should exist");
+            assert!(entry["response_calls"].as_u64().unwrap_or(0) >= 1);
+            assert!(entry["avg_argument_bytes"].as_f64().unwrap_or(0.0) > 0.0);
+        }
+        assert!(!raw.contains("private-one"));
+        assert!(!raw.contains("private-two"));
     }
 
     #[test]

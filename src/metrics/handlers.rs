@@ -16,17 +16,20 @@ use tracing::debug;
 
 use crate::routing::EwmaTracker;
 
-use super::tool_telemetry::{ARGUMENT_BYTES, CALLS, DEFINITION_BYTES, RESULT_BYTES};
+use super::tool_telemetry::{
+    ARGUMENT_BYTES, CALLS, DEFINITION_BYTES, RESULT_BYTES, TOOL_ARGUMENT_BYTES,
+    TOOL_DEFINITION_BYTES, TOOL_RESULT_BYTES,
+};
 use super::{
-    get_active_requests, get_active_streams, get_hist_offset, get_throughput_state,
-    merge_histogram_offsets, PreRequestAuditEntry, ThroughputSample, ACTIVE_REQUESTS,
-    ACTIVE_STREAMS, AUDIT_LOG, CACHE_CREATION_TOKENS_TOTAL, CACHE_READ_TOKENS_TOTAL,
-    COST_USD_TOTAL, FAILURES_TOTAL, FRONTEND_REQUESTS_TOTAL, FRONTEND_REQUEST_LATENCY,
-    INPUT_TOKENS_TOTAL, METRIC_FRONTEND_REQUEST_DURATION_SECONDS, METRIC_OUTPUT_TOKENS_PER_SECOND,
-    METRIC_REQUEST_DURATION_SECONDS, METRIC_TTFT_SECONDS, OUTPUT_TOKENS_PER_SECOND,
-    OUTPUT_TOKENS_TOTAL, REQUESTS_TOTAL, REQUEST_DURATION, TOKEN_DRIFT_STATE,
-    TOTAL_CACHE_CREATION_TOKENS, TOTAL_CACHE_READ_TOKENS, TOTAL_FAILURES, TOTAL_INPUT_TOKENS,
-    TOTAL_OUTPUT_TOKENS, TOTAL_REQUESTS, TTFT_SECONDS,
+    get_active_requests, get_active_streams, get_hist_offset, get_hist_offsets,
+    get_throughput_state, merge_histogram_offsets, PreRequestAuditEntry, ThroughputSample,
+    ACTIVE_REQUESTS, ACTIVE_STREAMS, AUDIT_LOG, CACHE_CREATION_TOKENS_TOTAL,
+    CACHE_READ_TOKENS_TOTAL, COST_USD_TOTAL, FAILURES_TOTAL, FRONTEND_REQUESTS_TOTAL,
+    FRONTEND_REQUEST_LATENCY, INPUT_TOKENS_TOTAL, METRIC_FRONTEND_REQUEST_DURATION_SECONDS,
+    METRIC_OUTPUT_TOKENS_PER_SECOND, METRIC_REQUEST_DURATION_SECONDS, METRIC_TTFT_SECONDS,
+    OUTPUT_TOKENS_PER_SECOND, OUTPUT_TOKENS_TOTAL, REQUESTS_TOTAL, REQUEST_DURATION,
+    TOKEN_DRIFT_STATE, TOTAL_CACHE_CREATION_TOKENS, TOTAL_CACHE_READ_TOKENS, TOTAL_FAILURES,
+    TOTAL_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_REQUESTS, TTFT_SECONDS,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -448,6 +451,12 @@ pub async fn tool_metrics_handler() -> impl IntoResponse {
         (&RESULT_BYTES, 2),
     ];
     for (histogram, kind) in histograms {
+        let metric_name = match kind {
+            0 => TOOL_DEFINITION_BYTES,
+            1 => TOOL_ARGUMENT_BYTES,
+            _ => TOOL_RESULT_BYTES,
+        };
+        let mut seen_labels = HashSet::new();
         for metric in histogram
             .collect()
             .iter()
@@ -462,31 +471,63 @@ pub async fn tool_metrics_handler() -> impl IntoResponse {
                 continue;
             };
             let histogram_metric = metric.get_histogram();
-            let count = histogram_metric.get_sample_count();
-            let average = if count == 0 {
-                0.0
-            } else {
-                (histogram_metric.get_sample_sum() / count as f64 * 10.0).round() / 10.0
-            };
+            let mut count = histogram_metric.get_sample_count();
+            let mut sum = histogram_metric.get_sample_sum();
+            if let Some(offset) =
+                get_hist_offset(metric_name, &[("frontend", frontend), ("tool", tool)])
+            {
+                count += offset.sample_count;
+                sum += offset.sample_sum;
+            }
             let entry = tool_metrics_entry(&mut metrics, frontend, tool);
-            match kind {
-                0 => {
-                    entry.definition_samples = count;
-                    entry.avg_definition_bytes = average;
+            set_tool_histogram(entry, kind, count, sum);
+            seen_labels.insert((frontend.to_string(), tool.to_string()));
+        }
+
+        // Include persisted labels that have no in-memory samples yet, such as
+        // a histogram written before restart and untouched by this process.
+        if let Some(offsets) = get_hist_offsets(metric_name) {
+            for (encoded_labels, offset) in offsets {
+                let Ok(labels) = serde_json::from_str::<HashMap<String, String>>(encoded_labels)
+                else {
+                    continue;
+                };
+                let (Some(frontend), Some(tool)) = (labels.get("frontend"), labels.get("tool"))
+                else {
+                    continue;
+                };
+                if seen_labels.contains(&(frontend.clone(), tool.clone())) {
+                    continue;
                 }
-                1 => {
-                    entry.argument_samples = count;
-                    entry.avg_argument_bytes = average;
-                }
-                _ => {
-                    entry.result_samples = count;
-                    entry.avg_result_bytes = average;
-                }
+                let entry = tool_metrics_entry(&mut metrics, frontend, tool);
+                set_tool_histogram(entry, kind, offset.sample_count, offset.sample_sum);
             }
         }
     }
 
     Json(metrics.into_values().collect::<Vec<_>>())
+}
+
+fn set_tool_histogram(entry: &mut ToolMetrics, kind: u8, count: u64, sum: f64) {
+    let average = if count == 0 {
+        0.0
+    } else {
+        (sum / count as f64 * 10.0).round() / 10.0
+    };
+    match kind {
+        0 => {
+            entry.definition_samples = count;
+            entry.avg_definition_bytes = average;
+        }
+        1 => {
+            entry.argument_samples = count;
+            entry.avg_argument_bytes = average;
+        }
+        _ => {
+            entry.result_samples = count;
+            entry.avg_result_bytes = average;
+        }
+    }
 }
 
 fn tool_metrics_entry<'a>(

@@ -32,6 +32,19 @@ fn codex_request_body() -> serde_json::Value {
     })
 }
 
+fn json_contains_text(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.contains(needle),
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| json_contains_text(value, needle))
+        }
+        serde_json::Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| key.contains(needle) || json_contains_text(value, needle)),
+        _ => false,
+    }
+}
+
 /// Helper: Create test config with mock backend
 fn make_test_config(mock_url: &str) -> String {
     let config = json!({
@@ -458,6 +471,37 @@ async fn test_tool_metrics_record_codex_tool_use_without_payload_leak() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
+    let frontend_probe_body = json!({
+        "model": "mock,test-model",
+        "messages": [{"role": "user", "content": "probe frontend attribution"}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "frontend_probe_tool",
+                "description": "unique tool for frontend attribution",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }],
+        "max_tokens": 20
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("anthropic-version", "2023-06-01")
+                .header("user-agent", "generic-openai-client/1.0")
+                .body(Body::from(
+                    serde_json::to_vec(&frontend_probe_body).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
     let resp = app
         .oneshot(
             Request::builder()
@@ -469,12 +513,17 @@ async fn test_tool_metrics_record_codex_tool_use_without_payload_leak() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
 
     let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    let raw = String::from_utf8_lossy(&body_bytes);
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&body_bytes).unwrap();
 
     let exec_entry = entries
         .iter()
@@ -484,11 +533,50 @@ async fn test_tool_metrics_record_codex_tool_use_without_payload_leak() {
         })
         .expect("expected codex exec_command tool metrics entry");
 
-    assert!(exec_entry["request_calls"].as_u64().unwrap_or(0) >= 1);
-    assert!(exec_entry["tool_results"].as_u64().unwrap_or(0) >= 1);
-    assert!(exec_entry["avg_definition_bytes"].as_f64().unwrap_or(0.0) > 0.0);
-    assert!(exec_entry["avg_argument_bytes"].as_f64().unwrap_or(0.0) > 0.0);
-    assert!(exec_entry["avg_result_bytes"].as_f64().unwrap_or(0.0) > 0.0);
+    assert!(
+        exec_entry["request_calls"]
+            .as_u64()
+            .expect("request_calls must be numeric")
+            >= 1
+    );
+    assert!(
+        exec_entry["tool_results"]
+            .as_u64()
+            .expect("tool_results must be numeric")
+            >= 1
+    );
+    assert!(
+        exec_entry["avg_definition_bytes"]
+            .as_f64()
+            .expect("avg_definition_bytes must be numeric")
+            > 0.0
+    );
+    assert!(
+        exec_entry["avg_argument_bytes"]
+            .as_f64()
+            .expect("avg_argument_bytes must be numeric")
+            > 0.0
+    );
+    assert!(
+        exec_entry["avg_result_bytes"]
+            .as_f64()
+            .expect("avg_result_bytes must be numeric")
+            > 0.0
+    );
+
+    let frontend_entry = entries
+        .iter()
+        .find(|entry| {
+            entry.get("frontend").and_then(|v| v.as_str()) == Some("claude_code")
+                && entry.get("tool").and_then(|v| v.as_str()) == Some("frontend_probe_tool")
+        })
+        .expect("detected non-Codex frontend should own its tool telemetry");
+    assert!(
+        frontend_entry["definition_samples"]
+            .as_u64()
+            .expect("definition_samples must be numeric")
+            >= 1
+    );
 
     // Metadata only: no tool payload, argument, or result content may reach the endpoint.
     for secret in [
@@ -498,7 +586,9 @@ async fn test_tool_metrics_record_codex_tool_use_without_payload_leak() {
         "earlier-private-def",
     ] {
         assert!(
-            !raw.contains(secret),
+            !entries
+                .iter()
+                .any(|entry| json_contains_text(entry, secret)),
             "tool payload leaked into /v1/tool-metrics: {secret}"
         );
     }
