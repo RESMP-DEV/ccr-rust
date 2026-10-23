@@ -88,6 +88,12 @@ ccr_tool_argument_bytes{frontend,tool}
 ccr_tool_result_bytes{frontend,tool}
 ```
 
+Tool labels are sanitized, bounded to 128 distinct names per process, and new
+names beyond the cap are reported as `other`. Request-history tool events are
+deduplicated by call id so resending a conversation does not replay old counts;
+streamed and non-streamed generated tool calls are both observed. Redis restores
+the counters, histogram offsets, buckets, and parsed averages after restart.
+
 ## API Endpoints
 
 | Endpoint              | Description                           |

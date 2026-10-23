@@ -10,6 +10,10 @@ fn single_line(value: &Value) -> String {
     super::report::text(string(value), 16000).replace(['\n', '\t', '\r'], " ")
 }
 
+fn bounded_single_line(value: &Value, max_chars: usize) -> String {
+    super::report::text(string(value), max_chars).replace(['\n', '\t', '\r'], " ")
+}
+
 fn event(output: &mut impl Write, value: &Value) -> Result<()> {
     writeln!(
         output,
@@ -119,6 +123,15 @@ pub(super) fn write(output: &mut impl Write, value: &Value) -> Result<()> {
             for warning in warnings {
                 writeln!(output, "Warning: {}", single_line(warning))?;
             }
+        }
+        if value["salvage"].is_object() {
+            writeln!(
+                output,
+                "Salvage: partial={} bytes; changed_paths={}; resume={}",
+                value["salvage"]["partial_report_bytes"],
+                value["salvage"]["changed_path_count"],
+                bounded_single_line(&value["salvage"]["resume_command"], 2000)
+            )?;
         }
         if !value["final_report"].is_null() {
             writeln!(

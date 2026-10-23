@@ -93,9 +93,11 @@ Verified against the tree at the revision above.
   Cooldown floor `sweepCooldownMs` (default 2000), stretched to the largest
   rate-limit backoff hint capped at 60s, clamped to remaining hold budget
   (mod.rs:592-605).
-- Terminal response: synthesized 429 (with `retry-after` + `x-ccr-tier`)
-  only when the final sweep saw exclusively rate limiting; otherwise 503
-  with per-tier attempt summary (mod.rs:103-127, 621-648).
+- Terminal response: synthesized 429 (with `retry-after`, `x-ccr-tier`, and
+  `x-ccr-rate-limited-tiers`) only when the final sweep saw exclusively rate
+  limiting; its error body carries a `details` array with each rate-limited
+  route and retry hint. Other exhausted cascades return 503 with an
+  aggregate message carrying tier, attempt, and sweep counts.
 
 ### Failure classification (`src/router/dispatch.rs`)
 
@@ -283,11 +285,15 @@ stats.
 
 Spec:
 
-1. Global retry budget: before any attempt beyond the first for a request,
+1. Global retry budget: before any retry of a tier that already attempted,
    require `retries_in_flight + 1 <= max(3, 0.2 * active_requests)`. On
-   overflow, end the sweep and synthesize the terminal response per
-   invariant 2. Metric `ccr_retry_budget_overflow_total`. Config
-   `Router.retryBudgetPercent` (default 20, 0 disables).
+   overflow, stop retrying that tier, continue through the remaining tiers'
+   normal first attempts, and do not start another sweep. The first normal
+   attempt on every fallback tier remains exempt so budget saturation cannot
+   synthesize a terminal 429 while a healthy tier is available; a parallel
+   hedge remains budget-controlled. Metric
+   `ccr_retry_budget_overflow_total`. Config `Router.retryBudgetPercent`
+   (default 20, 0 disables).
 2. Bounded hold by default: when `retrySweeps.enabled`, default
    `maxHoldMs` to 60000; `0` remains the explicit infinite opt-in and
    validation warns on it. Document in `docs/configuration.md`.

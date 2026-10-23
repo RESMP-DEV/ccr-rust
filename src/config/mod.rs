@@ -137,6 +137,44 @@ fn validate_provider_credentials(
     );
 }
 
+fn validate_provider_extra_headers(config: &serde_json::Value) -> Result<()> {
+    let Some(providers) = config.get("Providers").and_then(|value| value.as_array()) else {
+        return Ok(());
+    };
+    for (index, provider) in providers.iter().enumerate() {
+        let Some(headers) = provider
+            .get("extra_headers")
+            .and_then(|value| value.as_object())
+        else {
+            continue;
+        };
+        let name = provider
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        for (header, value) in headers {
+            reqwest::header::HeaderName::from_bytes(header.as_bytes()).map_err(|error| {
+                anyhow::anyhow!(
+                    "invalid extra_headers key for provider '{name}' at /Providers/{index}/{header}: {error}"
+                )
+            })?;
+            let header_value = value.as_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid extra_headers value for provider '{name}' at /Providers/{index}/{header}: value must be a string"
+                )
+            })?;
+            header_value
+                .parse::<reqwest::header::HeaderValue>()
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "invalid extra_headers value for provider '{name}' at /Providers/{index}/{header}: {error}"
+                    )
+                })?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_client_credentials(
     config: &serde_json::Value,
     expansion_failures: &[(String, String)],
@@ -186,6 +224,14 @@ fn validate_provider_contracts(providers: &[Provider]) -> Result<()> {
                 "provider '{}' maxInflight must be between 1 and 64, got {}",
                 provider.name,
                 max_inflight
+            );
+        }
+        if let Some(max_inflight_tokens) = provider.max_inflight_tokens {
+            anyhow::ensure!(
+                (1_000..=4_000_000).contains(&max_inflight_tokens),
+                "provider '{}' maxInflightTokens must be between 1000 and 4000000, got {}",
+                provider.name,
+                max_inflight_tokens
             );
         }
         let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
@@ -506,6 +552,33 @@ impl Config {
     pub fn preset_names(&self) -> Vec<&str> {
         self.presets.keys().map(|s| s.as_str()).collect()
     }
+
+    /// Validate configuration that depends on the compiled feature set.
+    ///
+    /// Keep this method in library code so `start`, `validate`, and `doctor`
+    /// apply the same GP build contract rather than duplicating it in the CLI.
+    pub fn validate_build_support(&self) -> Result<()> {
+        #[cfg(not(feature = "gp"))]
+        if self.router().gp_routing.enabled {
+            anyhow::bail!(
+                "Router.gpRouting.enabled=true requires a CCR-Rust build with the `gp` feature"
+            );
+        }
+
+        #[cfg(feature = "gp")]
+        if self.router().gp_routing.enabled {
+            if let Some(kpls_dim) = self.router().gp_routing.kpls_dim {
+                let feature_dim = gp_routing::features::FEATURE_DIM;
+                if kpls_dim == 0 || kpls_dim > feature_dim {
+                    anyhow::bail!(
+                        "Router.gpRouting.kplsDim must be between 1 and {feature_dim}; got {kpls_dim}"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Config {
@@ -536,6 +609,7 @@ impl Config {
         // expands to text containing `$word` must not block startup.
         let allow_unexpanded_credentials = allow_unexpanded_credentials_override();
         validate_provider_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
+        validate_provider_extra_headers(&value)?;
         validate_client_credentials(&value, &expansion_failures, allow_unexpanded_credentials)?;
         let file: ConfigFile =
             serde_json::from_value(value).context("Failed to parse config JSON")?;
@@ -1031,6 +1105,66 @@ mod tests {
         validate_provider_contracts(&[p]).unwrap();
     }
 
+    /// The token budget is optional and configured under its camelCase name,
+    /// matching the `maxInflight` spelling convention. A route without one
+    /// keeps the count-only admission path.
+    #[test]
+    fn provider_with_inflight_token_budget() {
+        let p = parse_provider(
+            r#"{
+                "name": "minimax",
+                "api_base_url": "https://api.minimax.example/v1",
+                "api_key": "mm-test",
+                "models": ["m3"],
+                "maxInflight": 4,
+                "maxInflightTokens": 200000
+            }"#,
+        );
+
+        assert_eq!(p.max_inflight, Some(4));
+        assert_eq!(p.max_inflight_tokens, Some(200_000));
+        validate_provider_contracts(&[p]).unwrap();
+
+        let plain = parse_provider(
+            r#"{
+                "name": "plain",
+                "api_base_url": "https://api.example.test/v1",
+                "api_key": "test",
+                "models": ["model"]
+            }"#,
+        );
+
+        assert_eq!(plain.max_inflight_tokens, None);
+        validate_provider_contracts(&[plain]).unwrap();
+    }
+
+    /// The token budget is bounded: a budget small enough to reject every
+    /// request, or large enough to disable the gate, is a configuration
+    /// error rather than a silent no-op.
+    #[test]
+    fn inflight_token_budget_must_be_within_range() {
+        for value in [999, 4_000_001] {
+            let p = parse_provider(&format!(
+                r#"{{
+                    "name": "minimax",
+                    "api_base_url": "https://api.minimax.example/v1",
+                    "api_key": "mm-test",
+                    "models": ["m3"],
+                    "maxInflightTokens": {value}
+                }}"#
+            ));
+
+            let error = validate_provider_contracts(&[p]).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("maxInflightTokens must be between 1000 and 4000000"),
+                "unexpected error for {value}: {error}"
+            );
+        }
+    }
+
     #[test]
     fn forced_reasoning_effort_requires_openai_protocol() {
         let p = parse_provider(
@@ -1240,6 +1374,7 @@ mod credential_guard_tests {
         let mut failures = Vec::new();
         expand_env_references(&mut value, &mut failures, "");
         validate_provider_credentials(&value, &failures, allow_unexpanded)?;
+        validate_provider_extra_headers(&value)?;
         validate_client_credentials(&value, &failures, allow_unexpanded)
     }
 
@@ -1263,6 +1398,13 @@ mod credential_guard_tests {
         let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"api-key": "${CCR_AZURE_API_KEY}"}}], "Router": {"default": "p1,m"}}"#;
         let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
         assert!(error.to_string().contains("header 'api-key'"));
+    }
+
+    #[test]
+    fn invalid_extra_headers_are_rejected_at_config_load() {
+        let raw = r#"{"Providers": [{"name": "p1", "api_base_url": "http://x", "api_key": "real", "models": ["m"], "extra_headers": {"bad header": "value"}}], "Router": {"default": "p1,m"}}"#;
+        let error = expand_and_validate(serde_json::from_str(raw).unwrap(), false).unwrap_err();
+        assert!(error.to_string().contains("invalid extra_headers key"));
     }
 
     #[test]

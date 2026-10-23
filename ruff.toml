@@ -1,0 +1,40 @@
+target-version = "py310"
+
+# The rule set is pinned explicitly rather than inherited from Ruff's
+# defaults, so a default change cannot silently weaken or break the
+# repository standard.
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "PIE", "PLW", "TRY", "EXE", "RUF", "BLE", "S"]
+# TRY003 asks for exception classes to own their message text. These helpers
+# raise `ValueError` and `RuntimeError` with operator-facing text that names
+# the exact policy field or command that failed; a bespoke exception class
+# per message would add indirection without adding information.
+#
+# TRY301 asks for a `raise` inside a `try` to move into a nested function.
+# The catalog helper raises validation errors inside its `try` precisely so
+# the surrounding handler converts them into the structured error list the
+# caller reports, which is the behavior the tool is contracted to provide.
+ignore = ["TRY003", "TRY301"]
+
+[lint.per-file-ignores]
+# Benchmark polling is deliberately best-effort: a failed metrics sample must
+# never abort the active stress run.
+"benchmarks/stress_sse_streams.py" = ["BLE001", "S110"]
+# Provider validation is a diagnostic matrix. It reports each optional API
+# experiment separately instead of allowing one provider failure to hide the
+# remaining contract differences.
+"tests/provider_validation/validate_apis.py" = ["BLE001"]
+# The helpers and their tests shell out deliberately: to curl for provider
+# probes, to the local binary under test, and to POSIX tools by name. Every
+# call passes an argument array rather than a shell string, and the
+# subprocess rules would otherwise flag each of them.
+"scripts/*.py" = ["S603", "S607", "S606"]
+"scripts/test_*.py" = ["S603", "S607", "S606", "S103", "S310"]
+# The helpers open operator-supplied URLs with urlopen: the credential
+# probe talks to a provider's model listing, the idle gate reads a local
+# metrics endpoint, and the policy probe reads a provider listing. The URL
+# always comes from the operator's own configuration.
+"scripts/ccr_fallback_policy.py" = ["S310"]
+"scripts/ccr_wait_idle.py" = ["S310"]
+"scripts/ccr_worker_usage.py" = ["S310"]
+"scripts/test_ccr_fallback_runtime.py" = ["S310"]

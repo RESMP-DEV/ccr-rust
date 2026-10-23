@@ -163,6 +163,11 @@ pub struct OpenAIMessage {
     pub content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Ordered provider reasoning blocks, including opaque signatures when
+    /// the source protocol supplied them. This is an internal compatibility
+    /// field; `reasoning_content` remains the flattened Chat-compatible text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_blocks: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

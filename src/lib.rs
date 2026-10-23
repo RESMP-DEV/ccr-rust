@@ -5,6 +5,7 @@ pub mod config;
 #[cfg(feature = "dashboard")]
 pub mod dashboard;
 pub mod debug_capture;
+pub mod doctor;
 pub mod frontend;
 #[cfg(feature = "gp")]
 pub mod gp_router;

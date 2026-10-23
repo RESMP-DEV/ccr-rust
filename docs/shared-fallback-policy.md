@@ -39,10 +39,9 @@ GLM model IDs below:
 }
 ```
 
-The consumer's primary goes first, followed by the shared chain with duplicates
-removed. The final shared route stays last. An optional `additional_routes`
-list per consumer inserts its existing extra providers before that final route;
-those providers must be defined in that consumer. Shared provider definitions
+The consumer's primary and any `additional_routes` go first, followed by the
+shared chain with duplicates removed. The final shared route stays last.
+Those providers must be defined in that consumer. Shared provider definitions
 replace providers with the same name. Other provider definitions remain local,
 so one listener can use native Responses while another uses Anthropic for Z.ai.
 A consumer must not define the same provider name twice, and the shared list
@@ -97,16 +96,34 @@ ids that the router otherwise silently dispatches to `Router.default` (a
 requested `MiniMax-M3.1-Flash-Preview` was measured serving `zai,glm-5.3`
 before the alias existed). An operator alias entry is never overridden, and a
 model name offered by two providers stays unaliased rather than guessing.
-The approved main-machine shared chain is temporarily MiniMax-M3.1-Flash-Preview
-only. Both current GLM tiers were cordoned 2026-10-18 after the Z.AI monthly
-tool quota reported 4000/4000 used, with a provider-reported reset at
-2026-10-28 20:26:14 America/Los_Angeles. Do not restore them until a fresh
-usage probe shows monthly headroom. The former FlashX head remains removed
-after its coding-plan trial expired, FlashX is also absent from the Z.AI
-provider catalog, and GMI and DeepSeek stay registered but unrouted pending
-dated re-approval. The explicit preview model ID is required:
-the shorter `MiniMax-M3.1-Flash` alias was observed upstream returning
-`MiniMax-M3`, so status-code-only validation cannot distinguish it.
+The approved main-machine shared chain is MiniMax `MiniMax-M3.1-Flash`,
+GLM-5.3-Flash, DeepSeek `deepseek-flash`, the keyed B550 Strata Coder
+(`strata-b550,qwen3.8-flash-next-coder`), and resident
+`local27,qwen3.8-27b-mxfp4`, with no private consumer seat. GLM-5.3 stays
+the main and auth primary and is not a worker fallback. The scoped-worker
+primary moved to MiniMax on 2026-10-21 by user authorization: the Z.AI GLM
+plan kept exhausting its monthly utilization window, so GLM Flash moved
+behind MiniMax instead of burning that window first on every scoped-worker
+dispatch. Both GLM tiers were
+cordoned 2026-10-18 after the Z.AI monthly tool quota reported 4000/4000
+used, then restored the same day by user direction once that premise was
+disproved: Z.AI meters usage without distinguishing model sessions from tool
+use, the router kept completing GLM calls (by the thousand) after the probe
+read zero, as did the ZCode app on the same plan, and the observed completion
+limits are the rolling 5-hour prompt window and concurrency caps, so the
+cordon's guaranteed-refusal rationale did not apply. The Qwen Token Plan lane
+was removed from the chain, and from the main/auth `qwen,qwen3.8-max` seat,
+on 2026-10-19: its monthly utilization window was exhausted, so every dispatch
+paid one guaranteed refusal before reaching a tier that could still serve. An
+exhausted window is not something routing can optimize around; the lane is
+skipped until it recovers. Qwen and native GMI stay registered but unrouted,
+as does the former FlashX head, so a dated re-approval restores them without
+rewiring credentials. DeepSeek returned to the chain on 2026-10-21 after its
+balance was topped up and a live request passed. The B550 Strata service is
+single-flight with a 16384-token context; local27 remains the final tier for
+over-long or unavailable B550 requests. MiniMax
+canonicalizes M3-family and legacy preview requests to the official
+`MiniMax-M3.1-Flash` ID.
 
 Before changing or restarting a shared provider route, run:
 

@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use super::content_part_events::{append_content_part_added, append_content_part_done};
 use super::{
     add_reasoning_output_item, append_response_delta, initial_responses_output_item,
-    map_openai_usage_to_responses_usage, response_output_item_identity, responses_reasoning_item,
-    unique_response_output_item_identity, ResponseOutputItemIdentity,
+    map_openai_usage_to_responses_usage, response_output_item_identity,
+    responses_reasoning_item_from_blocks, unique_response_output_item_identity,
+    ResponseOutputItemIdentity,
 };
 
 #[derive(Default)]
@@ -46,6 +47,10 @@ pub(super) struct ResponsesStreamConverter {
     message_quote_pending: String,
     refusal_text: String,
     reasoning_text: String,
+    reasoning_blocks: Vec<serde_json::Value>,
+    reasoning_block_index: Option<u64>,
+    reasoning_block_text: String,
+    reasoning_block_signature: String,
     response_status: String,
     incomplete_details: Option<serde_json::Value>,
     preserved_response: Option<serde_json::Value>,
@@ -54,6 +59,9 @@ pub(super) struct ResponsesStreamConverter {
     usage: serde_json::Value,
     finished: bool,
 }
+
+#[cfg(test)]
+mod tests;
 
 fn is_quote_prefix_candidate(text: &str) -> bool {
     text.chars()
@@ -142,6 +150,10 @@ impl ResponsesStreamConverter {
             message_quote_pending: String::new(),
             refusal_text: String::new(),
             reasoning_text: String::new(),
+            reasoning_blocks: Vec::new(),
+            reasoning_block_index: None,
+            reasoning_block_text: String::new(),
+            reasoning_block_signature: String::new(),
             response_status,
             incomplete_details: None,
             preserved_response,
@@ -422,6 +434,7 @@ impl ResponsesStreamConverter {
     }
 
     fn push_reasoning_delta(&mut self, reasoning: &str, output: &mut String) {
+        self.reasoning_block_index.get_or_insert(0);
         if self.preserved_response.is_none() {
             add_reasoning_output_item(
                 output,
@@ -442,8 +455,39 @@ impl ResponsesStreamConverter {
         );
     }
 
+    fn begin_reasoning_block(&mut self, block_index: u64) {
+        if self
+            .reasoning_block_index
+            .is_some_and(|current| current != block_index)
+        {
+            self.seal_reasoning_block();
+        }
+        self.reasoning_block_index = Some(block_index);
+    }
+
+    fn seal_reasoning_block(&mut self) {
+        if self.reasoning_block_index.is_none() {
+            return;
+        }
+        let mut block = serde_json::json!({"thinking": self.reasoning_block_text.clone()});
+        if !self.reasoning_block_signature.is_empty() {
+            block["signature"] = serde_json::Value::String(self.reasoning_block_signature.clone());
+        }
+        self.reasoning_blocks.push(block);
+        self.reasoning_block_text.clear();
+        self.reasoning_block_signature.clear();
+        self.reasoning_block_index = None;
+    }
+
     fn push_openai_choice(&mut self, choice: &serde_json::Value, output: &mut String) {
         let delta = choice.get("delta").cloned().unwrap_or_default();
+
+        if let Some(block_index) = delta
+            .get("reasoning_block_index")
+            .and_then(|value| value.as_u64())
+        {
+            self.begin_reasoning_block(block_index);
+        }
 
         if let Some(text) = delta
             .get("content")
@@ -459,6 +503,15 @@ impl ResponsesStreamConverter {
             .filter(|reasoning| !reasoning.is_empty())
         {
             self.push_reasoning_delta(reasoning, output);
+            self.reasoning_block_text.push_str(reasoning);
+        }
+
+        if let Some(signature) = delta
+            .get("reasoning_signature")
+            .and_then(|value| value.as_str())
+            .filter(|signature| !signature.is_empty())
+        {
+            self.reasoning_block_signature = signature.to_string();
         }
 
         if let Some(refusal) = delta
@@ -809,6 +862,14 @@ impl ResponsesStreamConverter {
                     .filter(|thinking| !thinking.is_empty())
                 {
                     self.push_reasoning_delta(thinking, output);
+                    self.reasoning_block_text.push_str(thinking);
+                }
+                if let Some(signature) = delta
+                    .get("signature")
+                    .and_then(|value| value.as_str())
+                    .filter(|signature| !signature.is_empty())
+                {
+                    self.reasoning_block_signature = signature.to_string();
                 }
             }
             Some("message_delta") => {
@@ -828,8 +889,15 @@ impl ResponsesStreamConverter {
         let mut output = String::new();
         let mut indexed_output_items = Vec::new();
 
+        self.seal_reasoning_block();
         if self.preserved_response.is_none() && !self.reasoning_text.is_empty() {
-            let reasoning_item = responses_reasoning_item(&self.response_id, &self.reasoning_text);
+            let reasoning_blocks = if self.reasoning_blocks.is_empty() {
+                vec![serde_json::json!({"thinking": self.reasoning_text})]
+            } else {
+                self.reasoning_blocks.clone()
+            };
+            let reasoning_item =
+                responses_reasoning_item_from_blocks(&self.response_id, &reasoning_blocks);
             let output_index = self
                 .reasoning_output_index
                 .expect("generated reasoning output must have an added event");
@@ -1061,29 +1129,4 @@ fn append_output_item_done(output: &mut String, output_index: usize, item: &serd
     output.push_str("event: response.output_item.done\ndata: ");
     output.push_str(&done.to_string());
     output.push_str("\n\n");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn preserved_items_reserve_their_output_indices() {
-        let preserved = serde_json::json!({
-            "id": "resp_preserved",
-            "output": [
-                {"id": "item_0", "type": "reasoning", "summary": []},
-                {"id": "item_1", "type": "message", "role": "assistant", "content": []}
-            ]
-        });
-        let mut converter = ResponsesStreamConverter::new(Some(preserved));
-        let frame = serde_json::json!({
-            "id": "resp_preserved",
-            "choices": []
-        });
-
-        converter.push_frame(None, &frame.to_string());
-
-        assert_eq!(converter.next_output_index, 2);
-    }
 }

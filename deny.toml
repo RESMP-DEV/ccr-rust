@@ -11,6 +11,31 @@ unmaintained = "workspace"
 # Fetch advisory databases with the Git CLI instead of gix
 git-fetch-with-cli = true
 
+# Temporary risk decisions. cargo-deny does not read the OSV Scanner
+# exception file, so the same reviewed exceptions are declared here as well.
+# Each entry mirrors a dated entry in osv-scanner.toml and
+# docs/dependency-security.md; keep the two files and this list in step.
+#
+# cargo-deny 0.20 has no expiry field for advisory ignores, so these entries
+# do not expire on their own. The dated expiry is enforced by the OSV
+# Scanner configuration, and a matching entry here must be removed by hand
+# when that date passes.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0367"
+reason = "zip 2.4.2 is reached only through ndarray-npy, whose NPZ path uses ZipArchive and ZipWriter but never ZipArchive.extract or ZipStreamReader.extract. Reviewed 2026-10-19; recheck by 2026-11-19."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0368"
+reason = "zip 2.4.2 is reached only through ndarray-npy, whose NPZ path uses ZipArchive and ZipWriter but never ZipArchive.extract or ZipStreamReader.extract. Reviewed 2026-10-19; recheck by 2026-11-19."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0369"
+reason = "zip 2.4.2 is reached only through ndarray-npy, whose NPZ path uses ZipArchive and ZipWriter but never ZipArchive.extract or ZipStreamReader.extract. Reviewed 2026-10-19; recheck by 2026-11-19."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0253"
+reason = "Tantivy still requires lru 0.16; its reachable keys do not have panicking Drop implementations. Reviewed 2026-10-19; recheck by 2026-11-19."
+
 [licenses]
 # Allow only these licenses
 allow = [

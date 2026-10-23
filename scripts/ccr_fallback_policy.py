@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Derive registered CCR configurations from one shared fallback policy."""
 
+from __future__ import annotations
+
 import argparse
 import copy
 import hashlib
@@ -28,29 +30,106 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # "zai,glm-5.3-flashx": its coding-plan trial expired 2026-10-09
     # (429 code 1311, "plan does not yet include access"), so leading
     # with it made every dispatch pay one guaranteed-refusal round trip.
-    # Cordoned 2026-10-18 after `modelctl usage --provider zcode --json`
-    # reported the monthly tool quota at 4000/4000 (0%). The provider's
-    # reset deadline is 2026-10-28 20:26:14 America/Los_Angeles. Do not
-    # restore either GLM tier until a fresh usage probe shows monthly headroom;
-    # routing to an exhausted plan otherwise spends a refusal on every call.
-    # Also removed from the chain 2026-10-11, providers kept registered
-    # below for re-adding after fixing: "gmi,Qwen/Qwen3.8-Max-0902"
-    # (user: not working reliably) and "deepseek,deepseek-flash" (PAYG
-    # balance exhausted, preflight 402). Re-add with a dated approval.
-    # User-approved 2026-10-07 final tier. Do not shorten this id: the alias
-    # "MiniMax-M3.1-Flash" is accepted upstream but serves MiniMax-M3.
-    "minimax,MiniMax-M3.1-Flash-Preview",
+    # Restored 2026-10-18 by user direction after the cordon's premise was
+    # disproved: the monthly counter (4000/4000, resets 2026-10-28) drew no
+    # enforcement wall. Z.AI meters usage without distinguishing model
+    # sessions from tool use, the router served thousands of successful GLM
+    # calls after that probe read 0%, and the ZCode app kept serving GLM on
+    # the same plan. The observed completion limits are the rolling 5-hour
+    # prompt window and concurrency caps.
+    # Worker order (2026-10-21 user authorization): MiniMax M3.1 Flash is the
+    # scoped-worker primary because the Z.AI GLM plan keeps exhausting its
+    # monthly utilization window, while MiniMax absorbs that volume. GLM-5.3
+    # remains the main/auth primary; GLM-5.3 Flash becomes the final shared
+    # fallback instead of the first worker tier. The MiniMax ID below is the
+    # reviewed one in this source tree and is what the live listeners
+    # already serve; legacy `-Preview` aliases are canonicalized on
+    # dispatch rather than pinned here.
+    # Qwen was removed 2026-10-19 by user direction: the token plan's monthly
+    # utilization window was exhausted, so every dispatch paid a guaranteed
+    # refusal before reaching a tier that could still serve. The provider and
+    # its credential stay registered below so a dated re-approval restores it
+    # without rewiring keys. Live utilization at removal is not re-checked here
+    # on purpose: an exhausted window cannot be optimized around, only skipped.
+    "minimax,MiniMax-M3.1-Flash",
+    "zai,glm-5.3-flash",
+    # 2026-10-21 user direction: native DeepSeek returns as the last cloud
+    # tier, ahead of the local model. A live probe the same day authenticated
+    # and completed a real request, so the earlier PAYG-balance cordon is lifted.
+    "deepseek,deepseek-flash",
+    # 2026-10-23 user direction: Meta Model API (Muse Spark) is the last cloud
+    # fallback tier for the main interactive and worker lanes, ahead of the
+    # local crawl-backs, on a key carrying free credits. muse-spark-1.3 is the
+    # cheap standard tier ($1.25/$4.25 per Mtok, 1M context, always reasons).
+    # Live-qualified the same day: /v1/models authenticated, /v1/messages
+    # returned Anthropic message objects, a scratch-listener smoke matrix
+    # passed 4/4 after redacted_thinking support landed, and a two-turn tool
+    # loop replayed tool_calls and tool results cleanly.
+    "meta,muse-spark-1.3",
+    # 2026-10-21 user direction: the keyed B550 Strata Coder service is the
+    # stronger local coding crawl-back. It sits ahead of local27, but remains
+    # constrained to one in-flight request because its current engine config is
+    # a FIFO server with a 16384-token context.
+    "strata-b550,qwen3.8-flash-next-coder",
+    # 2026-10-21 user direction: the resident local Qwen3.8-27B MXFP4 MLX
+    # server is the very last crawl-back tier for every consumer (standard,
+    # interactive/auth, workers), so a cloud-wide outage or exhausted windows
+    # still leave a serving model. It costs nothing and cannot 429, but it is
+    # the slowest and weakest tier, hence last.
+    "local27,qwen3.8-27b-mxfp4",
 )
 MACHINE_CONSUMERS: dict[str, str] = {
-    "config.json": "minimax,MiniMax-M3.1-Flash-Preview",
-    "config-auth.json": "minimax,MiniMax-M3.1-Flash-Preview",
-    # Repinned 2026-10-18 to the final tier while the Z.AI monthly tool quota
-    # is exhausted; the worker primary must not pay a guaranteed refusal.
-    "glm-workers.json": "minimax,MiniMax-M3.1-Flash-Preview",
-    # OCR keeps its distinct local primary; shared fallback remains governed.
+    # Primaries returned to their pre-cordon tiers with the 2026-10-18
+    # user-directed GLM restore.
+    "config.json": "zai,glm-5.3",
+    "config-auth.json": "zai,glm-5.3",
+    # 2026-10-21: the worker primary moved to MiniMax so GLM Flash is no
+    # longer the first tier a scoped worker burns its window on.
+    "glm-workers.json": "minimax,MiniMax-M3.1-Flash",
+    # OCR keeps its distinct code-review primary. SenseNova is not inserted:
+    # that consumer is review traffic, not image OCR, and the user explicitly
+    # excluded SenseNova from review work.
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
 }
+# No consumer holds a private route seat. The 2026-10-19 Qwen removal took
+# the main/auth `qwen,qwen3.8-max` seat out with it; every consumer now uses the
+# shared chain, and a new private seat needs a dated approval here.
+MACHINE_CONSUMER_ADDITIONAL_ROUTES: dict[str, tuple[str, ...]] = {}
+# Direct-only seats are configured in consumer JSON but never inserted into
+# Router.tiers. CCR serves an explicit provider,model pin as a one-tier request
+# while normal failures continue through the shared chain.
+MACHINE_CONSUMER_DIRECT_ROUTES: dict[str, tuple[str, ...]] = {
+    # 2026-10-23 user direction: the local Holo4 vision model is a
+    # computer-use specialist, not a general chat fallback. It is pinned per
+    # consumer so an agent can request it explicitly and CCR serves it as a
+    # one-tier request, while normal failures keep using the shared chain.
+    "config.json": ("holo4,holo4-35b-a3b",),
+    "config-auth.json": ("holo4,holo4-35b-a3b",),
+    "glm-workers.json": ("sensenova-vision,sensenova-6.8-flash-lite", "holo4,holo4-35b-a3b"),
+}
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
+    "zai": {
+        "name": "zai",
+        "api_base_url": "https://api.z.ai/api/v1",
+        "api_key": "${CCR_ZAI_API_KEY}",
+        "protocol": "responses",
+        "auth_header": "authorization",
+        # glm-5.3-flashx stays a registered capability only: its coding-plan
+        # trial expired 2026-10-09 and no chain entry routes to it, so
+        # derive() filters it out of generated consumer configs.
+        "models": ["glm-5.3", "glm-5.3-flashx", "glm-5.3-flash"],
+        "honor_ratelimit_headers": False,
+    },
+    # OpenRouter remains the code-review primary. Keep the definition here so
+    # restoring the OCR consumer never depends on a prior derived JSON file.
+    "openrouter": {
+        "name": "openrouter",
+        "api_base_url": "https://openrouter.ai/api/v1",
+        "api_key": "${CCR_OPENROUTER_API_KEY}",
+        "protocol": "openai",
+        "extra_headers": {"User-Agent": "claude-cli/2.1.30 (external, cli)"},
+        "models": ["nvidia/nemotron-3-ultra-550b-a55b:free"],
+    },
     # Registered option, unrouted since 2026-10-11 (user: not working
     # reliably). Kept wired so re-adding the chain entry restores it.
     "gmi": {
@@ -63,15 +142,143 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "extra_headers": {"User-Agent": "ccr-rust/1 (+gmi)"},
         "models": ["Qwen/Qwen3.8-Max-0902"],
     },
-    # Registered option, unrouted since 2026-10-11 (PAYG balance exhausted,
-    # preflight 402). Kept wired so topping up plus re-adding the chain entry
-    # restores it.
+    # SenseNova Token Plan (free public beta). The generic entry stays
+    # registered without a fallback seat so code-review and worker traffic
+    # cannot consume it accidentally.
+    "sensenova": {
+        "name": "sensenova",
+        "api_base_url": "https://token.sensenova.ai/v1",
+        "api_key": "${CCR_SENSENOVA_API_KEY}",
+        "protocol": "openai",
+        "models": ["sensenova-6.8-flash-lite"],
+        "tier_name": "ccr-sensenova",
+    },
+    # Registered capability for an explicit tool-less vision/extraction lane;
+    # deliberately unrouted because the existing OCR listener is code review,
+    # not image OCR. With adaptive thinking plus effort none, image extraction
+    # measured 1.6s/72 output tokens versus 6.7s/446 tokens.
+    "sensenova-vision": {
+        "name": "sensenova-vision",
+        "api_base_url": "https://token.sensenova.ai/v1",
+        "api_key": "${CCR_SENSENOVA_API_KEY}",
+        "protocol": "openai",
+        "models": ["sensenova-6.8-flash-lite"],
+        "tier_name": "ccr-sensenova-vision",
+        "force_adaptive_thinking": True,
+        "force_reasoning_effort": "none",
+    },
+    # Routed again 2026-10-21 (balance topped up; unrouted 2026-10-11 to
+    # 2026-10-21 after preflight 402).
     "deepseek": {
         "name": "deepseek",
         "api_base_url": "https://api.deepseek.com/anthropic/v1",
         "api_key": "${CCR_DEEPSEEK_API_KEY}",
         "protocol": "anthropic",
         "models": ["deepseek-flash"],
+        # DeepSeek's thinking blocks are normalized for CCR's surfaces; the
+        # transformer is required or the provider returns 400s on reasoning
+        # turns. This mirrors the live policy body.
+        "transformer": {"use": ["deepseek"]},
+    },
+    # Meta Model API (Muse). The Messages endpoint is an Anthropic-compatible
+    # adapter on the same base as its OpenAI surfaces, with Bearer auth on the
+    # standard authorization header. Muse always reasons and its Messages
+    # responses carry redacted_thinking blocks, which CCR parses and keeps off
+    # OpenAI-surface serializations. The adapter requires max_tokens, so
+    # requests without one get the same only-if-missing injection as
+    # Qwen/local27.
+    "meta": {
+        "name": "meta",
+        "api_base_url": "https://api.meta.ai/v1",
+        "api_key": "${CCR_META_API_KEY}",
+        "protocol": "anthropic",
+        "auth_header": "authorization",
+        "models": ["muse-spark-1.3"],
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]
+        },
+    },
+    # Qwen Token Plan (Standard tier). The sk-sp- key is plan-specific and
+    # must use this Anthropic-compatible endpoint, including the final /v1.
+    # Registered and live-tested 2026-10-18; model IDs came from /models and
+    # two real completions through CCR.
+    "qwen": {
+        "name": "qwen",
+        "api_base_url": "https://token-plan.maas.qwencloudapi.com/apps/anthropic/v1",
+        "api_key": "${CCR_QWEN_API_KEY}",
+        "protocol": "anthropic",
+        "models": [
+            "qwen3.8-flash",
+            "qwen3.8-max",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-flash",
+            "deepseek-v4.1-flash-1017",
+            "deepseek-v4.1-flash",
+            "deepseek-v4-pro",
+            "glm-5.3",
+            "glm-5.2",
+            "auto",
+        ],
+        # Qwen enforces Anthropic's required max_tokens even when Codex omits
+        # it. Inject a generous default without raising a client's lower cap.
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]
+        },
+    },
+    # Resident local MLX server (dflash_mlx, Qwen3.8-27B MXFP4) on this Mac.
+    # Points at the backend (:8081), not the admission proxy (:8080): the proxy
+    # rejects stream:true, and CCR clients stream. maxInflight mirrors the
+    # proxy's LOCAL27_MAX_BACKEND=4 so the backend keeps the same bound. The
+    # server ignores the request model name and needs no auth; the credential
+    # reference exists only because shared providers require one.
+    "local27": {
+        "name": "local27",
+        "api_base_url": "http://127.0.0.1:8081/v1",
+        "api_key": "${CCR_LOCAL27_API_KEY}",
+        "protocol": "openai",
+        "models": ["qwen3.8-27b-mxfp4"],
+        "maxInflight": 4,
+        # The server defaults to 512 completion tokens when a request omits
+        # max_tokens (Codex does); the model's context is 262144.
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 16384, "only_if_missing": True}]]
+        },
+    },
+    # Keyed LAN Strata service on B550. The localhost tunnel is ZeroTier-first
+    # with authenticated router/LAN and Strix-jump fallbacks, so it never pins
+    # a historical IPv4 address. The service enforces the referenced credential.
+    # Forcing reasoning off avoids a client that omits an effort spending its
+    # output budget in reasoning_content.
+    "strata-b550": {
+        "name": "strata-b550",
+        "api_base_url": "http://127.0.0.1:18081/v1",
+        "api_key": "${CCR_STRATA_B550_API_KEY}",
+        "protocol": "openai",
+        "models": ["qwen3.8-flash-next-coder"],
+        "maxInflight": 1,
+        "force_reasoning_effort": "none",
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]
+        },
+    },
+    # Local Holo4-35B-A3B (Apache-2.0, H Company) served on this Mac by the
+    # LM Studio llama.cpp runtime. It is a vision grounding model: it reads a
+    # screenshot and returns an element location, which is what the native
+    # computer-use client needs. The endpoint needs no credential; the
+    # reference exists because shared providers require one. maxInflight 1
+    # matches the single resident model instance, and the maxtoken default
+    # leaves room for the model's own reasoning before it answers.
+    "holo4": {
+        "name": "holo4",
+        "api_base_url": "http://127.0.0.1:1234/v1",
+        "api_key": "${CCR_HOLO4_API_KEY}",
+        "protocol": "openai",
+        "models": ["holo4-35b-a3b"],
+        "maxInflight": 1,
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]
+        },
     },
     "minimax": {
         "name": "minimax",
@@ -79,11 +286,21 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "api_key": "${CCR_MINIMAX_API_KEY}",
         "protocol": "anthropic",
         "auth_header": "authorization",
-        "models": ["MiniMax-M3.1-Flash-Preview"],
+        "models": ["MiniMax-M3.1-Flash"],
         # Required for MiniMax M3/M3.1 compatibility: adaptive thinking
         # injection and malformed-output sanitization live in the transformer.
         # Without this the registry builds an empty chain and neither runs.
         "transformer": {"use": ["minimax"]},
+        # 2026-10-22 user-directed delegation tuning: MiniMax 429s are
+        # token-volume collisions, not request-count limits (measured
+        # 2026-10-22: identical dispatch rates in minutes with and without
+        # 429s; ten concurrent small requests served cleanly; three ~150K
+        # token prefills collided), so the count-only AIMD cannot prevent
+        # them. A 250K in-flight prefill budget admits one large worker
+        # context plus a medium one and defers the next large preflight to
+        # the chain (GLM-5.3-Flash) instead of paying an upstream 429 and
+        # the AIMD cut cascade that follows it.
+        "maxInflightTokens": 250000,
     },
 }
 # os.umask is process-global and not atomic, so a set/restore dance inside each
@@ -91,6 +308,41 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
 # Reading it once at import confines that window to interpreter startup.
 UMASK = os.umask(0)
 os.umask(UMASK)
+
+# Whole-body integrity pin for the machine policy JSON. The structural gate
+# below checks routes, listener registrations, and provider definitions, but an
+# editor could still change an unconstrained field. Any change to the approved
+# policy body must update this pin in the same reviewed source change.
+MACHINE_POLICY_INTEGRITY_SHA256 = (
+    "d7fa0faaa87cd5b78291eeca7ef5bdded88e4070caa121dddd68fd051ce35ca8"
+)
+
+
+def recovery_pre_snapshot(label: str) -> dict[str, Any]:
+    """Take a best-effort recovery snapshot without blocking a config write."""
+    try:
+        script_root = Path(__file__).resolve().parent
+        if str(script_root) not in sys.path:
+            sys.path.insert(0, str(script_root))
+        from ccr_recovery import pre_snapshot
+
+        return pre_snapshot(label=label)
+    except (ImportError, OSError) as error:
+        message = {
+            "ok": False,
+            "label": label,
+            "error": f"{type(error).__name__}: {error}",
+        }
+        print(
+            f"ccr-recovery: pre-write snapshot failed to launch: {message['error']}",
+            file=sys.stderr,
+        )
+        return message
+
+
+def should_recovery_snapshot(root: Path) -> bool:
+    """Only the governed machine root receives machine-surface snapshots."""
+    return root.resolve() == MACHINE_ROOT.resolve()
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -137,6 +389,11 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
         extras = settings.get("additional_routes", [])
         if not isinstance(extras, list) or any(not isinstance(r, str) for r in extras):
             raise ValueError(f"Invalid additional routes for {name}")
+        direct = settings.get("direct_routes", [])
+        if not isinstance(direct, list) or any(
+            not isinstance(r, str) or r.count(",") != 1 for r in direct
+        ):
+            raise ValueError(f"Invalid direct routes for {name}")
     if root.resolve() == MACHINE_ROOT.resolve():
         if tuple(routes) != MACHINE_ROUTE_CHAIN:
             raise ValueError(
@@ -155,9 +412,15 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
                 raise ValueError(
                     f"Consumer {name} primary must remain {expected_primary}"
                 )
-            if consumers[name].get("additional_routes", []) != []:
+            expected_extras = list(MACHINE_CONSUMER_ADDITIONAL_ROUTES.get(name, ()))
+            if consumers[name].get("additional_routes", []) != expected_extras:
                 raise ValueError(
-                    f"Consumer {name} cannot add routes outside the approved chain"
+                    f"Consumer {name} additional routes must remain {expected_extras}"
+                )
+            expected_direct = list(MACHINE_CONSUMER_DIRECT_ROUTES.get(name, ()))
+            if consumers[name].get("direct_routes", []) != expected_direct:
+                raise ValueError(
+                    f"Consumer {name} direct routes must remain {expected_direct}"
                 )
         shared = {
             provider["name"]: provider
@@ -169,6 +432,14 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
                 "Machine shared provider definitions do not match the approved"
                 f" source policy: expected {sorted(MACHINE_SHARED_PROVIDERS)}"
             )
+        policy_body = json.dumps(policy, sort_keys=True)
+        observed = hashlib.sha256(policy_body.encode()).hexdigest()
+        if observed != MACHINE_POLICY_INTEGRITY_SHA256:
+            raise ValueError(
+                "Machine policy body does not match the approved integrity pin:"
+                f" expected {MACHINE_POLICY_INTEGRITY_SHA256}, got {observed}."
+                " Update the reviewed source pin, not the JSON."
+            )
     return policy
 
 
@@ -179,12 +450,13 @@ def derive(
     settings = policy["consumers"][consumer]
     chain = policy["routes"]
     primary = settings["primary"]
+    direct_routes = settings.get("direct_routes", [])
     if primary == chain[-1] and len(chain) > 1:
         raise ValueError("The final fallback cannot also be a consumer primary")
     candidates = [
         primary,
-        *chain[:-1],
         *settings.get("additional_routes", []),
+        *chain[:-1],
         chain[-1],
     ]
     tiers = list(dict.fromkeys(candidates))
@@ -220,8 +492,17 @@ def derive(
         models = providers.get(parts[0], {}).get("models") if len(parts) == 2 else None
         if len(parts) != 2 or not isinstance(models, list) or parts[1] not in models:
             raise ValueError(f"Consumer {consumer} has an unavailable route: {route}")
-    required_providers = {route.split(",", 1)[0] for route in tiers}
-    active_routes = set(tiers)
+    for route in direct_routes:
+        if route in tiers:
+            raise ValueError(
+                f"Consumer {consumer} direct route must not be a fallback tier: {route}"
+            )
+        parts = route.split(",", 1)
+        models = providers.get(parts[0], {}).get("models") if len(parts) == 2 else None
+        if len(parts) != 2 or not isinstance(models, list) or parts[1] not in models:
+            raise ValueError(f"Consumer {consumer} has an unavailable route: {route}")
+    required_providers = {route.split(",", 1)[0] for route in (*tiers, *direct_routes)}
+    active_routes = {*tiers, *direct_routes}
     result["Providers"] = [
         provider
         for provider in providers.values()
@@ -270,6 +551,10 @@ def derive(
         model = route.partition(",")[2]
         if model and claims[model] == 1 and model not in derived_aliases:
             derived_aliases[model] = route
+    # Stable client handle: a pin like Codex's `ccr-primary` follows the
+    # consumer's primary tier across cordons and restores without restarting
+    # long-lived clients, which read their model pin only at process start.
+    derived_aliases.setdefault("ccr-primary", primary)
     if router.get("topK") is not None:
         raise ValueError(
             f"Consumer {consumer} must remove topK before using strict fallback"
@@ -369,6 +654,8 @@ def sync(root: Path = ROOT, check: bool = False) -> dict[str, Any]:
         name for name, (on_disk, derived) in snapshots.items() if on_disk != derived
     ]
     if not check:
+        if changed and should_recovery_snapshot(root):
+            recovery_pre_snapshot("pre-sync")
         for name in changed:
             atomic_json(root / name, snapshots[name][1])
     return {
@@ -592,13 +879,13 @@ def preflight(root: Path = ROOT, timeout: float = 15.0) -> dict[str, Any]:
     for settings in policy["consumers"].values():
         routed.add(settings["primary"].split(",", 1)[0])
         routed |= {
-            route.split(",", 1)[0]
-            for route in settings.get("additional_routes", [])
+            route.split(",", 1)[0] for route in settings.get("additional_routes", [])
+        }
+        routed |= {
+            route.split(",", 1)[0] for route in settings.get("direct_routes", [])
         }
     shared = [
-        provider
-        for provider in policy["providers"]
-        if provider.get("name") in routed
+        provider for provider in policy["providers"] if provider.get("name") in routed
     ]
     env = credential_environment(
         {"probe": json.dumps(shared)}, credentials if credentials.is_file() else None
@@ -662,6 +949,8 @@ def serve(config_path: Path, arguments: list[str], root: Path = ROOT) -> None:
             config, credentials if credentials.is_file() else None
         )
         if config != on_disk:
+            if should_recovery_snapshot(root):
+                recovery_pre_snapshot("pre-serve")
             atomic_json(config_path, config)
     else:
         env = os.environ.copy()

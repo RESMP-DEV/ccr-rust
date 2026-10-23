@@ -20,7 +20,7 @@ use crate::routing::EwmaTracker;
 
 use super::sync_ewma_gauge;
 use super::tool_telemetry::{
-    TOOL_ARGUMENT_BYTES, TOOL_CALLS_TOTAL, TOOL_DEFINITION_BYTES, TOOL_RESULT_BUCKETS,
+    CALLS, TOOL_ARGUMENT_BYTES, TOOL_CALLS_TOTAL, TOOL_DEFINITION_BYTES, TOOL_RESULT_BUCKETS,
     TOOL_RESULT_BYTES, TOOL_SIZE_BUCKETS,
 };
 use super::{
@@ -288,6 +288,12 @@ pub(super) fn get_hist_offset(
         .by_metric
         .get(metric)
         .and_then(|by_label| by_label.get(&encode_labels(labels)))
+}
+
+pub(super) fn get_hist_offsets(
+    metric: &'static str,
+) -> Option<&'static HashMap<String, HistogramOffset>> {
+    redis_runtime()?.histogram_offsets.by_metric.get(metric)
 }
 
 fn encode_labels(labels: &[(&str, &str)]) -> String {
@@ -587,6 +593,17 @@ fn apply_counter_restore(metric: &'static str, encoded_labels: &str, value: f64)
                     .inc_by(value);
             }
         }
+        TOOL_CALLS_TOTAL => {
+            if let (Some(frontend), Some(tool), Some(direction)) = (
+                get_label(&labels, "frontend"),
+                get_label(&labels, "tool"),
+                get_label(&labels, "direction"),
+            ) {
+                CALLS
+                    .with_label_values(&[frontend, tool, direction])
+                    .inc_by(value);
+            }
+        }
         _ => {}
     }
 }
@@ -813,6 +830,9 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
         METRIC_REQUEST_DURATION_SECONDS,
         METRIC_FRONTEND_REQUEST_DURATION_SECONDS,
         METRIC_PRE_REQUEST_TOKENS,
+        TOOL_DEFINITION_BYTES,
+        TOOL_ARGUMENT_BYTES,
+        TOOL_RESULT_BYTES,
     ] {
         let Some(offsets) = runtime.histogram_offsets.by_metric.get(metric_name) else {
             continue;
@@ -920,6 +940,41 @@ mod tests {
     fn legacy_token_drift_state_is_not_mixed_with_current_semantics() {
         let legacy = r#"{"local_sum":100,"upstream_sum":80,"samples":2,"last_drift_pct":25.0,"last_local":50,"last_upstream":40}"#;
         assert!(decode_current_token_drift_entry(legacy).is_none());
+    }
+
+    #[test]
+    fn restores_tool_call_counter_by_all_three_labels() {
+        let before = CALLS
+            .with_label_values(&["claude_code", "persist_unit_tool", "response"])
+            .get();
+        apply_counter_restore(
+            TOOL_CALLS_TOTAL,
+            r#"{"direction":"response","frontend":"claude_code","tool":"persist_unit_tool"}"#,
+            2.0,
+        );
+        assert_eq!(
+            CALLS
+                .with_label_values(&["claude_code", "persist_unit_tool", "response"])
+                .get()
+                - before,
+            2.0
+        );
+    }
+
+    #[test]
+    fn tool_histograms_have_restore_bounds() {
+        assert_eq!(
+            histogram_bounds(TOOL_DEFINITION_BYTES),
+            Some(TOOL_SIZE_BUCKETS)
+        );
+        assert_eq!(
+            histogram_bounds(TOOL_ARGUMENT_BYTES),
+            Some(TOOL_SIZE_BUCKETS)
+        );
+        assert_eq!(
+            histogram_bounds(TOOL_RESULT_BYTES),
+            Some(TOOL_RESULT_BUCKETS)
+        );
     }
 
     #[test]
