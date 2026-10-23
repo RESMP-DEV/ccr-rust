@@ -383,6 +383,31 @@ class PolicyTests(unittest.TestCase):
         # measurement; keep the repository source from erasing it.
         self.assertEqual(minimax["maxInflightTokens"], 250_000)
 
+    def test_meta_muse_fallback_tier_is_pinned(self) -> None:
+        # 2026-10-23: Meta Model API (Muse Spark) is the last cloud fallback
+        # for main interactive and worker lanes, behind MiniMax, GLM Flash,
+        # and DeepSeek, and ahead of the local crawl-backs.
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN[3],
+            "meta,muse-spark-1.3",
+        )
+        self.assertEqual(
+            policy.MACHINE_ROUTE_CHAIN.index("meta,muse-spark-1.3"),
+            3,
+        )
+        meta = policy.MACHINE_SHARED_PROVIDERS["meta"]
+        self.assertEqual(meta["api_base_url"], "https://api.meta.ai/v1")
+        self.assertEqual(meta["api_key"], "${CCR_META_API_KEY}")
+        self.assertEqual(meta["protocol"], "anthropic")
+        self.assertEqual(meta["auth_header"], "authorization")
+        self.assertEqual(meta["models"], ["muse-spark-1.3"])
+        # The Messages adapter requires max_tokens; Codex requests that omit
+        # one must get the only-if-missing injection or the tier 400s.
+        self.assertEqual(
+            meta["transformer"],
+            {"use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]},
+        )
+
     def test_probe_extra_headers_ride_with_the_credential(self) -> None:
         gmi = policy.MACHINE_SHARED_PROVIDERS["gmi"]
         requests = policy._probe_requests(gmi, "secret")
@@ -402,6 +427,7 @@ class PolicyTests(unittest.TestCase):
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
+                "meta,muse-spark-1.3",
                 "strata-b550,qwen3.8-flash-next-coder",
                 "local27,qwen3.8-27b-mxfp4",
             ),
@@ -454,14 +480,30 @@ class PolicyTests(unittest.TestCase):
             ],
             [],
         )
-        self.assertEqual(
-            policy.MACHINE_CONSUMER_DIRECT_ROUTES,
-            {"glm-workers.json": ("sensenova-vision,sensenova-6.8-flash-lite",)},
+        self.assertIn(
+            "sensenova-vision,sensenova-6.8-flash-lite",
+            policy.MACHINE_CONSUMER_DIRECT_ROUTES["glm-workers.json"],
         )
         self.assertEqual(
             policy.MACHINE_CONSUMERS["ocr-reviewers.json"],
             "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
         )
+
+    def test_holo4_is_a_direct_computer_use_route(self) -> None:
+        provider = policy.MACHINE_SHARED_PROVIDERS["holo4"]
+        self.assertEqual(provider["api_base_url"], "http://127.0.0.1:1234/v1")
+        self.assertEqual(provider["protocol"], "openai")
+        self.assertEqual(provider["models"], ["holo4-35b-a3b"])
+        self.assertEqual(provider["maxInflight"], 1)
+        self.assertEqual(provider["api_key"], "${CCR_HOLO4_API_KEY}")
+        self.assertNotIn(
+            "holo4,holo4-35b-a3b", policy.MACHINE_ROUTE_CHAIN
+        )
+        for consumer in ("config.json", "config-auth.json", "glm-workers.json"):
+            self.assertIn(
+                "holo4,holo4-35b-a3b",
+                policy.MACHINE_CONSUMER_DIRECT_ROUTES[consumer],
+            )
 
     def test_local_fallback_order_and_main_auth_primary_unchanged(
         self,
@@ -471,7 +513,7 @@ class PolicyTests(unittest.TestCase):
         # B550 is the stronger local coding tier, while local27 remains final.
         self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[-4],
+            policy.MACHINE_ROUTE_CHAIN[-5],
             "zai,glm-5.3-flash",
         )
         # 2026-10-21: the resident local MLX model is the last crawl-back tier.
@@ -497,6 +539,7 @@ class PolicyTests(unittest.TestCase):
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
+                "meta,muse-spark-1.3",
                 "strata-b550,qwen3.8-flash-next-coder",
                 "local27,qwen3.8-27b-mxfp4",
             ),
@@ -542,6 +585,7 @@ class PolicyTests(unittest.TestCase):
                 "minimax,MiniMax-M3.1-Flash",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
+                "meta,muse-spark-1.3",
                 "strata-b550,qwen3.8-flash-next-coder",
                 "local27,qwen3.8-27b-mxfp4",
             ],

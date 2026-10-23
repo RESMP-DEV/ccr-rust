@@ -57,6 +57,15 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # tier, ahead of the local model. A live probe the same day authenticated
     # and completed a real request, so the earlier PAYG-balance cordon is lifted.
     "deepseek,deepseek-flash",
+    # 2026-10-23 user direction: Meta Model API (Muse Spark) is the last cloud
+    # fallback tier for the main interactive and worker lanes, ahead of the
+    # local crawl-backs, on a key carrying free credits. muse-spark-1.3 is the
+    # cheap standard tier ($1.25/$4.25 per Mtok, 1M context, always reasons).
+    # Live-qualified the same day: /v1/models authenticated, /v1/messages
+    # returned Anthropic message objects, a scratch-listener smoke matrix
+    # passed 4/4 after redacted_thinking support landed, and a two-turn tool
+    # loop replayed tool_calls and tool results cleanly.
+    "meta,muse-spark-1.3",
     # 2026-10-21 user direction: the keyed B550 Strata Coder service is the
     # stronger local coding crawl-back. It sits ahead of local27, but remains
     # constrained to one in-flight request because its current engine config is
@@ -90,7 +99,13 @@ MACHINE_CONSUMER_ADDITIONAL_ROUTES: dict[str, tuple[str, ...]] = {}
 # Router.tiers. CCR serves an explicit provider,model pin as a one-tier request
 # while normal failures continue through the shared chain.
 MACHINE_CONSUMER_DIRECT_ROUTES: dict[str, tuple[str, ...]] = {
-    "glm-workers.json": ("sensenova-vision,sensenova-6.8-flash-lite",),
+    # 2026-10-23 user direction: the local Holo4 vision model is a
+    # computer-use specialist, not a general chat fallback. It is pinned per
+    # consumer so an agent can request it explicitly and CCR serves it as a
+    # one-tier request, while normal failures keep using the shared chain.
+    "config.json": ("holo4,holo4-35b-a3b",),
+    "config-auth.json": ("holo4,holo4-35b-a3b",),
+    "glm-workers.json": ("sensenova-vision,sensenova-6.8-flash-lite", "holo4,holo4-35b-a3b"),
 }
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
     "zai": {
@@ -161,6 +176,24 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "protocol": "anthropic",
         "models": ["deepseek-flash"],
     },
+    # Meta Model API (Muse). The Messages endpoint is an Anthropic-compatible
+    # adapter on the same base as its OpenAI surfaces, with Bearer auth on the
+    # standard authorization header. Muse always reasons and its Messages
+    # responses carry redacted_thinking blocks, which CCR parses and keeps off
+    # OpenAI-surface serializations. The adapter requires max_tokens, so
+    # requests without one get the same only-if-missing injection as
+    # Qwen/local27.
+    "meta": {
+        "name": "meta",
+        "api_base_url": "https://api.meta.ai/v1",
+        "api_key": "${CCR_META_API_KEY}",
+        "protocol": "anthropic",
+        "auth_header": "authorization",
+        "models": ["muse-spark-1.3"],
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]
+        },
+    },
     # Qwen Token Plan (Standard tier). The sk-sp- key is plan-specific and
     # must use this Anthropic-compatible endpoint, including the final /v1.
     # Registered and live-tested 2026-10-18; model IDs came from /models and
@@ -225,6 +258,24 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
             "use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]
         },
     },
+    # Local Holo4-35B-A3B (Apache-2.0, H Company) served on this Mac by the
+    # LM Studio llama.cpp runtime. It is a vision grounding model: it reads a
+    # screenshot and returns an element location, which is what the native
+    # computer-use client needs. The endpoint needs no credential; the
+    # reference exists because shared providers require one. maxInflight 1
+    # matches the single resident model instance, and the maxtoken default
+    # leaves room for the model's own reasoning before it answers.
+    "holo4": {
+        "name": "holo4",
+        "api_base_url": "http://127.0.0.1:1234/v1",
+        "api_key": "${CCR_HOLO4_API_KEY}",
+        "protocol": "openai",
+        "models": ["holo4-35b-a3b"],
+        "maxInflight": 1,
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]
+        },
+    },
     "minimax": {
         "name": "minimax",
         "api_base_url": "https://api.minimax.io/anthropic/v1",
@@ -259,7 +310,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "258c93b9a9bc4e3e5b8bb3644303d8e11fb8b178f9e72fd2f84531f2cb37638e"
+    "5a1270fe5626784d3555beffe64e01c79ac7e171b16fb628ad6b52e068b24205"
 )
 
 
