@@ -176,3 +176,10 @@ with the route, integrity-pin recompute, `ccr-fallback-policy sync --json`, an
 idle-gated listener restart via `ccr-wait-idle`, and a live
 `scripts/ccr_provider_smoke.py --models sensenova,sensenova-6.8-flash-lite`
 run that also checks the streaming usage frame.
+
+## Landing
+
+The implementation landed in RESMP-DEV/ccr-rust commit
+`464ce0ad8b7b2eb4fa91b93deaf89ef5b64ca476`
+(`feat: add sensenova token plan provider`) and was pushed to the owned
+`origin/main` remote.
