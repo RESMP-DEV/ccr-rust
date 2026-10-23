@@ -374,3 +374,22 @@ authenticated HTTP 200.
   candidate, but changing that external producer remains a separate change.
 - No image-editing cadence or 2K/4K quality comparison was run; only one
   512x512 generation per working image model was observed.
+
+### Final live wiring
+
+- The worker config was derived with SenseNova absent from `Router.tiers` and
+  `sensenova-vision` present only in `Providers`. An explicit
+  `sensenova-vision,sensenova-6.8-flash-lite` image request returned HTTP 200,
+  `x-ccr-tier: ccr-sensenova-vision`, the correct infographic labels, 67
+  completion tokens, and zero reasoning tokens.
+- The daily `session-audit distill --days 2 --verbose` run completed through
+  that route and produced four evidence-backed candidates. Its router log
+  records `Direct routing: sensenova-vision,... (not in tier list)` and
+  `Success on ccr-sensenova-vision after 14.19s`. The code pin is committed in
+  `RESMP-DEV/session-audit` as `d67c0b1`.
+- The previous installed binary came from the unmerged
+  `feature/token-aware-admission` worktree. It was merged into CCR-Rust rather
+  than silently discarded, preserving the live MiniMax
+  `maxInflightTokens: 250000` behavior. The new binary includes both that
+  feature and the SenseNova request override; the worker listener was restarted
+  idle-gated and now maps the final installed inode.
