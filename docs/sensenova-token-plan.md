@@ -20,7 +20,9 @@ console uses the `.ai` host:
       "api_key": "${CCR_SENSENOVA_API_KEY}",
       "protocol": "openai",
       "models": ["sensenova-6.8-flash-lite"],
-      "tier_name": "ccr-sensenova"
+      "tier_name": "ccr-sensenova",
+      "force_adaptive_thinking": true,
+      "force_reasoning_effort": "none"
     }
   ],
   "Router": {
@@ -30,11 +32,14 @@ console uses the `.ai` host:
 }
 ```
 
-On the governed workstation, the reviewed shared chain places
-`sensenova,sensenova-6.8-flash-lite` immediately after MiniMax and before the
-Z.AI GLM Flash window. Main and auth still begin with their GLM-5.3 primary;
-workers still begin with MiniMax. This spends the free SenseNova lane before
-scarce quota, while retaining the normal 429 cascade.
+SenseNova is deliberately outside the generic worker/code-review chain. The
+governed policy registers a dedicated
+`sensenova-vision,sensenova-6.8-flash-lite` capability with
+`force_adaptive_thinking: true` and `force_reasoning_effort: none` as a
+direct-only seat on the worker listener: the provider is present in `Providers`
+but absent from `Router.tiers`, so only an explicit
+`provider,model` request can use it. Generic worker fallback and the listener
+named `ocr` (open code review, not image OCR) never consume it.
 
 Load the credential into the router process, not into the checked-in config:
 
@@ -53,9 +58,11 @@ than rewriting a key between regions.
 - Authentication is `Authorization: Bearer <key>`.
 - `sensenova-6.8-flash-lite` is the exact preview model identifier.
 - The authenticated 2026-10-23 catalog also listed `sensenova-u1.5-lite`,
-  `sensenova-u1-fast`, and `sensenova-6.7-flash-lite`; the governed policy
-  registers those IDs but routes only Flash Lite until separate lanes are
-  qualified.
+  `sensenova-u1-fast`, and `sensenova-6.7-flash-lite`, but only
+  `sensenova-u1.5-lite` completed an image generation: `u1-fast` returned 404,
+  `6.7-flash-lite` returned 404 for chat, and docs-only `u1.5-fast` returned
+  403 as unavailable to this plan. The governed policy therefore registers only
+  the qualified chat model.
 - Non-streaming responses may include `choices[0].message.reasoning`; CCR
   accepts that field as the generic `reasoning_content` alias and does not
   fabricate an Anthropic thinking signature.
@@ -68,13 +75,23 @@ SenseNova documents `reasoning_effort: low | medium | high | max | none`,
 with `high` as its default. CCR additionally accepts `minimal` and `xhigh`
 for other providers, but SenseNova does not document those labels, so an
 unsupported forced value can produce a deterministic upstream validation error.
-Leave the control unset until the route is live-qualified.
+The live API rejected the documented string form of `thinking: "disabled"` and
+kept reasoning when only `reasoning_effort: none` was sent. It emitted no
+reasoning only when `thinking` was the object `{"type":"adaptive"}` and
+`reasoning_effort` was `none`; CCR's `force_adaptive_thinking` override automates
+that pair. Remove the override only when a lane specifically needs deep
+reasoning.
 
 The public beta advertises 1,500 calls per model per rolling five hours. The
 API documentation additionally describes 60,000 points per rolling five hours
 and 600,000 points per rolling seven days across its General and Flash-Lite
 point classes. Treat those as plan limits, not per-route concurrency: no
 SenseNova rate-limit headers were observed on the invalid-key probe.
+
+Flash-Lite calls drain the dedicated pool first, then spill into the general
+pool. Every dedicated point earns a General-point rebate, while U-series image
+generation spends only General points. This makes Flash-Lite the economical
+text/vision lane and reserves U-series capacity for visual deliverables.
 
 ## Verification
 
@@ -105,9 +122,19 @@ marker probe, while 1024 tokens provided comfortable headroom.
 ## Current status and non-claims
 
 The 2026-10-23 qualification completed after the real key was loaded: the
-authenticated catalog returned four model IDs, the four-case matrix above
-passed, the served model matched `sensenova-6.8-flash-lite`, and a native
-weather-tool request returned `get_weather` with `{"city":"Paris"}`. A live
-stream also showed that its final usage-only event retains
-`id`, `object`, `created`, and `model`, so CCR can parse the exact usage
-instead of estimating it. Vision input and quota exhaustion remain unmeasured.
+authenticated catalog returned four IDs, the four-case chat/responses matrix
+passed, the served model matched `sensenova-6.8-flash-lite`, and native tool
+calls survived the CCR round trip. A live stream showed that its terminal
+usage-only event retains `id`, `object`, `created`, and `model`, so CCR keeps
+the exact usage rather than estimating it.
+
+The measured fit is tool-less extraction, summarization, and image
+understanding, not code review or long-horizon worker fallback. Non-thinking
+text produced 164-200 output tokens in 4.1-4.9 s; image extraction produced 72
+output tokens in 1.6-1.9 s. Tool-bearing Codex worker traffic is structurally a
+bad fit: the upstream accepts only `function` and `custom` tools, while Codex
+sends built-in tool types, producing deterministic 400s. The generic fallback
+seat added earlier was therefore removed. Visual generation is a separate U1
+API: `sensenova-u1.5-lite` produced a legible 512x512 infographic in 13.1 s,
+while the advertised fast IDs were either stale (404) or not entitled at this
+account (403). Quota exhaustion and sustained concurrency remain unmeasured.

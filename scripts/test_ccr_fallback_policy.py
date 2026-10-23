@@ -269,6 +269,18 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("y", derived["Router"]["modelAliases"])
         self.assertEqual(derived["Router"]["modelAliases"]["x"], "fast,x")
 
+    def test_direct_route_is_kept_out_of_the_fallback_tiers(self) -> None:
+        self.policy["consumers"]["worker.json"]["direct_routes"] = ["full,direct"]
+        config = copy.deepcopy(self.config)
+        config["Providers"][1]["models"].append("direct")
+        derived = policy.derive(config, self.policy, "worker.json")
+        self.assertNotIn("full,direct", derived["Router"]["tiers"])
+        full = next(p for p in derived["Providers"] if p["name"] == "full")
+        self.assertEqual(full["models"], ["z", "direct"])
+        with self.assertRaisesRegex(ValueError, "must not be a fallback tier"):
+            self.policy["consumers"]["worker.json"]["direct_routes"] = ["full,z"]
+            policy.derive(config, self.policy, "worker.json")
+
     def test_machine_policy_is_pinned_to_source(self) -> None:
         machine_policy: dict[str, Any] = {
             "version": 1,
@@ -279,6 +291,9 @@ class PolicyTests(unittest.TestCase):
                     "primary": primary,
                     "additional_routes": list(
                         policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.get(name, ())
+                    ),
+                    "direct_routes": list(
+                        policy.MACHINE_CONSUMER_DIRECT_ROUTES.get(name, ())
                     ),
                 }
                 for name, primary in policy.MACHINE_CONSUMERS.items()
@@ -336,6 +351,9 @@ class PolicyTests(unittest.TestCase):
                     "additional_routes": list(
                         policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.get(name, ())
                     ),
+                    "direct_routes": list(
+                        policy.MACHINE_CONSUMER_DIRECT_ROUTES.get(name, ())
+                    ),
                 }
                 for name, primary in policy.MACHINE_CONSUMERS.items()
             },
@@ -382,7 +400,6 @@ class PolicyTests(unittest.TestCase):
             policy.MACHINE_ROUTE_CHAIN,
             (
                 "minimax,MiniMax-M3.1-Flash",
-                "sensenova,sensenova-6.8-flash-lite",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
                 "strata-b550,qwen3.8-flash-next-coder",
@@ -404,26 +421,46 @@ class PolicyTests(unittest.TestCase):
             "User-Agent", policy.MACHINE_SHARED_PROVIDERS["gmi"]["extra_headers"]
         )
 
-    def test_sensenova_token_plan_is_routed_after_minimax(self) -> None:
+    def test_sensenova_stays_out_of_generic_code_review_chains(self) -> None:
         sensenova = policy.MACHINE_SHARED_PROVIDERS["sensenova"]
         self.assertEqual(sensenova["api_base_url"], "https://token.sensenova.ai/v1")
         self.assertEqual(sensenova["api_key"], "${CCR_SENSENOVA_API_KEY}")
         self.assertEqual(sensenova["protocol"], "openai")
         self.assertEqual(sensenova["tier_name"], "ccr-sensenova")
+        self.assertEqual(sensenova["models"], ["sensenova-6.8-flash-lite"])
         self.assertEqual(
-            sensenova["models"],
             [
-                "sensenova-6.8-flash-lite",
-                "sensenova-u1.5-lite",
-                "sensenova-u1-fast",
-                "sensenova-6.7-flash-lite",
+                route
+                for route in policy.MACHINE_ROUTE_CHAIN
+                if route.startswith("sensenova,")
             ],
-        )
-        self.assertEqual(
-            policy.MACHINE_ROUTE_CHAIN[1], "sensenova,sensenova-6.8-flash-lite"
+            [],
         )
         self.assertNotIn(
             "sensenova", policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.values()
+        )
+
+    def test_sensenova_vision_stays_unrouted(self) -> None:
+        vision = policy.MACHINE_SHARED_PROVIDERS["sensenova-vision"]
+        self.assertEqual(vision["api_base_url"], "https://token.sensenova.ai/v1")
+        self.assertEqual(vision["api_key"], "${CCR_SENSENOVA_API_KEY}")
+        self.assertEqual(vision["force_adaptive_thinking"], True)
+        self.assertEqual(vision["force_reasoning_effort"], "none")
+        self.assertEqual(
+            [
+                route
+                for route in policy.MACHINE_ROUTE_CHAIN
+                if route.startswith("sensenova-")
+            ],
+            [],
+        )
+        self.assertEqual(
+            policy.MACHINE_CONSUMER_DIRECT_ROUTES,
+            {"glm-workers.json": ("sensenova-vision,sensenova-6.8-flash-lite",)},
+        )
+        self.assertEqual(
+            policy.MACHINE_CONSUMERS["ocr-reviewers.json"],
+            "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
         )
 
     def test_local_fallback_order_and_main_auth_primary_unchanged(
@@ -458,7 +495,6 @@ class PolicyTests(unittest.TestCase):
             policy.MACHINE_ROUTE_CHAIN,
             (
                 "minimax,MiniMax-M3.1-Flash",
-                "sensenova,sensenova-6.8-flash-lite",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
                 "strata-b550,qwen3.8-flash-next-coder",
@@ -481,6 +517,9 @@ class PolicyTests(unittest.TestCase):
                 name: {
                     "primary": primary,
                     "additional_routes": list(extras),
+                    "direct_routes": list(
+                        policy.MACHINE_CONSUMER_DIRECT_ROUTES.get(name, ())
+                    ),
                 }
                 for name, primary in policy.MACHINE_CONSUMERS.items()
                 for extras in (policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.get(name, ()),)
@@ -501,7 +540,6 @@ class PolicyTests(unittest.TestCase):
             [
                 "zai,glm-5.3",
                 "minimax,MiniMax-M3.1-Flash",
-                "sensenova,sensenova-6.8-flash-lite",
                 "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
                 "strata-b550,qwen3.8-flash-next-coder",

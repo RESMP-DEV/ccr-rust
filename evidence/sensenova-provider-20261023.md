@@ -284,3 +284,93 @@ credential store, never in a config file, a document, a log, or a commit:
   worker and auth clean and the expected new chain, while main and OCR reported
   `listener has a stale in-memory tier order` because they have not yet
   restarted. The on-disk configs for all four are already correct.
+
+## Workload fit and final routing — 2026-10-23 follow-up
+
+### Dual quota
+
+The official docs define two independent rolling pools: 60,000 points per five
+hours and 600,000 per seven days for General Points and for Flash-Lite Points.
+Flash-Lite usage drains the dedicated pool first, then spills into General;
+image models and any non-Flash-Lite model drain General only. Every Flash-Lite
+dedicated point earns a one-to-one General rebate, credited later and valid for
+30 days. The two pools are therefore sequential, not additive; Flash-Lite is
+the only model family that both has its own pool and manufactures rebate credit
+for the general-only image models.
+
+The live account catalog exposed only `sensenova-6.8-flash-lite` for chat plus
+`sensenova-u1.5-lite` for actual image generation. `sensenova-6.7-flash-lite`
+and `sensenova-u1-fast` were listed by `/models` but returned 404 when called;
+docs-only `sensenova-u1.5-fast` returned 403 "not available in the current
+token plan". Those stale IDs were removed from the governed provider model
+list.
+
+### Measured model behavior
+
+- With no provider override, `sensenova-6.8-flash-lite` reasons by default. A
+  simple 140-word writing task burned the full 4,096-token cap on hidden
+  reasoning and emitted no answer. The documented string
+  `thinking: "disabled"` was rejected, and `reasoning_effort: "none"` alone did
+  not stop reasoning.
+- The effective non-thinking pair is `thinking: {"type":"adaptive"}` plus
+  `reasoning_effort: "none"`. Under that pair the same 140-word task produced
+  164-200 output tokens and a clean `stop` in 4.1-4.9 s across three runs,
+  with zero reasoning tokens.
+- Image extraction through CCR from a 512x512 generated infographic was
+  correct (`SENSENOVA QUOTA`, the three bar labels, and the caption) in
+  1.6-1.9 s and 72 completion tokens with the non-thinking pair. The same
+  request without the override took 6.7 s and 446 completion tokens, of which
+  397 were reasoning. That is a 4.1x latency and 6.2x completion-token win for
+  extraction on the same model.
+- The same image request sent to the existing OpenRouter/Nemotron code-review
+  primary returned HTTP 404 "No endpoints found that support image input" and
+  fell through to SenseNova; there is no existing image route to reuse.
+- `sensenova-u1.5-lite` generated a legible 512x512 infographic in 13.1 s. The
+  response usage was 535 input + 4,096 output tokens and one image. At roughly
+  4,631 usage units per 512 image, the 60,000 General pool is about 12 such
+  images per five-hour window before rebate credit; this is an estimate from
+  API usage, not a console point reconciliation.
+
+### Final use case and policy
+
+SenseNova is not a generic coding/review fallback. The code-review listener is
+not image OCR; it is the open-code-review client and remains on OpenRouter.
+Codex worker traffic also carries built-in tool types SenseNova rejects with a
+deterministic 400, so the worker fallback chain was restored to MiniMax -> GLM
+Flash -> DeepSeek -> Strata -> local27.
+
+The final policy exposes one direct-only capability on the worker listener:
+`sensenova-vision,sensenova-6.8-flash-lite`. It stays in `Providers` but not in
+`Router.tiers`, so only an explicit tool-less extraction/vision caller can use
+it, while normal worker fallback cannot. The provider forces the measured
+adaptive/non-thinking pair. `sensenova` remains registered but unrouted as a
+separate capability; `sensenova-vision` is included in preflight and
+authenticated HTTP 200.
+
+### Validation added in this follow-up
+
+- `python3 scripts/quality.py` — 12/12 checks passed after the provider
+  override and direct-route policy changes.
+- `python3 -m unittest discover -s scripts -p 'test_ccr_fallback_policy.py'
+  -v` — 41 tests passed.
+- `cargo test --all-features --locked --test test_routing
+  sensenova_base_url_dispatches_chat_completions_with_bearer_auth` — passed;
+  the mock asserts the forwarded body carries both the adaptive thinking object
+  and `reasoning_effort: none`.
+- `ccr-fallback-policy preflight --json` — `sensenova-vision` authenticated to
+  `/models` with HTTP 200.
+- `ccr-fallback-policy check --json` — no drift after sync; the worker's
+  `Router.tiers` excludes SenseNova while its `Providers` includes the
+  direct-only vision entry.
+
+### Non-claims
+
+- The point-per-token rate is not published and not reconciled against the
+  console. The image cost above is inferred from API usage fields.
+- The rolling five-hour and weekly ceilings were not exhausted. Quota error,
+  Retry-After, and sustained concurrency behavior remain unmeasured.
+- No production caller has yet been migrated to the direct-only route. The
+  session-audit distillation workload is the best existing non-review
+  candidate, but changing that external producer remains a separate change.
+- No image-editing cadence or 2K/4K quality comparison was run; only one
+  512x512 generation per working image model was observed.

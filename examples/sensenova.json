@@ -9,7 +9,9 @@
       "models": [
         "sensenova-6.8-flash-lite"
       ],
-      "tier_name": "ccr-sensenova"
+      "tier_name": "ccr-sensenova",
+      "force_adaptive_thinking": true,
+      "force_reasoning_effort": "none"
     }
   ],
   "Router": {

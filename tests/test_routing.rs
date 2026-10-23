@@ -648,9 +648,11 @@ async fn sensenova_base_url_dispatches_chat_completions_with_bearer_auth() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .and(header("authorization", "Bearer test-key"))
-        .and(body_partial_json(
-            json!({"model": "sensenova-6.8-flash-lite"}),
-        ))
+        .and(body_partial_json(json!({
+            "model": "sensenova-6.8-flash-lite",
+            "thinking": {"type": "adaptive"},
+            "reasoning_effort": "none"
+        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "chatcmpl-sensenova-test",
             "object": "chat.completion",
@@ -677,6 +679,8 @@ async fn sensenova_base_url_dispatches_chat_completions_with_bearer_auth() {
             "api_base_url": format!("{}/v1", mock_server.uri()),
             "api_key": "test-key",
             "protocol": "openai",
+            "force_adaptive_thinking": true,
+            "force_reasoning_effort": "none",
             "models": ["sensenova-6.8-flash-lite"]
         }],
         "Router": {"default": "sensenova,sensenova-6.8-flash-lite"},

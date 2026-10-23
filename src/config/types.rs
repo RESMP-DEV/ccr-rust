@@ -356,6 +356,11 @@ pub struct Provider {
     #[serde(default)]
     pub force_reasoning_effort: Option<String>,
 
+    /// Force providers whose non-thinking mode requires adaptive thinking
+    /// state, such as SenseNova with `reasoning_effort: none`.
+    #[serde(default)]
+    pub force_adaptive_thinking: bool,
+
     /// Initial and maximum in-flight attempts for AIMD admission control.
     /// Omitting it uses the global default of 8 with a minimum of 1 and
     /// maximum of 64.

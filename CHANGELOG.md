@@ -13,14 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Specialized SenseNova support for image understanding instead of generic code
+  review. The shared worker chain no longer contains SenseNova, and the
+  code-review listener remains on its existing primary. A distinct
+  non-thinking `sensenova-vision` provider is registered but deliberately
+  unrouted until a real vision consumer exists. A new
+  `forceAdaptiveThinking` provider override emits the live API's required
+  `thinking: {"type":"adaptive"}` marker alongside
+  `reasoning_effort: none`, reducing the measured image-extraction probe from
+  6.7s/446 completion tokens to 1.6s/72.
+- Raised the Rust SLOC ratchet after moving provider request overrides out of
+  the Dispatch hotspot into their own module.
 - Added a SenseNova Token Plan provider recipe using the existing OpenAI Chat
   protocol and `reasoning` field alias, with a dedicated example/config guide.
-  It was first registered credential-safely as unrouted, then live-qualified
-  and activated after the real key arrived.
-- Activated the live SenseNova Token Plan tier by user direction dated
-  2026-10-23. The free lane sits immediately after MiniMax and before Z.AI GLM
-  Flash in every governed consumer; a real key authenticated `/models`, passed
-  the four-case CCR smoke matrix, and returned a native tool call.
+  The provider was live-qualified after the real key arrived and never placed
+  in the code-review lane.
+- Corrected the first SenseNova routing attempt after live measurements: the
+  temporary generic fallback seat produced deterministic 400s on tool-bearing
+  Codex traffic and had no quota advantage for review work. The final policy
+  keeps SenseNova out of every fallback chain and exposes only a direct-only
+  non-thinking vision/extraction seat on the worker listener.
 - Reconciled the governed source policy with the live 2026-10-22 MiniMax
   token-admission tuning by landing `maxInflightTokens: 250000` with a pinned
   regression test, preventing a source deploy from silently removing the live

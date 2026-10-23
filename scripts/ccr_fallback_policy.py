@@ -52,11 +52,6 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # without rewiring keys. Live utilization at removal is not re-checked here
     # on purpose: an exhausted window cannot be optimized around, only skipped.
     "minimax,MiniMax-M3.1-Flash",
-    # 2026-10-23 user direction: the free SenseNova Token Plan sits behind
-    # MiniMax and ahead of the scarce Z.AI window. A live key authenticated
-    # /models, completed the 4-case chat/responses matrix, and returned a
-    # native tool call, so its 429s can safely cascade like any other tier.
-    "sensenova,sensenova-6.8-flash-lite",
     "zai,glm-5.3-flash",
     # 2026-10-21 user direction: native DeepSeek returns as the last cloud
     # tier, ahead of the local model. A live probe the same day authenticated
@@ -82,13 +77,21 @@ MACHINE_CONSUMERS: dict[str, str] = {
     # 2026-10-21: the worker primary moved to MiniMax so GLM Flash is no
     # longer the first tier a scoped worker burns its window on.
     "glm-workers.json": "minimax,MiniMax-M3.1-Flash",
-    # OCR keeps its distinct local primary; shared fallback remains governed.
+    # OCR keeps its distinct code-review primary. SenseNova is not inserted:
+    # that consumer is review traffic, not image OCR, and the user explicitly
+    # excluded SenseNova from review work.
     "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
 }
 # No consumer holds a private route seat. The 2026-10-19 Qwen removal took
 # the main/auth `qwen,qwen3.8-max` seat out with it; every consumer now uses the
 # shared chain, and a new private seat needs a dated approval here.
 MACHINE_CONSUMER_ADDITIONAL_ROUTES: dict[str, tuple[str, ...]] = {}
+# Direct-only seats are configured in consumer JSON but never inserted into
+# Router.tiers. CCR serves an explicit provider,model pin as a one-tier request
+# while normal failures continue through the shared chain.
+MACHINE_CONSUMER_DIRECT_ROUTES: dict[str, tuple[str, ...]] = {
+    "glm-workers.json": ("sensenova-vision,sensenova-6.8-flash-lite",),
+}
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
     "zai": {
         "name": "zai",
@@ -102,6 +105,16 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "models": ["glm-5.3", "glm-5.3-flashx", "glm-5.3-flash"],
         "honor_ratelimit_headers": False,
     },
+    # OpenRouter remains the code-review primary. Keep the definition here so
+    # restoring the OCR consumer never depends on a prior derived JSON file.
+    "openrouter": {
+        "name": "openrouter",
+        "api_base_url": "https://openrouter.ai/api/v1",
+        "api_key": "${CCR_OPENROUTER_API_KEY}",
+        "protocol": "openai",
+        "extra_headers": {"User-Agent": "claude-cli/2.1.30 (external, cli)"},
+        "models": ["nvidia/nemotron-3-ultra-550b-a55b:free"],
+    },
     # Registered option, unrouted since 2026-10-11 (user: not working
     # reliably). Kept wired so re-adding the chain entry restores it.
     "gmi": {
@@ -114,21 +127,30 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "extra_headers": {"User-Agent": "ccr-rust/1 (+gmi)"},
         "models": ["Qwen/Qwen3.8-Max-0902"],
     },
-    # SenseNova Token Plan (free public beta). Registered 2026-10-23 without a
-    # route because the API key had not yet been issued; both documented hosts
-    # answered an invalid-key probe with the same HTTP 401 JSON shape.
+    # SenseNova Token Plan (free public beta). The generic entry stays
+    # registered without a fallback seat so code-review and worker traffic
+    # cannot consume it accidentally.
     "sensenova": {
         "name": "sensenova",
         "api_base_url": "https://token.sensenova.ai/v1",
         "api_key": "${CCR_SENSENOVA_API_KEY}",
         "protocol": "openai",
-        "models": [
-            "sensenova-6.8-flash-lite",
-            "sensenova-u1.5-lite",
-            "sensenova-u1-fast",
-            "sensenova-6.7-flash-lite",
-        ],
+        "models": ["sensenova-6.8-flash-lite"],
         "tier_name": "ccr-sensenova",
+    },
+    # Registered capability for an explicit tool-less vision/extraction lane;
+    # deliberately unrouted because the existing OCR listener is code review,
+    # not image OCR. With adaptive thinking plus effort none, image extraction
+    # measured 1.6s/72 output tokens versus 6.7s/446 tokens.
+    "sensenova-vision": {
+        "name": "sensenova-vision",
+        "api_base_url": "https://token.sensenova.ai/v1",
+        "api_key": "${CCR_SENSENOVA_API_KEY}",
+        "protocol": "openai",
+        "models": ["sensenova-6.8-flash-lite"],
+        "tier_name": "ccr-sensenova-vision",
+        "force_adaptive_thinking": True,
+        "force_reasoning_effort": "none",
     },
     # Routed again 2026-10-21 (balance topped up; unrouted 2026-10-11 to
     # 2026-10-21 after preflight 402).
@@ -237,7 +259,7 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "6e81d0df79332595d6c84819d5877964b379f665f7200883e8c0c477eebad81d"
+    "258c93b9a9bc4e3e5b8bb3644303d8e11fb8b178f9e72fd2f84531f2cb37638e"
 )
 
 
@@ -312,6 +334,11 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
         extras = settings.get("additional_routes", [])
         if not isinstance(extras, list) or any(not isinstance(r, str) for r in extras):
             raise ValueError(f"Invalid additional routes for {name}")
+        direct = settings.get("direct_routes", [])
+        if not isinstance(direct, list) or any(
+            not isinstance(r, str) or r.count(",") != 1 for r in direct
+        ):
+            raise ValueError(f"Invalid direct routes for {name}")
     if root.resolve() == MACHINE_ROOT.resolve():
         if tuple(routes) != MACHINE_ROUTE_CHAIN:
             raise ValueError(
@@ -334,6 +361,11 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
             if consumers[name].get("additional_routes", []) != expected_extras:
                 raise ValueError(
                     f"Consumer {name} additional routes must remain {expected_extras}"
+                )
+            expected_direct = list(MACHINE_CONSUMER_DIRECT_ROUTES.get(name, ()))
+            if consumers[name].get("direct_routes", []) != expected_direct:
+                raise ValueError(
+                    f"Consumer {name} direct routes must remain {expected_direct}"
                 )
         shared = {
             provider["name"]: provider
@@ -363,6 +395,7 @@ def derive(
     settings = policy["consumers"][consumer]
     chain = policy["routes"]
     primary = settings["primary"]
+    direct_routes = settings.get("direct_routes", [])
     if primary == chain[-1] and len(chain) > 1:
         raise ValueError("The final fallback cannot also be a consumer primary")
     candidates = [
@@ -404,8 +437,17 @@ def derive(
         models = providers.get(parts[0], {}).get("models") if len(parts) == 2 else None
         if len(parts) != 2 or not isinstance(models, list) or parts[1] not in models:
             raise ValueError(f"Consumer {consumer} has an unavailable route: {route}")
-    required_providers = {route.split(",", 1)[0] for route in tiers}
-    active_routes = set(tiers)
+    for route in direct_routes:
+        if route in tiers:
+            raise ValueError(
+                f"Consumer {consumer} direct route must not be a fallback tier: {route}"
+            )
+        parts = route.split(",", 1)
+        models = providers.get(parts[0], {}).get("models") if len(parts) == 2 else None
+        if len(parts) != 2 or not isinstance(models, list) or parts[1] not in models:
+            raise ValueError(f"Consumer {consumer} has an unavailable route: {route}")
+    required_providers = {route.split(",", 1)[0] for route in (*tiers, *direct_routes)}
+    active_routes = {*tiers, *direct_routes}
     result["Providers"] = [
         provider
         for provider in providers.values()
@@ -783,6 +825,9 @@ def preflight(root: Path = ROOT, timeout: float = 15.0) -> dict[str, Any]:
         routed.add(settings["primary"].split(",", 1)[0])
         routed |= {
             route.split(",", 1)[0] for route in settings.get("additional_routes", [])
+        }
+        routed |= {
+            route.split(",", 1)[0] for route in settings.get("direct_routes", [])
         }
     shared = [
         provider for provider in policy["providers"] if provider.get("name") in routed

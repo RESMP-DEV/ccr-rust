@@ -136,11 +136,14 @@ Each provider entry configures an upstream API endpoint.
 | `model_pricing` | object | No | - | Model-keyed price overrides using the same rate fields. |
 | `transformer` | object | No | - | Request/response transformation configuration. |
 | `force_reasoning_effort` | string | No | - | Force `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` on every OpenAI-protocol request. |
+| `force_adaptive_thinking` | boolean | No | false | Insert `thinking: {"type":"adaptive"}` after protocol normalization. Pair it with `force_reasoning_effort: "none"` for providers whose non-thinking mode requires the adaptive marker. |
 | `maxInflight` | number | No | 8 | Initial and maximum per-route in-flight attempts for AIMD admission control. Values must be from 1 through 64. A 429 halves the current route limit; a clean completion grows it by one. |
 
 `force_reasoning_effort` is valid only for the default `openai` provider
 protocol. Configuration validation rejects unsupported values and other
-protocols before the router starts.
+protocols before the router starts. `force_adaptive_thinking` applies on the
+same OpenAI-protocol path and is intended for providers that require the
+adaptive marker together with `reasoning_effort: "none"` to disable reasoning.
 
 ### Reasoning controls across protocols
 

@@ -474,6 +474,9 @@ pub(super) struct TryRequestProtocolArgs<'a> {
 
 pub(crate) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 
+mod provider_overrides;
+use provider_overrides::apply_provider_request_overrides;
+
 pub(crate) fn provider_endpoint_url(provider: &crate::config::Provider, endpoint: &str) -> String {
     let base = provider.api_base_url.trim_end_matches('/');
     let endpoint = endpoint.trim_start_matches('/');
@@ -487,38 +490,6 @@ pub(crate) fn provider_endpoint_url(provider: &crate::config::Provider, endpoint
 
 pub(super) fn provider_openai_chat_completions_url(provider: &crate::config::Provider) -> String {
     provider_endpoint_url(provider, "chat/completions")
-}
-
-/// Apply validated provider-level request requirements immediately before dispatch.
-fn apply_provider_request_overrides(
-    provider: &crate::config::Provider,
-    request: &mut serde_json::Value,
-) -> Result<(), TryRequestError> {
-    let Some(reasoning_effort) = provider.force_reasoning_effort.as_deref() else {
-        return Ok(());
-    };
-    if provider.protocol != ProviderProtocol::Openai {
-        return Err(TryRequestError::Other(anyhow::anyhow!(
-            "provider '{}' force_reasoning_effort requires protocol 'openai'",
-            provider.name
-        )));
-    }
-    let object = request.as_object_mut().ok_or_else(|| {
-        TryRequestError::Other(anyhow::anyhow!(
-            "provider '{}' request override requires a JSON object",
-            provider.name
-        ))
-    })?;
-    object.insert(
-        "reasoning_effort".to_string(),
-        serde_json::Value::String(reasoning_effort.to_string()),
-    );
-    trace!(
-        provider = %provider.name,
-        reasoning_effort,
-        "forced provider reasoning effort"
-    );
-    Ok(())
 }
 
 pub(crate) fn provider_anthropic_messages_url(provider: &crate::config::Provider) -> String {
