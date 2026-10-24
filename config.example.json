@@ -162,5 +162,10 @@
                 "maxCacheAgeHours": 24
             }
         }
+    },
+    "Plugins": {
+        "_comment": "Runtime-loadable transformer plugins. dir is scanned for executable drop-in files (plugin name = file stem); plugins holds named declarations that override drop-ins. Built-in transformer names always win. See docs/plugins.md and examples/plugins/.",
+        "dir": "~/.claude-code-router/plugins",
+        "plugins": {}
     }
 }

@@ -9,9 +9,12 @@ use super::{
     MaxTokenTransformer, MinimaxTransformer, OpenAiToAnthropicTransformer,
     OutputCompressTransformer, ThinkTagTransformer, ToolCompressTransformer,
 };
-use crate::config::TransformerEntry;
-use crate::transformer::{LongCatThinkingTransformer, Transformer, TransformerChain};
+use crate::config::{PluginsConfig, TransformerEntry};
+use crate::transformer::{
+    ExternalTransformer, LongCatThinkingTransformer, Transformer, TransformerChain,
+};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// Type alias for a transformer factory function.
@@ -21,9 +24,10 @@ pub type TransformerFactory = dyn Fn(Option<&serde_json::Value>) -> Box<dyn Tran
 
 /// Registry for transformer factory functions.
 ///
-/// Uses static string keys to enable lifetime-safe storage of factories.
+/// Keys are owned strings so runtime-resolved external plugins can share the
+/// registry with statically registered factories.
 pub struct TransformerRegistry {
-    factories: HashMap<&'static str, Box<TransformerFactory>>,
+    factories: HashMap<String, Box<TransformerFactory>>,
 }
 
 impl TransformerRegistry {
@@ -85,14 +89,50 @@ impl TransformerRegistry {
     /// Register a transformer factory function with the given name.
     ///
     /// # Arguments
-    /// * `name` - Static string identifier for this transformer
+    /// * `name` - Identifier for this transformer (static or dynamic)
     /// * `factory` - Function that creates a transformer instance from optional options
     pub fn register(
         &mut self,
-        name: &'static str,
+        name: impl Into<String>,
         factory: impl Fn(Option<&serde_json::Value>) -> Box<dyn Transformer> + 'static,
     ) {
-        self.factories.insert(name, Box::new(factory));
+        self.factories.insert(name.into(), Box::new(factory));
+    }
+
+    /// Create a registry with default factories plus the external plugins
+    /// resolved from the `Plugins` config section.
+    pub fn new_with_plugins(plugins: &PluginsConfig) -> Self {
+        let mut registry = Self::new();
+        registry.register_plugins(plugins);
+        registry
+    }
+
+    /// Register external plugins (config declarations plus drop-in directory
+    /// files) as factories. Built-in factory names always win over a plugin
+    /// of the same name. Returns the registered plugin names.
+    pub fn register_plugins(&mut self, plugins: &PluginsConfig) -> Vec<String> {
+        let builtins: Vec<String> = self.factories.keys().cloned().collect();
+        let builtin_names: Vec<&str> = builtins.iter().map(String::as_str).collect();
+        let resolved = crate::transformer::resolve_plugins(plugins, &builtin_names);
+        let mut registered = Vec::new();
+        for plugin in resolved {
+            info!(
+                name = %plugin.name,
+                source = plugin.source.label(),
+                command = %plugin.spec.command,
+                "registered external transformer plugin factory"
+            );
+            let name = plugin.name.clone();
+            let spec = Arc::clone(&plugin.spec);
+            self.factories.insert(
+                name.clone(),
+                Box::new(move |_options| {
+                    Box::new(ExternalTransformer::new(name.clone(), Arc::clone(&spec)))
+                }),
+            );
+            registered.push(plugin.name);
+        }
+        registered
     }
 
     /// Build a single transformer from a config entry.
@@ -180,6 +220,41 @@ mod tests {
 
         assert_eq!(registry.len(), baseline_len + 1);
         assert!(registry.has("test_factory"));
+    }
+
+    #[test]
+    fn registry_registers_dynamic_plugin_names() {
+        let plugins: PluginsConfig = serde_json::from_value(serde_json::json!({
+            "plugins": { "my-plugin": { "command": "/bin/cat" } }
+        }))
+        .unwrap();
+        let mut registry = TransformerRegistry::new();
+        let baseline_len = registry.len();
+        let registered = registry.register_plugins(&plugins);
+
+        assert_eq!(registered, vec!["my-plugin".to_string()]);
+        assert_eq!(registry.len(), baseline_len + 1);
+        assert!(registry.has("my-plugin"));
+        let entry = TransformerEntry::Name("my-plugin".to_string());
+        let transformer = registry.build(&entry);
+        assert!(transformer.is_some());
+        assert_eq!(transformer.unwrap().name(), "my-plugin");
+    }
+
+    #[test]
+    fn registry_plugins_skip_builtin_names() {
+        let plugins: PluginsConfig = serde_json::from_value(serde_json::json!({
+            "plugins": { "minimax": { "command": "/bin/cat" } }
+        }))
+        .unwrap();
+        let mut registry = TransformerRegistry::new();
+        let baseline_len = registry.len();
+        registry.register_plugins(&plugins);
+        assert_eq!(
+            registry.len(),
+            baseline_len,
+            "built-in names must never be shadowed"
+        );
     }
 
     #[test]

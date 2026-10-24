@@ -7,7 +7,13 @@
 mod builtin;
 pub use builtin::*;
 
-use crate::config::TransformerEntry;
+mod external;
+pub use external::ExternalTransformer;
+
+mod plugin_catalog;
+pub use plugin_catalog::{resolve_plugins, PluginSource, ResolvedPlugin};
+
+use crate::config::{PluginsConfig, TransformerEntry};
 use crate::transform::glm::GlmTransformer;
 use crate::transform::kimi::KimiTransformer;
 use crate::transform::minimax::MinimaxTransformer;
@@ -18,7 +24,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 // ============================================================================
 // Transformer Trait
@@ -342,6 +348,43 @@ impl TransformerRegistry {
         registry.register("output_compress", Arc::new(OutputCompressTransformer));
 
         registry
+    }
+
+    /// Create a registry with built-in transformers plus the external
+    /// plugins resolved from the `Plugins` config section.
+    pub fn new_with_plugins(plugins: &PluginsConfig) -> Self {
+        let mut registry = Self::new();
+        registry.register_plugins(plugins);
+        registry
+    }
+
+    /// Register external plugins (config declarations plus drop-in directory
+    /// files) into this registry. Built-in transformer names always win over
+    /// a plugin of the same name. Returns the registered plugin names.
+    pub fn register_plugins(&mut self, plugins: &PluginsConfig) -> Vec<String> {
+        let builtins: Vec<String> = self.transformers.keys().cloned().collect();
+        let builtin_names: Vec<&str> = builtins.iter().map(String::as_str).collect();
+        let resolved = plugin_catalog::resolve_plugins(plugins, &builtin_names);
+        let mut registered = Vec::new();
+        for plugin in resolved {
+            info!(
+                name = %plugin.name,
+                source = plugin.source.label(),
+                command = %plugin.spec.command,
+                "registered external transformer plugin"
+            );
+            self.transformers.insert(
+                plugin.name.clone(),
+                Arc::new(ExternalTransformer::new(plugin.name.clone(), plugin.spec)),
+            );
+            registered.push(plugin.name);
+        }
+        registered
+    }
+
+    /// List all registered transformer names (built-ins and plugins).
+    pub fn names(&self) -> Vec<String> {
+        self.transformers.keys().cloned().collect()
     }
 
     /// Register a transformer with a given name.

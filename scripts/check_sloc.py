@@ -24,8 +24,12 @@ SOURCE_ROOT = ROOT / "src"
 # the DeepSeek thinking placeholder (PR #79). Re-pinned 2026-10-23 for the DeepSeek leading-thinking
 # injection transformer (shared helper in transformer/mod.rs plus the
 # factory-registry path in transform/deepseek.rs) merged alongside the
-# Muse/Holo4 routing work.
-TOTAL_CEILING = 40_969
+# Muse/Holo4 routing work. Raised 2026-10-24 for the runtime transformer
+# plugin system: config/plugins.rs, transformer/external.rs,
+# transformer/plugin_catalog.rs, both registry wiring paths, and the
+# `ccr-rust plugins` CLI (config/mod.rs was split in the same change, moving
+# its validation gates into config/validate.rs).
+TOTAL_CEILING = 42_242
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
 # baseline. They may shrink or be split, but cannot grow while the ratchet is
@@ -34,7 +38,7 @@ HOTSPOT_CEILINGS: dict[str, int] = {
     "router/responses_api.rs": 2_419,
     "router/mod.rs": 1_831,
     "router/dispatch.rs": 1_805,
-    "config/mod.rs": 1_414,
+    "config/mod.rs": 1_172,
     "router/streaming.rs": 1_373,
     "sse.rs": 294,
 }
