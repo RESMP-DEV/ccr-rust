@@ -842,6 +842,36 @@ fn bound_restored_histogram_labels(metric_name: &str, encoded: &str) -> String {
     serde_json::to_string(&labels).unwrap_or_else(|_| encoded.to_string())
 }
 
+fn aggregate_histogram_offsets<'a>(
+    offsets: impl Iterator<Item = (&'a str, &'a HistogramOffset)>,
+) -> BTreeMap<String, HistogramOffset> {
+    let mut bounded: BTreeMap<String, HistogramOffset> = BTreeMap::new();
+    for (labels, offset) in offsets {
+        let entry = bounded.entry(labels.to_string()).or_default();
+        entry.sample_sum += offset.sample_sum;
+        entry.sample_count += offset.sample_count;
+        for (bound, count) in &offset.cumulative_buckets {
+            *entry.cumulative_buckets.entry(bound.clone()).or_insert(0) += count;
+        }
+    }
+    bounded
+}
+
+fn bounded_histogram_offsets(
+    metric_name: &str,
+    offsets: &HashMap<String, HistogramOffset>,
+) -> BTreeMap<String, HistogramOffset> {
+    let bounded_labels: Vec<(String, &HistogramOffset)> = offsets
+        .iter()
+        .map(|(labels, offset)| (bound_restored_histogram_labels(metric_name, labels), offset))
+        .collect();
+    aggregate_histogram_offsets(
+        bounded_labels
+            .iter()
+            .map(|(labels, offset)| (labels.as_str(), *offset)),
+    )
+}
+
 pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::proto::MetricFamily>) {
     let Some(runtime) = redis_runtime() else {
         return;
@@ -866,6 +896,8 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
             .iter()
             .position(|family| family.name() == metric_name);
 
+        let offsets = bounded_histogram_offsets(metric_name, offsets);
+
         if let Some(idx) = family_idx {
             let family = &mut metric_families[idx];
             let mut existing_indices: HashMap<String, usize> = HashMap::new();
@@ -873,9 +905,8 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
                 existing_indices.insert(encode_metric_labels(metric), i);
             }
 
-            for (labels, offset) in offsets {
-                let labels = bound_restored_histogram_labels(metric_name, labels);
-                if let Some(&metric_idx) = existing_indices.get(&labels) {
+            for (labels, offset) in &offsets {
+                if let Some(&metric_idx) = existing_indices.get(labels) {
                     let metric = &mut family.metric[metric_idx];
                     let hist = metric.histogram.mut_or_insert_default();
                     hist.set_sample_sum(hist.get_sample_sum() + offset.sample_sum);
@@ -905,7 +936,7 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
                         }
                     }
                 } else {
-                    let mut metric = make_metric_with_labels(&labels);
+                    let mut metric = make_metric_with_labels(labels);
                     let mut hist = prometheus::proto::Histogram::new();
                     hist.set_sample_sum(offset.sample_sum);
                     hist.set_sample_count(offset.sample_count);
@@ -930,9 +961,8 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
             family.set_help("restored histogram offsets".to_string());
             family.set_field_type(prometheus::proto::MetricType::HISTOGRAM);
 
-            for (labels, offset) in offsets {
-                let labels = bound_restored_histogram_labels(metric_name, labels);
-                let mut metric = make_metric_with_labels(&labels);
+            for (labels, offset) in &offsets {
+                let mut metric = make_metric_with_labels(labels);
                 let mut hist = prometheus::proto::Histogram::new();
                 hist.set_sample_sum(offset.sample_sum);
                 hist.set_sample_count(offset.sample_count);
@@ -982,6 +1012,29 @@ mod tests {
                 - before,
             2.0
         );
+    }
+
+    #[test]
+    fn bounded_collisions_aggregate_before_restore() {
+        let first = HistogramOffset {
+            sample_sum: 10.0,
+            sample_count: 2,
+            cumulative_buckets: [("1.0".to_string(), 2)].into(),
+        };
+        let second = HistogramOffset {
+            sample_sum: 5.0,
+            sample_count: 1,
+            cumulative_buckets: [("1.0".to_string(), 1), ("2.0".to_string(), 1)].into(),
+        };
+        let aggregated = aggregate_histogram_offsets(
+            [("same_label", &first), ("same_label", &second)].into_iter(),
+        );
+        assert_eq!(aggregated.len(), 1);
+        let merged = &aggregated["same_label"];
+        assert_eq!(merged.sample_sum, 15.0);
+        assert_eq!(merged.sample_count, 3);
+        assert_eq!(merged.cumulative_buckets["1.0"], 3);
+        assert_eq!(merged.cumulative_buckets["2.0"], 1);
     }
 
     #[test]

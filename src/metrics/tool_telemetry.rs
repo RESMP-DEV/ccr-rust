@@ -277,6 +277,7 @@ pub fn record_anthropic_request_tools(request: &Value, frontend: FrontendType) {
             continue;
         };
 
+        let mut recorded_tool_result = false;
         for block in blocks {
             let block_type = block.get("type").and_then(Value::as_str);
             match block_type {
@@ -298,6 +299,7 @@ pub fn record_anthropic_request_tools(request: &Value, frontend: FrontendType) {
                     if !first_request_event("result", id) {
                         continue;
                     }
+                    recorded_tool_result = true;
                     let name = sanitized_tool_name(
                         block
                             .get("name")
@@ -309,6 +311,24 @@ pub fn record_anthropic_request_tools(request: &Value, frontend: FrontendType) {
                     observe_result(frontend, &name, bytes);
                 }
                 _ => {}
+            }
+        }
+        if role == Some("tool") && !recorded_tool_result {
+            let id = message
+                .get("tool_use_id")
+                .or_else(|| message.get("tool_call_id"))
+                .and_then(Value::as_str);
+            if first_request_event("result", id) {
+                let name = sanitized_tool_name(id.and_then(|id| tool_names_by_id.get(id).copied()));
+                record_call(frontend, &name, "result");
+                observe_result(
+                    frontend,
+                    &name,
+                    message
+                        .get("content")
+                        .map(serialized_len)
+                        .unwrap_or_default(),
+                );
             }
         }
     }
@@ -725,6 +745,33 @@ mod tests {
             observe_stream_frame(&frame, FrontendType::Codex, &mut calls);
         }
         assert_eq!(calls.len(), MAX_IN_FLIGHT_STREAM_TOOLS);
+    }
+
+    #[test]
+    fn tool_role_array_without_result_block_still_counts_once() {
+        let request = json!({
+            "model": "mock,test",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "call_array_plain", "name": "plain_array_tool",
+                     "input": {"cmd": "private"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_array_plain", "content": [
+                    {"type": "text", "text": "private output"}
+                ]}
+            ]
+        });
+        let before_result = CALLS
+            .with_label_values(&["codex", "plain_array_tool", "result"])
+            .get();
+        record_anthropic_request_tools(&request, FrontendType::Codex);
+        assert_eq!(
+            CALLS
+                .with_label_values(&["codex", "plain_array_tool", "result"])
+                .get()
+                - before_result,
+            1.0
+        );
     }
 
     #[test]
