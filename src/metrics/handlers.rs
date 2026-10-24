@@ -16,16 +16,20 @@ use tracing::debug;
 
 use crate::routing::EwmaTracker;
 
+use super::tool_telemetry::{
+    ARGUMENT_BYTES, CALLS, DEFINITION_BYTES, RESULT_BYTES, TOOL_ARGUMENT_BYTES,
+    TOOL_DEFINITION_BYTES, TOOL_RESULT_BYTES,
+};
 use super::{
-    get_active_requests, get_active_streams, get_hist_offset, get_throughput_state,
-    merge_histogram_offsets, PreRequestAuditEntry, ThroughputSample, ACTIVE_REQUESTS,
-    ACTIVE_STREAMS, AUDIT_LOG, CACHE_CREATION_TOKENS_TOTAL, CACHE_READ_TOKENS_TOTAL,
-    COST_USD_TOTAL, FAILURES_TOTAL, FRONTEND_REQUESTS_TOTAL, FRONTEND_REQUEST_LATENCY,
-    INPUT_TOKENS_TOTAL, METRIC_FRONTEND_REQUEST_DURATION_SECONDS, METRIC_OUTPUT_TOKENS_PER_SECOND,
-    METRIC_REQUEST_DURATION_SECONDS, METRIC_TTFT_SECONDS, OUTPUT_TOKENS_PER_SECOND,
-    OUTPUT_TOKENS_TOTAL, REQUESTS_TOTAL, REQUEST_DURATION, TOKEN_DRIFT_STATE,
-    TOTAL_CACHE_CREATION_TOKENS, TOTAL_CACHE_READ_TOKENS, TOTAL_FAILURES, TOTAL_INPUT_TOKENS,
-    TOTAL_OUTPUT_TOKENS, TOTAL_REQUESTS, TTFT_SECONDS,
+    get_active_requests, get_active_streams, get_hist_offset, get_hist_offsets,
+    get_throughput_state, merge_histogram_offsets, PreRequestAuditEntry, ThroughputSample,
+    ACTIVE_REQUESTS, ACTIVE_STREAMS, AUDIT_LOG, CACHE_CREATION_TOKENS_TOTAL,
+    CACHE_READ_TOKENS_TOTAL, COST_USD_TOTAL, FAILURES_TOTAL, FRONTEND_REQUESTS_TOTAL,
+    FRONTEND_REQUEST_LATENCY, INPUT_TOKENS_TOTAL, METRIC_FRONTEND_REQUEST_DURATION_SECONDS,
+    METRIC_OUTPUT_TOKENS_PER_SECOND, METRIC_REQUEST_DURATION_SECONDS, METRIC_TTFT_SECONDS,
+    OUTPUT_TOKENS_PER_SECOND, OUTPUT_TOKENS_TOTAL, REQUESTS_TOTAL, REQUEST_DURATION,
+    TOKEN_DRIFT_STATE, TOTAL_CACHE_CREATION_TOKENS, TOTAL_CACHE_READ_TOKENS, TOTAL_FAILURES,
+    TOTAL_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_REQUESTS, TTFT_SECONDS,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -45,6 +49,21 @@ pub struct FrontendMetrics {
     pub frontend: String,
     pub requests: u64,
     pub avg_latency_ms: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ToolMetrics {
+    pub frontend: String,
+    pub tool: String,
+    pub request_calls: u64,
+    pub response_calls: u64,
+    pub tool_results: u64,
+    pub definition_samples: u64,
+    pub avg_definition_bytes: f64,
+    pub argument_samples: u64,
+    pub avg_argument_bytes: f64,
+    pub result_samples: u64,
+    pub avg_result_bytes: f64,
 }
 
 /// Handler for GET /v1/token-drift - returns per-tier token verification summary.
@@ -393,6 +412,142 @@ pub async fn frontend_metrics_handler() -> impl IntoResponse {
     metrics_list.sort_by(|a, b| a.frontend.cmp(&b.frontend));
 
     Json(metrics_list)
+}
+
+pub async fn tool_metrics_handler() -> impl IntoResponse {
+    let mut metrics: std::collections::BTreeMap<(String, String), ToolMetrics> =
+        std::collections::BTreeMap::new();
+
+    for metric in CALLS
+        .collect()
+        .iter()
+        .flat_map(|family| family.get_metric())
+    {
+        let labels: HashMap<&str, &str> = metric
+            .get_label()
+            .iter()
+            .map(|label| (label.name(), label.value()))
+            .collect();
+        let (Some(frontend), Some(tool), Some(direction)) = (
+            labels.get("frontend"),
+            labels.get("tool"),
+            labels.get("direction"),
+        ) else {
+            continue;
+        };
+        let entry = tool_metrics_entry(&mut metrics, frontend, tool);
+        let count = metric.get_counter().value() as u64;
+        match *direction {
+            "request" => entry.request_calls = count,
+            "response" => entry.response_calls = count,
+            "result" => entry.tool_results = count,
+            _ => {}
+        }
+    }
+
+    let histograms: [(&prometheus::HistogramVec, u8); 3] = [
+        (&DEFINITION_BYTES, 0),
+        (&ARGUMENT_BYTES, 1),
+        (&RESULT_BYTES, 2),
+    ];
+    for (histogram, kind) in histograms {
+        let metric_name = match kind {
+            0 => TOOL_DEFINITION_BYTES,
+            1 => TOOL_ARGUMENT_BYTES,
+            _ => TOOL_RESULT_BYTES,
+        };
+        let mut seen_labels = HashSet::new();
+        for metric in histogram
+            .collect()
+            .iter()
+            .flat_map(|family| family.get_metric())
+        {
+            let labels: HashMap<&str, &str> = metric
+                .get_label()
+                .iter()
+                .map(|label| (label.name(), label.value()))
+                .collect();
+            let (Some(frontend), Some(tool)) = (labels.get("frontend"), labels.get("tool")) else {
+                continue;
+            };
+            let histogram_metric = metric.get_histogram();
+            let mut count = histogram_metric.get_sample_count();
+            let mut sum = histogram_metric.get_sample_sum();
+            if let Some(offset) =
+                get_hist_offset(metric_name, &[("frontend", frontend), ("tool", tool)])
+            {
+                count += offset.sample_count;
+                sum += offset.sample_sum;
+            }
+            let entry = tool_metrics_entry(&mut metrics, frontend, tool);
+            set_tool_histogram(entry, kind, count, sum);
+            seen_labels.insert((frontend.to_string(), tool.to_string()));
+        }
+
+        // Include persisted labels that have no in-memory samples yet, such as
+        // a histogram written before restart and untouched by this process.
+        if let Some(offsets) = get_hist_offsets(metric_name) {
+            for (encoded_labels, offset) in offsets {
+                let Ok(labels) = serde_json::from_str::<HashMap<String, String>>(encoded_labels)
+                else {
+                    tracing::warn!(
+                        labels = %encoded_labels,
+                        "Failed to parse persisted tool histogram labels, skipping"
+                    );
+                    continue;
+                };
+                let (Some(frontend), Some(tool)) = (labels.get("frontend"), labels.get("tool"))
+                else {
+                    continue;
+                };
+                if seen_labels.contains(&(frontend.clone(), tool.clone())) {
+                    continue;
+                }
+                let entry = tool_metrics_entry(&mut metrics, frontend, tool);
+                set_tool_histogram(entry, kind, offset.sample_count, offset.sample_sum);
+            }
+        }
+    }
+
+    Json(metrics.into_values().collect::<Vec<_>>())
+}
+
+fn set_tool_histogram(entry: &mut ToolMetrics, kind: u8, count: u64, sum: f64) {
+    // The JSON endpoint rounds bytes for display; persisted offsets and the
+    // Prometheus series retain full precision, so no information is destroyed.
+    let average = if count == 0 {
+        0.0
+    } else {
+        (sum / count as f64 * 10.0).round() / 10.0
+    };
+    match kind {
+        0 => {
+            entry.definition_samples = count;
+            entry.avg_definition_bytes = average;
+        }
+        1 => {
+            entry.argument_samples = count;
+            entry.avg_argument_bytes = average;
+        }
+        _ => {
+            entry.result_samples = count;
+            entry.avg_result_bytes = average;
+        }
+    }
+}
+
+fn tool_metrics_entry<'a>(
+    metrics: &'a mut std::collections::BTreeMap<(String, String), ToolMetrics>,
+    frontend: &str,
+    tool: &str,
+) -> &'a mut ToolMetrics {
+    metrics
+        .entry((frontend.to_string(), tool.to_string()))
+        .or_insert_with(|| ToolMetrics {
+            frontend: frontend.to_string(),
+            tool: tool.to_string(),
+            ..ToolMetrics::default()
+        })
 }
 
 /// Per-tier throughput summary returned by /v1/throughput.

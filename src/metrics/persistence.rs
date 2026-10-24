@@ -19,6 +19,10 @@ use crate::ratelimit::restore_rate_limit_backoff_counter;
 use crate::routing::EwmaTracker;
 
 use super::sync_ewma_gauge;
+use super::tool_telemetry::{
+    bound_restored_tool_label, CALLS, TOOL_ARGUMENT_BYTES, TOOL_CALLS_TOTAL, TOOL_DEFINITION_BYTES,
+    TOOL_RESULT_BUCKETS, TOOL_RESULT_BYTES, TOOL_SIZE_BUCKETS,
+};
 use super::{
     PreRequestAuditEntry, TokenDriftEntry, AUDIT_LOG, AUDIT_LOG_CAPACITY,
     CACHE_CREATION_TOKENS_TOTAL, CACHE_READ_TOKENS_TOTAL, COST_USD_TOTAL, FAILURES_TOTAL,
@@ -286,6 +290,12 @@ pub(super) fn get_hist_offset(
         .and_then(|by_label| by_label.get(&encode_labels(labels)))
 }
 
+pub(super) fn get_hist_offsets(
+    metric: &'static str,
+) -> Option<&'static HashMap<String, HistogramOffset>> {
+    redis_runtime()?.histogram_offsets.by_metric.get(metric)
+}
+
 fn encode_labels(labels: &[(&str, &str)]) -> String {
     let map: BTreeMap<&str, &str> = labels.iter().copied().collect();
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
@@ -324,6 +334,7 @@ fn load_snapshot(conn: &mut redis::Connection, prefix: &str) -> Result<RedisSnap
         METRIC_RATE_LIMIT_BACKOFFS_TOTAL,
         METRIC_RETRY_SWEEPS_TOTAL,
         METRIC_TOKEN_DRIFT_ALERTS_TOTAL,
+        TOOL_CALLS_TOTAL,
     ];
     let gauge_metrics = [
         METRIC_PEAK_ACTIVE_STREAMS,
@@ -335,6 +346,9 @@ fn load_snapshot(conn: &mut redis::Connection, prefix: &str) -> Result<RedisSnap
         METRIC_REQUEST_DURATION_SECONDS,
         METRIC_FRONTEND_REQUEST_DURATION_SECONDS,
         METRIC_PRE_REQUEST_TOKENS,
+        TOOL_DEFINITION_BYTES,
+        TOOL_ARGUMENT_BYTES,
+        TOOL_RESULT_BYTES,
     ];
 
     let mut snapshot = RedisSnapshot::default();
@@ -579,6 +593,18 @@ fn apply_counter_restore(metric: &'static str, encoded_labels: &str, value: f64)
                     .inc_by(value);
             }
         }
+        TOOL_CALLS_TOTAL => {
+            if let (Some(frontend), Some(tool), Some(direction)) = (
+                get_label(&labels, "frontend"),
+                get_label(&labels, "tool"),
+                get_label(&labels, "direction"),
+            ) {
+                let tool = bound_restored_tool_label(tool);
+                CALLS
+                    .with_label_values(&[frontend, &tool, direction])
+                    .inc_by(value);
+            }
+        }
         _ => {}
     }
 }
@@ -653,6 +679,8 @@ fn histogram_bounds(metric: &str) -> Option<&'static [f64]> {
             Some(REQUEST_DURATION_BUCKETS)
         }
         METRIC_PRE_REQUEST_TOKENS => Some(PRE_REQUEST_TOKENS_BUCKETS),
+        TOOL_DEFINITION_BYTES | TOOL_ARGUMENT_BYTES => Some(TOOL_SIZE_BUCKETS),
+        TOOL_RESULT_BYTES => Some(TOOL_RESULT_BUCKETS),
         _ => None,
     }
 }
@@ -794,6 +822,56 @@ fn encode_metric_labels(metric: &prometheus::proto::Metric) -> String {
     serde_json::to_string(&labels).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Remap the `tool` label in an encoded-labels JSON through the live 128-name
+/// cap, so restored histogram offsets cannot expose every persisted historical
+/// name as a new series. Non-tool metrics and undecodable labels pass through.
+fn bound_restored_histogram_labels(metric_name: &str, encoded: &str) -> String {
+    if metric_name != TOOL_DEFINITION_BYTES
+        && metric_name != TOOL_ARGUMENT_BYTES
+        && metric_name != TOOL_RESULT_BYTES
+    {
+        return encoded.to_string();
+    }
+    let mut labels: BTreeMap<String, String> = match serde_json::from_str(encoded) {
+        Ok(map) => map,
+        Err(_) => return encoded.to_string(),
+    };
+    if let Some(tool) = labels.get("tool").cloned() {
+        labels.insert("tool".to_string(), bound_restored_tool_label(&tool));
+    }
+    serde_json::to_string(&labels).unwrap_or_else(|_| encoded.to_string())
+}
+
+fn aggregate_histogram_offsets<'a>(
+    offsets: impl Iterator<Item = (&'a str, &'a HistogramOffset)>,
+) -> BTreeMap<String, HistogramOffset> {
+    let mut bounded: BTreeMap<String, HistogramOffset> = BTreeMap::new();
+    for (labels, offset) in offsets {
+        let entry = bounded.entry(labels.to_string()).or_default();
+        entry.sample_sum += offset.sample_sum;
+        entry.sample_count += offset.sample_count;
+        for (bound, count) in &offset.cumulative_buckets {
+            *entry.cumulative_buckets.entry(bound.clone()).or_insert(0) += count;
+        }
+    }
+    bounded
+}
+
+fn bounded_histogram_offsets(
+    metric_name: &str,
+    offsets: &HashMap<String, HistogramOffset>,
+) -> BTreeMap<String, HistogramOffset> {
+    let bounded_labels: Vec<(String, &HistogramOffset)> = offsets
+        .iter()
+        .map(|(labels, offset)| (bound_restored_histogram_labels(metric_name, labels), offset))
+        .collect();
+    aggregate_histogram_offsets(
+        bounded_labels
+            .iter()
+            .map(|(labels, offset)| (labels.as_str(), *offset)),
+    )
+}
+
 pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::proto::MetricFamily>) {
     let Some(runtime) = redis_runtime() else {
         return;
@@ -803,6 +881,9 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
         METRIC_REQUEST_DURATION_SECONDS,
         METRIC_FRONTEND_REQUEST_DURATION_SECONDS,
         METRIC_PRE_REQUEST_TOKENS,
+        TOOL_DEFINITION_BYTES,
+        TOOL_ARGUMENT_BYTES,
+        TOOL_RESULT_BYTES,
     ] {
         let Some(offsets) = runtime.histogram_offsets.by_metric.get(metric_name) else {
             continue;
@@ -815,6 +896,8 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
             .iter()
             .position(|family| family.name() == metric_name);
 
+        let offsets = bounded_histogram_offsets(metric_name, offsets);
+
         if let Some(idx) = family_idx {
             let family = &mut metric_families[idx];
             let mut existing_indices: HashMap<String, usize> = HashMap::new();
@@ -822,7 +905,7 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
                 existing_indices.insert(encode_metric_labels(metric), i);
             }
 
-            for (labels, offset) in offsets {
+            for (labels, offset) in &offsets {
                 if let Some(&metric_idx) = existing_indices.get(labels) {
                     let metric = &mut family.metric[metric_idx];
                     let hist = metric.histogram.mut_or_insert_default();
@@ -878,7 +961,7 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
             family.set_help("restored histogram offsets".to_string());
             family.set_field_type(prometheus::proto::MetricType::HISTOGRAM);
 
-            for (labels, offset) in offsets {
+            for (labels, offset) in &offsets {
                 let mut metric = make_metric_with_labels(labels);
                 let mut hist = prometheus::proto::Histogram::new();
                 hist.set_sample_sum(offset.sample_sum);
@@ -910,6 +993,88 @@ mod tests {
     fn legacy_token_drift_state_is_not_mixed_with_current_semantics() {
         let legacy = r#"{"local_sum":100,"upstream_sum":80,"samples":2,"last_drift_pct":25.0,"last_local":50,"last_upstream":40}"#;
         assert!(decode_current_token_drift_entry(legacy).is_none());
+    }
+
+    #[test]
+    fn restores_tool_call_counter_by_all_three_labels() {
+        let before = CALLS
+            .with_label_values(&["claude_code", "persist_unit_tool", "response"])
+            .get();
+        apply_counter_restore(
+            TOOL_CALLS_TOTAL,
+            r#"{"direction":"response","frontend":"claude_code","tool":"persist_unit_tool"}"#,
+            2.0,
+        );
+        assert_eq!(
+            CALLS
+                .with_label_values(&["claude_code", "persist_unit_tool", "response"])
+                .get()
+                - before,
+            2.0
+        );
+    }
+
+    #[test]
+    fn bounded_collisions_aggregate_before_restore() {
+        let first = HistogramOffset {
+            sample_sum: 10.0,
+            sample_count: 2,
+            cumulative_buckets: [("1.0".to_string(), 2)].into(),
+        };
+        let second = HistogramOffset {
+            sample_sum: 5.0,
+            sample_count: 1,
+            cumulative_buckets: [("1.0".to_string(), 1), ("2.0".to_string(), 1)].into(),
+        };
+        let aggregated = aggregate_histogram_offsets(
+            [("same_label", &first), ("same_label", &second)].into_iter(),
+        );
+        assert_eq!(aggregated.len(), 1);
+        let merged = &aggregated["same_label"];
+        assert_eq!(merged.sample_sum, 15.0);
+        assert_eq!(merged.sample_count, 3);
+        assert_eq!(merged.cumulative_buckets["1.0"], 3);
+        assert_eq!(merged.cumulative_buckets["2.0"], 1);
+    }
+
+    #[test]
+    fn restored_histogram_tool_labels_pass_through_the_cap() {
+        // Non-tool metrics are untouched. A tool label is remapped through the
+        // live cap, so the result is either the sanitized original or "other";
+        // both encode the same label shape and key ordering as the input.
+        assert_eq!(
+            bound_restored_histogram_labels(
+                METRIC_REQUEST_DURATION_SECONDS,
+                r#"{"frontend":"codex","tool":"irrelevant"}"#
+            ),
+            r#"{"frontend":"codex","tool":"irrelevant"}"#
+        );
+        let original = r#"{"frontend":"codex","tool":"persist_unit_tool"}"#;
+        let bounded = bound_restored_histogram_labels(TOOL_ARGUMENT_BYTES, original);
+        let labels: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&bounded).unwrap();
+        assert_eq!(labels["frontend"], "codex");
+        assert!(
+            labels["tool"] == "persist_unit_tool" || labels["tool"] == "other",
+            "unexpected remap: {}",
+            labels["tool"]
+        );
+    }
+
+    #[test]
+    fn tool_histograms_have_restore_bounds() {
+        assert_eq!(
+            histogram_bounds(TOOL_DEFINITION_BYTES),
+            Some(TOOL_SIZE_BUCKETS)
+        );
+        assert_eq!(
+            histogram_bounds(TOOL_ARGUMENT_BYTES),
+            Some(TOOL_SIZE_BUCKETS)
+        );
+        assert_eq!(
+            histogram_bounds(TOOL_RESULT_BYTES),
+            Some(TOOL_RESULT_BUCKETS)
+        );
     }
 
     #[test]
