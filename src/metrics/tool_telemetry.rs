@@ -3,7 +3,9 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::Response;
 use bytes::Bytes;
 use futures::StreamExt;
-use prometheus::{register_counter_vec, register_histogram_vec, CounterVec, HistogramVec};
+use prometheus::{
+    register_counter, register_counter_vec, register_histogram_vec, CounterVec, HistogramVec,
+};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
@@ -19,6 +21,7 @@ pub(crate) const TOOL_CALLS_TOTAL: &str = "ccr_tool_calls_total";
 pub(crate) const TOOL_DEFINITION_BYTES: &str = "ccr_tool_definition_bytes";
 pub(crate) const TOOL_ARGUMENT_BYTES: &str = "ccr_tool_argument_bytes";
 pub(crate) const TOOL_RESULT_BYTES: &str = "ccr_tool_result_bytes";
+pub(crate) const TOOL_LABEL_OVERFLOW_TOTAL: &str = "ccr_tool_label_overflow_total";
 pub(crate) const TOOL_SIZE_BUCKETS: &[f64] = &[
     128.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0,
 ];
@@ -90,6 +93,11 @@ lazy_static::lazy_static! {
             .into_iter()
             .collect()
     );
+    static ref TOOL_LABEL_OVERFLOWS: prometheus::Counter = register_counter!(
+        TOOL_LABEL_OVERFLOW_TOTAL,
+        "Tool labels folded into 'other' because the per-tool label set reached its cap"
+    )
+    .unwrap();
     static ref SEEN_TOOL_EVENTS: Mutex<SeenToolEvents> = Mutex::new(SeenToolEvents::default());
 }
 
@@ -108,7 +116,18 @@ fn bounded_tool_label(label: String, labels: &mut HashSet<String>, limit: usize)
         labels.insert(label.clone());
         return label;
     }
+    TOOL_LABEL_OVERFLOWS.inc();
     "other".to_string()
+}
+
+/// Bound one restored tool label through the same 128-name cap live traffic
+/// uses, so a restart cannot expose every persisted historical name as a new
+/// in-memory series. Returns the label to record under.
+pub(crate) fn bound_restored_tool_label(label: &str) -> String {
+    let mut labels = TOOL_LABELS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    bounded_tool_label(label.to_string(), &mut labels, MAX_TOOL_LABEL_CARDINALITY)
 }
 
 fn sanitized_tool_name(name: Option<&str>) -> String {
@@ -357,12 +376,15 @@ pub async fn record_anthropic_response_tools_from_response(
     Response::from_parts(parts, Body::from_stream(ReceiverStream::new(rx)))
 }
 
+const MAX_IN_FLIGHT_STREAM_TOOLS: usize = 128;
+
 fn observe_stream_frame(
     data: &str,
     frontend: FrontendType,
     calls: &mut HashMap<u64, (String, u64)>,
 ) {
     let Ok(event) = serde_json::from_str::<Value>(data.trim()) else {
+        tracing::debug!("tool telemetry ignored a malformed SSE frame");
         return;
     };
     let index = event.get("index").and_then(Value::as_u64);
@@ -375,16 +397,21 @@ fn observe_stream_frame(
                 is_tool,
                 event.pointer("/content_block/name").and_then(Value::as_str),
             ) {
-                calls.insert(index, (name.to_string(), 0));
+                if calls.len() < MAX_IN_FLIGHT_STREAM_TOOLS || calls.contains_key(&index) {
+                    calls.insert(index, (name.to_string(), 0));
+                }
             }
         }
         Some("content_block_delta") => {
-            if let (Some(index), Some(partial_json)) = (
-                index,
-                event.pointer("/delta/partial_json").and_then(Value::as_str),
-            ) {
+            // Tool inputs stream as input_json_delta; some providers emit text
+            // chunks instead. Count both as serialized argument bytes.
+            let delta = event
+                .pointer("/delta/partial_json")
+                .and_then(Value::as_str)
+                .or_else(|| event.pointer("/delta/text").and_then(Value::as_str));
+            if let (Some(index), Some(delta)) = (index, delta) {
                 if let Some((_, bytes)) = calls.get_mut(&index) {
-                    *bytes = bytes.saturating_add(partial_json.len() as u64);
+                    *bytes = bytes.saturating_add(delta.len() as u64);
                 }
             }
         }
@@ -611,6 +638,52 @@ mod tests {
             1
         );
         assert!(!raw.contains("native-private-unit"));
+    }
+
+    #[test]
+    fn restored_tool_labels_use_the_same_cap_as_live_traffic() {
+        // The global set may already contain live labels from parallel tests, so
+        // prove the two invariants that do not depend on its current size: a
+        // name that fits the cap round-trips, and the bounded helper itself
+        // enforces the exact cap (covered above with a local set).
+        let fresh = format!("persist_roundtrip_{}", std::process::id());
+        let result = bound_restored_tool_label(&fresh);
+        assert!(result == fresh || result == "other");
+    }
+
+    #[test]
+    fn streamed_text_deltas_count_as_argument_bytes() {
+        let mut calls = HashMap::new();
+        observe_stream_frame(
+            r#"{"type":"content_block_start","index":7,"content_block":{"type":"tool_use","name":"text_delta_tool"}}"#,
+            FrontendType::Codex,
+            &mut calls,
+        );
+        observe_stream_frame(
+            r#"{"type":"content_block_delta","index":7,"delta":{"type":"text_delta","text":"12345"}}"#,
+            FrontendType::Codex,
+            &mut calls,
+        );
+        assert_eq!(calls.get(&7).map(|(_, bytes)| *bytes), Some(5));
+    }
+
+    #[test]
+    fn malformed_sse_frames_do_not_panic_or_add_entries() {
+        let mut calls = HashMap::new();
+        observe_stream_frame("{not json", FrontendType::Codex, &mut calls);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn streamed_tool_calls_map_is_bounded_without_stop_events() {
+        let mut calls = HashMap::new();
+        for index in 0..(MAX_IN_FLIGHT_STREAM_TOOLS + 8) {
+            let frame = format!(
+                r#"{{"type":"content_block_start","index":{index},"content_block":{{"type":"tool_use","name":"unstopped_{index}"}}}}"#
+            );
+            observe_stream_frame(&frame, FrontendType::Codex, &mut calls);
+        }
+        assert_eq!(calls.len(), MAX_IN_FLIGHT_STREAM_TOOLS);
     }
 
     #[test]

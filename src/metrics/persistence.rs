@@ -20,8 +20,8 @@ use crate::routing::EwmaTracker;
 
 use super::sync_ewma_gauge;
 use super::tool_telemetry::{
-    CALLS, TOOL_ARGUMENT_BYTES, TOOL_CALLS_TOTAL, TOOL_DEFINITION_BYTES, TOOL_RESULT_BUCKETS,
-    TOOL_RESULT_BYTES, TOOL_SIZE_BUCKETS,
+    bound_restored_tool_label, CALLS, TOOL_ARGUMENT_BYTES, TOOL_CALLS_TOTAL, TOOL_DEFINITION_BYTES,
+    TOOL_RESULT_BUCKETS, TOOL_RESULT_BYTES, TOOL_SIZE_BUCKETS,
 };
 use super::{
     PreRequestAuditEntry, TokenDriftEntry, AUDIT_LOG, AUDIT_LOG_CAPACITY,
@@ -599,8 +599,9 @@ fn apply_counter_restore(metric: &'static str, encoded_labels: &str, value: f64)
                 get_label(&labels, "tool"),
                 get_label(&labels, "direction"),
             ) {
+                let tool = bound_restored_tool_label(tool);
                 CALLS
-                    .with_label_values(&[frontend, tool, direction])
+                    .with_label_values(&[frontend, &tool, direction])
                     .inc_by(value);
             }
         }
@@ -821,6 +822,26 @@ fn encode_metric_labels(metric: &prometheus::proto::Metric) -> String {
     serde_json::to_string(&labels).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Remap the `tool` label in an encoded-labels JSON through the live 128-name
+/// cap, so restored histogram offsets cannot expose every persisted historical
+/// name as a new series. Non-tool metrics and undecodable labels pass through.
+fn bound_restored_histogram_labels(metric_name: &str, encoded: &str) -> String {
+    if metric_name != TOOL_DEFINITION_BYTES
+        && metric_name != TOOL_ARGUMENT_BYTES
+        && metric_name != TOOL_RESULT_BYTES
+    {
+        return encoded.to_string();
+    }
+    let mut labels: BTreeMap<String, String> = match serde_json::from_str(encoded) {
+        Ok(map) => map,
+        Err(_) => return encoded.to_string(),
+    };
+    if let Some(tool) = labels.get("tool").cloned() {
+        labels.insert("tool".to_string(), bound_restored_tool_label(&tool));
+    }
+    serde_json::to_string(&labels).unwrap_or_else(|_| encoded.to_string())
+}
+
 pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::proto::MetricFamily>) {
     let Some(runtime) = redis_runtime() else {
         return;
@@ -853,7 +874,8 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
             }
 
             for (labels, offset) in offsets {
-                if let Some(&metric_idx) = existing_indices.get(labels) {
+                let labels = bound_restored_histogram_labels(metric_name, labels);
+                if let Some(&metric_idx) = existing_indices.get(&labels) {
                     let metric = &mut family.metric[metric_idx];
                     let hist = metric.histogram.mut_or_insert_default();
                     hist.set_sample_sum(hist.get_sample_sum() + offset.sample_sum);
@@ -883,7 +905,7 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
                         }
                     }
                 } else {
-                    let mut metric = make_metric_with_labels(labels);
+                    let mut metric = make_metric_with_labels(&labels);
                     let mut hist = prometheus::proto::Histogram::new();
                     hist.set_sample_sum(offset.sample_sum);
                     hist.set_sample_count(offset.sample_count);
@@ -909,7 +931,8 @@ pub(super) fn merge_histogram_offsets(metric_families: &mut Vec<prometheus::prot
             family.set_field_type(prometheus::proto::MetricType::HISTOGRAM);
 
             for (labels, offset) in offsets {
-                let mut metric = make_metric_with_labels(labels);
+                let labels = bound_restored_histogram_labels(metric_name, labels);
+                let mut metric = make_metric_with_labels(&labels);
                 let mut hist = prometheus::proto::Histogram::new();
                 hist.set_sample_sum(offset.sample_sum);
                 hist.set_sample_count(offset.sample_count);
@@ -958,6 +981,30 @@ mod tests {
                 .get()
                 - before,
             2.0
+        );
+    }
+
+    #[test]
+    fn restored_histogram_tool_labels_pass_through_the_cap() {
+        // Non-tool metrics are untouched. A tool label is remapped through the
+        // live cap, so the result is either the sanitized original or "other";
+        // both encode the same label shape and key ordering as the input.
+        assert_eq!(
+            bound_restored_histogram_labels(
+                METRIC_REQUEST_DURATION_SECONDS,
+                r#"{"frontend":"codex","tool":"irrelevant"}"#
+            ),
+            r#"{"frontend":"codex","tool":"irrelevant"}"#
+        );
+        let original = r#"{"frontend":"codex","tool":"persist_unit_tool"}"#;
+        let bounded = bound_restored_histogram_labels(TOOL_ARGUMENT_BYTES, original);
+        let labels: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&bounded).unwrap();
+        assert_eq!(labels["frontend"], "codex");
+        assert!(
+            labels["tool"] == "persist_unit_tool" || labels["tool"] == "other",
+            "unexpected remap: {}",
+            labels["tool"]
         );
     }
 

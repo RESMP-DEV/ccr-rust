@@ -38,14 +38,25 @@ fn json_contains_text(value: &serde_json::Value, needle: &str) -> bool {
         serde_json::Value::Array(values) => {
             values.iter().any(|value| json_contains_text(value, needle))
         }
+        // Only string values carry payload text; scanning keys too would
+        // conflate a tool literally named after the needle with leakage.
         serde_json::Value::Object(values) => values
             .iter()
-            .any(|(key, value)| key.contains(needle) || json_contains_text(value, needle)),
+            .any(|(_, value)| json_contains_text(value, needle)),
         _ => false,
     }
 }
 
 /// Helper: Create test config with mock backend
+#[test]
+fn json_contains_text_checks_values_but_not_keys() {
+    let value = serde_json::json!({
+        "secret_key_name": {"tool": "ordinary tool"}
+    });
+    assert!(!json_contains_text(&value, "secret_key_name"));
+    assert!(json_contains_text(&value, "ordinary tool"));
+}
+
 fn make_test_config(mock_url: &str) -> String {
     let config = json!({
         "Providers": [

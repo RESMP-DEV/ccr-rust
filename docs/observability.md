@@ -88,11 +88,18 @@ ccr_tool_argument_bytes{frontend,tool}
 ccr_tool_result_bytes{frontend,tool}
 ```
 
-Tool labels are sanitized, bounded to 128 distinct names per process, and new
-names beyond the cap are reported as `other`. Request-history tool events are
-deduplicated by call id so resending a conversation does not replay old counts;
-streamed and non-streamed generated tool calls are both observed. Redis restores
-the counters, histogram offsets, buckets, and parsed averages after restart.
+Tool labels are sanitized, bounded to 128 distinct names per process (including
+restored names), and new names beyond the cap are reported as `other`;
+`ccr_tool_label_overflow_total` counts every fold so the cap is observable.
+Definition and argument buckets run 128 B to 64 KiB and result buckets 1 KiB to
+512 KiB; larger observations land in the `+Inf` bucket, which keeps the tail
+visible without unbounded buckets. Request-history tool events are deduplicated
+by call id in a 8192-entry process-wide FIFO, so a normal resent conversation
+does not replay old counts, but a history whose distinct call ids exceed that
+window (or a deliberately reused id) can be counted again; ids absent from a
+block are recorded once per event. Streamed and non-streamed generated tool
+calls are both observed. Redis restores the counters, histogram offsets,
+buckets, and parsed averages after restart.
 
 ## API Endpoints
 
