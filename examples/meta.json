@@ -1,0 +1,38 @@
+{
+  "_comment": "Meta Model API (Muse). Export CCR_META_API_KEY before validate/start.",
+  "Providers": [
+    {
+      "name": "meta",
+      "api_base_url": "https://api.meta.ai/v1",
+      "api_key": "${CCR_META_API_KEY}",
+      "protocol": "anthropic",
+      "auth_header": "authorization",
+      "models": [
+        "muse-spark-1.3"
+      ],
+      "transformer": {
+        "use": [
+          [
+            "maxtoken",
+            {
+              "max_tokens": 32768,
+              "only_if_missing": true
+            }
+          ]
+        ]
+      }
+    }
+  ],
+  "Router": {
+    "default": "meta,muse-spark-1.3",
+    "tiers": [
+      "meta,muse-spark-1.3"
+    ],
+    "strictTierOrder": true
+  },
+  "Persistence": {
+    "mode": "none"
+  },
+  "HOST": "127.0.0.1",
+  "PORT": 3456
+}

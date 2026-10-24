@@ -54,6 +54,11 @@ impl Transformer for DeepSeekTransformer {
             }
         }
 
+        // Same leading-thinking repair as the dispatch-registry transformer:
+        // DeepSeek's Anthropic endpoint 400s tool-loop continuation turns that
+        // lack a thinking block (validated 2026-10-23 against captured traffic).
+        crate::transformer::inject_leading_thinking_blocks(&mut request);
+
         trace!("DeepSeek request transformed");
         Ok(request)
     }
@@ -145,6 +150,37 @@ mod tests {
         assert!(result.get("metadata").is_none());
         // other fields preserved
         assert_eq!(result["model"], "deepseek-chat");
+    }
+
+    #[test]
+    fn injects_leading_thinking_into_bare_tool_loop_turns() {
+        let transformer = DeepSeekTransformer;
+        let request = serde_json::json!({
+            "model": "deepseek-flash",
+            "messages": [
+                {"role": "user", "content": "w?"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "get_weather", "input": {"city": "Paris"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "18C"}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "It is warm."}
+                ]}
+            ]
+        });
+
+        let result = transformer.transform_request(request).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        // Tool-use turn after plain text gets a leading thinking block.
+        assert_eq!(messages[1]["content"][0]["type"], "thinking");
+        assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+        // The text answer after a tool_result turn also gets one (accepted by
+        // the endpoint, and it keeps every tool-loop continuation uniform).
+        assert_eq!(messages[3]["content"][0]["type"], "thinking");
+        assert_eq!(messages[3]["content"][1]["type"], "text");
     }
 
     #[test]

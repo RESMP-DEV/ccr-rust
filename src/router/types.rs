@@ -333,6 +333,11 @@ pub enum AnthropicContentBlock {
     Text { text: String },
     #[serde(rename = "thinking")]
     Thinking { thinking: String, signature: String },
+    // Anthropic redacted thinking: opaque provider reasoning (Muse returns
+    // these on its Messages-compatible surface). Kept faithful for
+    // Anthropic-surface clients; OpenAI-surface serialization drops it.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,

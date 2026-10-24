@@ -105,7 +105,10 @@ MACHINE_CONSUMER_DIRECT_ROUTES: dict[str, tuple[str, ...]] = {
     # one-tier request, while normal failures keep using the shared chain.
     "config.json": ("holo4,holo4-35b-a3b",),
     "config-auth.json": ("holo4,holo4-35b-a3b",),
-    "glm-workers.json": ("sensenova-vision,sensenova-6.8-flash-lite", "holo4,holo4-35b-a3b"),
+    "glm-workers.json": (
+        "sensenova-vision,sensenova-6.8-flash-lite",
+        "holo4,holo4-35b-a3b",
+    ),
 }
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
     "zai": {

@@ -13,6 +13,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed deterministic DeepSeek 400s on replayed tool-loop history. The DeepSeek
+  Anthropic endpoint rejects assistant turns that follow a `tool_result` turn,
+  or that contain `tool_use`, yet lack a leading thinking block ("The
+  `content[].thinking` in the thinking mode must be passed back"), which hit
+  ~56% of DeepSeek attempts during Z.AI window walls because cross-provider
+  spills replay GLM-served sessions with bare tool turns. The `deepseek`
+  transformer now injects a placeholder leading thinking block into exactly
+  those turns through one shared helper used by both registry construction
+  paths (validated against captured live traffic: a failing 231-message
+  request returned 200 after injection), and the governed policy wires it
+  into the shared deepseek provider.
+
+- Added Meta Model API (Muse) as the last cloud fallback tier for the main
+  interactive, auth, and worker lanes, behind MiniMax, GLM-5.3 Flash, and
+  DeepSeek and ahead of the local crawl-backs. The provider speaks the
+  native Anthropic-compatible Messages endpoint at `https://api.meta.ai/v1`
+  with Bearer authorization and the only-if-missing output-limit injection.
+  Anthropic-surface parsing now understands `redacted_thinking` content
+  blocks: previously a provider response containing one failed the typed
+  parse in the Chat Completions handler and leaked the raw Anthropic envelope
+  to OpenAI-surface clients; the blocks are now kept faithful for
+  Anthropic-surface clients and dropped from OpenAI-surface serializations,
+  matching the streaming path.
+
 - Added metadata-only agent-tool telemetry. CCR counts each observed tool call
   and result once per process, buckets serialized definition, argument, and
   result sizes for native Anthropic and OpenAI-compatible traffic, and caps the

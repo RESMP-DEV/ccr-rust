@@ -26,6 +26,7 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 - [Qwen Token Plan](qwen-token-plan.md) — credit-plan endpoint, exact model routes, off-peak timezone table, and lane selection
 - [OpenRouter](openrouter.md) — current free-inference routes, account-wide limits, agent-header caveats, and tool verification
 - [MiniMax Setup and Operations](minimax.md) — exact M3.1 model ID, mandatory transformer, custom provider names, validation, and fallback-policy runbook
+- [Meta Model API](meta-model-api.md) — Muse Spark Anthropic-compatible endpoint, key format, always-on reasoning with redacted thinking blocks, and output-limit injection
 - [Claude Code](claude_code_setup.md) — opt-in routing, provider credentials, and tool verification
 - [Codex](codex_setup.md) — Codex CLI routing
 - [OpenAI SDK](openai_sdk_setup.md) — Python/JavaScript OpenAI client setup
