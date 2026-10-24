@@ -490,6 +490,10 @@ pub async fn tool_metrics_handler() -> impl IntoResponse {
             for (encoded_labels, offset) in offsets {
                 let Ok(labels) = serde_json::from_str::<HashMap<String, String>>(encoded_labels)
                 else {
+                    tracing::warn!(
+                        labels = %encoded_labels,
+                        "Failed to parse persisted tool histogram labels, skipping"
+                    );
                     continue;
                 };
                 let (Some(frontend), Some(tool)) = (labels.get("frontend"), labels.get("tool"))
@@ -509,6 +513,8 @@ pub async fn tool_metrics_handler() -> impl IntoResponse {
 }
 
 fn set_tool_histogram(entry: &mut ToolMetrics, kind: u8, count: u64, sum: f64) {
+    // The JSON endpoint rounds bytes for display; persisted offsets and the
+    // Prometheus series retain full precision, so no information is destroyed.
     let average = if count == 0 {
         0.0
     } else {

@@ -347,6 +347,10 @@ pub async fn record_anthropic_response_tools_from_response(
                                 }
                             } else if observe_json {
                                 if json_body.len().saturating_add(bytes.len()) > MAX_TELEMETRY_JSON_BYTES {
+                                    tracing::warn!(
+                                        limit_bytes = MAX_TELEMETRY_JSON_BYTES,
+                                        "Non-streaming response exceeded telemetry limit; JSON tool metrics disabled for this response"
+                                    );
                                     observe_json = false;
                                     json_body.clear();
                                 } else {
@@ -370,6 +374,11 @@ pub async fn record_anthropic_response_tools_from_response(
             if let Ok(response) = serde_json::from_slice::<AnthropicResponse>(&json_body) {
                 record_anthropic_response_tools(&response.content, frontend);
             }
+        }
+        // A stream can end without message_stop (client disconnect or upstream
+        // truncation). Flush partially observed calls rather than dropping them.
+        for (_, (name, bytes)) in calls.drain() {
+            record_streamed_tool_call(frontend, &name, bytes);
         }
     });
 
@@ -672,6 +681,38 @@ mod tests {
         let mut calls = HashMap::new();
         observe_stream_frame("{not json", FrontendType::Codex, &mut calls);
         assert!(calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn truncated_stream_flushes_in_progress_tool_calls() {
+        let body = concat!(
+            "data: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"tool_use\",\"name\":\"truncated_flush_tool\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"12345\"}}\n\n"
+        );
+        let response = axum::http::Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(body))
+            .unwrap();
+        let observed =
+            record_anthropic_response_tools_from_response(response, FrontendType::ClaudeCode).await;
+        // Consume the response so the telemetry task observes stream end.
+        let forwarded = axum::body::to_bytes(observed.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(forwarded.ends_with(b"12345\"}}\n\n"));
+        // The response never sent message_stop; the partial call is still flushed.
+        for _ in 0..50 {
+            let response = crate::metrics::tool_metrics_handler().await.into_response();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            if String::from_utf8_lossy(&bytes).contains("truncated_flush_tool") {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("truncated stream did not flush tool telemetry");
     }
 
     #[test]

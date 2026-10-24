@@ -97,7 +97,10 @@ visible without unbounded buckets. Request-history tool events are deduplicated
 by call id in a 8192-entry process-wide FIFO, so a normal resent conversation
 does not replay old counts, but a history whose distinct call ids exceed that
 window (or a deliberately reused id) can be counted again; ids absent from a
-block are recorded once per event. Streamed and non-streamed generated tool
+block are recorded once per event. Tool names resolve only from tool_use blocks
+in the same request, so a result whose matching call is no longer present (for
+example after history truncation) records under `unknown`. Streamed and
+non-streamed generated tool
 calls are both observed. Redis restores the counters, histogram offsets,
 buckets, and parsed averages after restart.
 
