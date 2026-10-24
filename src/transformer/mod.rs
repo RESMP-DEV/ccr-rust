@@ -163,11 +163,17 @@ pub(crate) fn inject_leading_thinking_blocks(request: &mut Value) {
                     && !leads_with_thinking
                     && (prev_has_tool_result || has_tool_use)
                 {
+                    // A single space, not an empty string: the OpenAI
+                    // round-trip in `try_request_via_anthropic_protocol`
+                    // (role="tool" histories) drops empty-text thinking
+                    // blocks in both translation directions, which would
+                    // silently undo this injection before the request
+                    // reaches DeepSeek.
                     blocks.insert(
                         0,
                         serde_json::json!({
                             "type": "thinking",
-                            "thinking": "",
+                            "thinking": " ",
                             "signature": ""
                         }),
                     );
@@ -737,7 +743,7 @@ mod tests {
 
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "thinking");
-        assert_eq!(blocks[0]["thinking"], "");
+        assert_eq!(blocks[0]["thinking"], " ");
         assert_eq!(blocks[0]["signature"], "");
         assert_eq!(blocks[1]["type"], "tool_use");
     }
@@ -806,7 +812,7 @@ mod tests {
 
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "thinking");
-        assert_eq!(blocks[0]["thinking"], "");
+        assert_eq!(blocks[0]["thinking"], " ");
         assert_eq!(blocks[0]["signature"], "");
         assert_eq!(blocks[1]["type"], "tool_use");
     }
