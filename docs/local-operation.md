@@ -42,10 +42,21 @@ The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
 Main/auth sessions start at GLM-5.3 and then follow the shared chain: MiniMax
 M3.1 Flash, GLM-5.3 Flash, DeepSeek Flash, the keyed B550 Strata Coder tunnel,
-and finally the resident local27 model. Worker sessions lead with MiniMax;
-OCR retains its distinct OpenRouter primary. FlashX remains absent after its
-coding-plan trial expired. Inspect the active config and live route counters
-before claiming which backend served a request.
+and finally the resident local27 model. Worker sessions lead with the
+launcher-level Qoder lane for their first 20 daily attempts — fresh read-only
+briefs, offline read-only resumes, or scoped writes with declared
+`--owned-path` entries in an isolated worktree — then the MiniMax-first CCR
+chain; OCR retains its distinct OpenRouter primary. FlashX
+remains absent after its coding-plan trial expired. Inspect the active config,
+worker receipt, and live route counters before claiming which backend served a
+request.
+
+Judgment sub-agents are separate from these chains: launch them with Gemini 4
+Argon through the Antigravity CLI (`agy`), which has its own quota and no
+automatic fallback. Check `command -v agy`; the model, effort, timeout, and
+worktree controls are in
+[Worker inspection](worker-inspection.md#judgment-tier-sub-agents). The
+code-review bot's Gemini 3.8 Flash profile is being retired.
 
 For MiniMax, follow [MiniMax setup and operations](minimax.md). Its transformer
 must be explicitly configured, source-policy changes must also update the

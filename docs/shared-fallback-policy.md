@@ -106,7 +106,17 @@ the main and auth primary and is not a worker fallback. The scoped-worker
 primary moved to MiniMax on 2026-10-21 by user authorization: the Z.AI GLM
 plan kept exhausting its monthly utilization window, so GLM Flash moved
 behind MiniMax instead of burning that window first on every scoped-worker
-dispatch. Both GLM tiers were
+dispatch. Since 2026-10-24, the installed worker launcher adds a Qoder lane
+before this HTTP chain for fresh offline briefs and offline read-only resumes.
+Qoder requests `Qwen4-Max-Preview` (`qmodel_latest`) at maximum reasoning for
+at most 20 attempts per local day. Read-only briefs expose only Read/Glob/Grep;
+`--write-workspace` briefs with declared
+`--owned-path` entries run in an isolated git worktree with Read/Glob/Grep/
+Write/Edit, no Bash or network, and only the declared paths are applied back.
+This lane is owned by `ccr-worker-launcher`; it deliberately has no
+`Router.tiers` entry, provider definition, credential placeholder, catalog
+slug, or listener restart. A clean Qoder result bypasses CCR, while all other
+eligible paths use the governed MiniMax-first chain above. Both GLM tiers were
 cordoned 2026-10-18 after the Z.AI monthly tool quota reported 4000/4000
 used, then restored the same day by user direction once that premise was
 disproved: Z.AI meters usage without distinguishing model sessions from tool
