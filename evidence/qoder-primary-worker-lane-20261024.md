@@ -120,3 +120,29 @@ whitespace checks, then fast-forwarded main without force-push history. Receipt
 head `2485b1e41462cd28cac3dab982e75ba3ed8d3b46` records the reconciliation and
 was reinstalled; source and installed hashes still match the three launcher
 modules above.
+
+## Synthetic attempt-budget removal, 2026-11-13
+
+The user identified the 20-attempt daily counter as an unmeasured anti-pattern.
+Canonical launcher main removed it at implementation commit `7931877` and
+receipt head `14df2db`. `DEFAULT_DAILY_BUDGET`, `BudgetClaim`,
+`CCR_QODER_WORKER_BUDGET`, daily state-file claims, receipt budget fields, and
+all dispatch gating/counter calls were deleted. The explicit operator controls
+remain `--no-qoder-primary` and `CCR_DISABLE_QODER_WORKER`; local concurrency,
+task wall-clock deadlines, permission/scope boundaries, and real provider
+errors govern the lane.
+
+Launcher validation passed 50 tests plus 2 subtests, ruff, and whitespace
+checks. With the historical state file still showing 20/20 and the legacy
+environment explicitly set to `CCR_QODER_WORKER_BUDGET=0`, wrapper run
+`20261113-231228-l3ac682r` completed through `engine=qoder`,
+`served_route=qoder,qmodel_latest`, request
+`24024d4a-aa97-4469-9af8-f41dbd4a0681`, and returned
+`NO_SYNTHETIC_BUDGET_OK`. The state file's SHA-256 did not change.
+
+The global agent core now has a durable `measured_operational_limits` rule:
+synthetic numeric caps require a provider contract/quota API, recorded
+saturation threshold, hardware/resource-safety rationale, or explicit current
+user instruction. Discovering an unmeasured cap is a repair trigger. The rule
+was synchronized to Codex, ZCode, Claude, and Qoder instruction surfaces with
+`agent-instructions-sync --sync`, and parity passed.

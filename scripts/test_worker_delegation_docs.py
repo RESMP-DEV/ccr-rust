@@ -105,7 +105,7 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
                 self.assertIn("Qoder CLI `Qwen4-Max-Preview`", guide)
                 self.assertIn("`qmodel_latest`", guide)
                 self.assertIn("maximum reasoning", guide)
-                self.assertIn("bounded to 20 attempts per local day", guide)
+                self.assertIn("no synthetic attempt-count budget", guide)
                 self.assertIn("offline read-only resumes", guide)
                 self.assertIn("Read-only briefs expose only Read/Glob/Grep", guide)
                 self.assertIn("`--owned-path`", guide)
@@ -243,7 +243,7 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
         self.assertIn("qmodel_latest", changelog)
         self.assertIn("offline read-only resumes", changelog)
         self.assertIn("maximum reasoning", changelog)
-        self.assertIn("20 attempts per local day", changelog)
+        self.assertIn("no synthetic attempt-count budget", changelog)
         self.assertIn("MiniMax-first", changelog)
         self.assertIn("outside shared fallback policy", changelog)
         self.assertIn("isolated git worktree", changelog)
@@ -258,7 +258,7 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
 
         local = self.read("docs/local-operation.md")
         self.assertIn("launcher-level Qoder lane", local)
-        self.assertIn("first 20 daily attempts", local)
+        self.assertIn("every eligible task", local)
         self.assertIn("scoped writes with declared", local)
 
 

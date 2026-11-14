@@ -101,15 +101,17 @@ GLM-5.3-Flash, DeepSeek `deepseek-flash`, Meta Model API
 (`meta,muse-spark-1.3`, added 2026-10-23 as the last cloud tier on a key
 with free credits), the keyed B550 Strata Coder
 (`strata-b550,qwen3.8-flash-next-coder`), and resident
-`local27,qwen3.8-27b-mxfp4`, with no private consumer seat. GLM-5.3 stays
+`local27,qwen3.8-27b-mxfp4`, followed by the guest-owned Tetra vLLM rescue
+(`tetra-vllm,deepseek-ai/DeepSeek-V4.1-Flash`), with no private consumer
+seat. GLM-5.3 stays
 the main and auth primary and is not a worker fallback. The scoped-worker
 primary moved to MiniMax on 2026-10-21 by user authorization: the Z.AI GLM
 plan kept exhausting its monthly utilization window, so GLM Flash moved
 behind MiniMax instead of burning that window first on every scoped-worker
 dispatch. Since 2026-10-24, the installed worker launcher adds a Qoder lane
 before this HTTP chain for fresh offline briefs and offline read-only resumes.
-Qoder requests `Qwen4-Max-Preview` (`qmodel_latest`) at maximum reasoning for
-at most 20 attempts per local day. Read-only briefs expose only Read/Glob/Grep;
+Qoder requests `Qwen4-Max-Preview` (`qmodel_latest`) at maximum reasoning.
+Read-only briefs expose only Read/Glob/Grep;
 `--write-workspace` briefs with declared
 `--owned-path` entries run in an isolated git worktree with Read/Glob/Grep/
 Write/Edit, no Bash or network, and only the declared paths are applied back.
@@ -136,6 +138,15 @@ single-flight with a 16384-token context; local27 remains the final tier for
 over-long or unavailable B550 requests. MiniMax
 canonicalizes M3-family and legacy preview requests to the official
 `MiniMax-M3.1-Flash` ID.
+Tetra is loopback-only on its host and is reached through
+`com.kearm.tetra-vllm-tunnel`, which owns a persistent named-SSH forward from
+`127.0.0.1:18317` to Tetra `127.0.0.1:8317`. Its provider is single-flight,
+forces `reasoning_effort: none`, and injects a missing 32768-token output
+limit. The harmless bearer credential exists because shared providers require
+an environment-backed reference; the remote service itself remains unauthenticated
+and must stay reachable only through the SSH tunnel. Tetra is final rather than
+a normal local tier because Elliot may reclaim or stop the guest service at any
+time; CCR never manages the remote engine.
 
 Before changing or restarting a shared provider route, run:
 

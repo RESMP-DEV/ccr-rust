@@ -42,9 +42,9 @@ The main listener is `http://127.0.0.1:3456`; the governed worker, OCR, and
 authenticated listeners are on 3457, 3458, and 3459/3461 respectively.
 Main/auth sessions start at GLM-5.3 and then follow the shared chain: MiniMax
 M3.1 Flash, GLM-5.3 Flash, DeepSeek Flash, the keyed B550 Strata Coder tunnel,
-and finally the resident local27 model. Worker sessions lead with the
-launcher-level Qoder lane for their first 20 daily attempts — fresh read-only
-briefs, offline read-only resumes, or scoped writes with declared
+the resident local27 model, and finally the Tetra vLLM rescue tunnel. Worker
+sessions lead with the launcher-level Qoder lane for every eligible task —
+fresh read-only briefs, offline read-only resumes, or scoped writes with declared
 `--owned-path` entries in an isolated worktree — then the MiniMax-first CCR
 chain; OCR retains its distinct OpenRouter primary. FlashX
 remains absent after its coding-plan trial expired. Inspect the active config,
@@ -69,6 +69,7 @@ installed launcher module, and busy listeners must wait for an idle restart.
 | `~/.claude-code-router/serve*.py` | Load allowed credentials and execute governed CCR listeners |
 | `~/Library/LaunchAgents/com.kearm.ccr-rust.plist` | Start at login and restart after exit |
 | `~/Library/LaunchAgents/com.kearm.strata-b550-tunnel.plist` | Forward `127.0.0.1:18081` to the keyed B550 Strata service through the ZeroTier-first `strata_b550_tunnel.sh` fallback sequence |
+| `~/Library/LaunchAgents/com.kearm.tetra-vllm-tunnel.plist` | Forward `127.0.0.1:18317` to Elliot's loopback-only Tetra vLLM service through the named `tetra` SSH alias |
 | `~/.claude-code-router/logs/` | Service logs; inspect locally, redact before sharing |
 | `~/.local/bin/{ccr-local,claude-ccr,codex-ccr}` | Service and opt-in client launchers; `claude-ccr` is a retired stub on the maintainer's Mac |
 | `~/.codex/ccr.config.toml` | CCR provider profile for the installed Codex fork |

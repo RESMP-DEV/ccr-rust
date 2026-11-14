@@ -13,13 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added Elliot's Tetra vLLM service as the final shared rescue tier behind
+  local27. The OpenAI-compatible endpoint stays loopback-only on Tetra and is
+  reached through a KeepAlive LaunchAgent that owns the named SSH forward
+  `127.0.0.1:18317 -> tetra:127.0.0.1:8317`. The governed provider is
+  single-flight, non-thinking, and injects a missing 32768-token output limit;
+  it never claims ownership of the remote guest engine.
 - Documented the installed launcher-level Qoder primary lane for scoped
   worker delegation. Fresh offline briefs and offline read-only resumes first
-  request Qoder `Qwen4-Max-Preview` (`qmodel_latest`) with maximum reasoning,
-  bounded to 20 attempts per local day; clean results bypass CCR while every
-  other path retains the governed MiniMax-first `Router.tiers` chain. Qoder
-  deliberately remains outside shared fallback policy because it is an agent
-  CLI, not an HTTP provider.
+  request Qoder `Qwen4-Max-Preview` (`qmodel_latest`) with maximum reasoning;
+  clean results bypass CCR while every other path retains the governed
+  MiniMax-first `Router.tiers` chain. Qoder deliberately remains outside shared
+  fallback policy because it is an agent CLI, not an HTTP provider. It has no
+  synthetic attempt-count budget; local concurrency, task deadlines, explicit
+  opt-out, and real provider errors govern execution.
 - Extended the launcher-level Qoder lane to narrowly scoped writes. With
   `--write-workspace` plus one or more `--owned-path` declarations, the
   launcher runs Qoder in an isolated git worktree with Read/Glob/Grep/Write/

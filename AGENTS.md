@@ -130,15 +130,17 @@ delegable pieces into one broader interactive pass because they share a theme.
 
 On the maintainer's Mac, fresh offline worker briefs and offline read-only
 resumes first use the launcher-level Qoder lane: Qoder CLI `Qwen4-Max-Preview`
-(`qmodel_latest`) with maximum reasoning, bounded to 20 attempts per local
-day. Read-only briefs expose only Read/Glob/Grep. Briefs
+(`qmodel_latest`) with maximum reasoning. Read-only briefs expose only
+Read/Glob/Grep. Briefs
 launched with `--write-workspace` and one or more `--owned-path` declarations
 run in an isolated git worktree with Read/Glob/Grep/Write/Edit, no Bash or
 network, and only the declared paths are applied back; out-of-scope changes are
 rejected and the worker falls back to the MiniMax-first CCR chain. A clean
 Qoder result bypasses the Responses listener; network, write-workspace without
-`--owned-path`, disabled, unclean, and exhausted-budget tasks use that chain
-directly. Qoder never enters `Router.tiers` or the shared fallback policy.
+`--owned-path`, disabled, and unclean tasks use that chain directly. Qoder has
+no synthetic attempt-count budget; local concurrency, task deadlines, explicit
+opt-out, and real provider errors govern execution. Qoder never enters
+`Router.tiers` or the shared fallback policy.
 
 ### Judgment-tier sub-agents
 
