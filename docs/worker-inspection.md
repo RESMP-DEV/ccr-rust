@@ -10,11 +10,12 @@ local helper; this feature does not install or modify it.
 Decide delegation by decomposing before exploring. Enumerate the task's
 pieces, reading only what the briefs need, then send every piece that can be a
 bounded work order with its own scope, ownership, acceptance check, and finish
-line. A one-piece task is still delegated. Keep only live conversation,
-cross-piece judgment, credentials or other irreversible actions, live-service
-coordination, tools the worker infrastructure cannot reach, and final
-integration in the parent turn. Do not use size, file count, elapsed time, or
-effort already spent as the trigger.
+line. A one-piece task is still delegated. Route judgment-heavy pieces to the
+judgment tier below; send the remaining bounded pieces to a worker. Keep only
+live conversation, cross-piece judgment, credentials or other irreversible
+actions, live-service coordination, tools the worker infrastructure cannot
+reach, and final integration in the parent turn. Do not use size, file count,
+elapsed time, or effort already spent as the trigger.
 
 State the split before launching: which pieces are workers, which stay with
 the parent and under which parent-only condition, and why. Launch the workers
@@ -22,6 +23,67 @@ before doing parent work, and send independent pieces concurrently. Do not
 collapse several delegable pieces into one broader interactive pass because
 they share a theme, and do not ask permission to launch a worker the user's
 task already authorizes.
+
+On the maintainer's Mac, fresh offline worker briefs and offline read-only
+resumes first use the launcher-level Qoder lane: Qoder CLI `Qwen4-Max-Preview`
+(`qmodel_latest`) with maximum reasoning, bounded to 20 attempts per local
+day. Read-only briefs expose only Read/Glob/Grep. Briefs
+launched with `--write-workspace` and one or more `--owned-path` declarations
+run in an isolated git worktree with Read/Glob/Grep/Write/Edit, no Bash or
+network, and only the declared paths are applied back; out-of-scope changes are
+rejected and the worker falls back to the MiniMax-first CCR chain. A clean
+Qoder result bypasses the Responses listener; network, write-workspace without
+`--owned-path`, disabled, unclean, and exhausted-budget tasks use that chain
+directly. Qoder never enters `Router.tiers` or the shared fallback policy.
+
+## Judgment-tier sub-agents
+
+Gemini 4 Argon through the Antigravity CLI (`agy`) is the opt-in judgment
+tier for delegated sub-agents; it is a judgment tier, not a bulk work tier.
+Use it for bounded review, architecture and tradeoff analysis, adjudicating
+ambiguous or conflicting evidence, and independent verification. Keep
+implementation volume, mechanical edits, and broad searches on the bulk
+worker lane. It is a delegation tier, not a CCR route: it never enters
+`Router.tiers` or the shared fallback policy, so it cannot silently become a
+fallback or consume worker capacity. Pin the model and effort per call
+(`gemini-4-argon-high` for hard judgment, `-medium` for routine second
+opinions), set an explicit print timeout, and treat the structured report as
+evidence; the parent keeps the decision and final integration.
+
+The code-review bot's Gemini 3.8 Flash (`gemini-3-8-flash`) profile is being
+retired; Gemini 4 Argon is not a substitute for that bulk review volume.
+
+`agy` is a local Antigravity CLI, not a CCR helper. On the maintainer's Mac it
+is `~/.local/bin/agy`. Check availability and the current model catalog before
+use:
+
+```bash
+command -v agy
+agy models | grep '^gemini-4-argon'
+```
+
+Select the model and effort explicitly; the interactive default is not a
+policy. `gemini-4-argon-high` is for hard judgment, `-medium` for routine
+second opinions, and `-low` only for cheap classification. `--print-timeout=0`
+waits indefinitely, so pass an explicit timeout. Do not use this tier as a
+parallel bulk fleet; keep judgment calls bounded and sequential unless the
+parent explicitly authorizes a small fan-out. A bounded judgment call uses the
+same brief contract and a schema for the report:
+
+```bash
+agy --model gemini-4-argon-high --effort high \
+  --output-format json --json-schema /path/to/schema.json \
+  --print-timeout=600s --prompt "$brief"
+```
+
+Run the call in a disposable worktree when the judgment must not write; do not
+add `--dangerously-skip-permissions` for parent-driven judgment calls. That
+flag belongs to the review bot's disposable automated worktrees. The
+schema-validated `structured_output` is the report; the CLI envelope's prose is
+not a decision. On 2026-10-24, `agy models` listed
+`gemini-4-argon-{low,medium,high}` and a schema-constrained print call returned
+`SUCCESS` with the expected object in about 9 seconds. This qualifies
+availability and structured output, not judgment quality.
 
 ## Brief contract
 
@@ -90,6 +152,22 @@ BRIEF
 )
 codex-ccr-worker --cwd "$PWD" --read-only --output "$run/result.txt" \
   "$brief" \
+  >"$run/relay.jsonl" 2>"$run/launcher.stderr"
+```
+
+For a narrowly scoped write, declare every writable path; the Qoder lane runs
+in an isolated worktree and copies back only those paths:
+
+```bash
+write_brief=$(cat <<'BRIEF'
+<task>Repair the two owned files and run the named check.</task>
+<instructions>Edit only src/module.rs and src/module_test.rs; stop after the check.</instructions>
+<report>Return the diff summary, check exit code, and non-claims.</report>
+BRIEF
+)
+codex-ccr-worker --cwd "$PWD" --write-workspace \
+  --owned-path src/module.rs --owned-path src/module_test.rs \
+  --output "$run/result.txt" "$write_brief" \
   >"$run/relay.jsonl" 2>"$run/launcher.stderr"
 
 ccr-rust workers list --limit 5

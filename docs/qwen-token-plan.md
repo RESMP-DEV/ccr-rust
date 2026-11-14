@@ -132,6 +132,11 @@ console reads are entered.
 | Broad interactive Qwen flash use | Qwen plan `qwen3.8-flash`, especially in the night window; listed blended credit cost is about $0.047/M day and $0.019/M night. |
 | Judgment prompt | Choose the model first and preserve its quota; price is secondary. Keep GLM-5.3 out of worker fallback chains. |
 
+For delegated sub-agent judgment, the opt-in tier is Gemini 4 Argon through
+the Antigravity CLI, not a CCR fallback seat; see
+[Worker inspection](worker-inspection.md#judgment-tier-sub-agents). It is
+separate from this plan's routing chain.
+
 The 2026-10-18/19 noninteractive wire measurement passed both Qwen routes
 through CCR in both windows: 306 night and 96 day responses for
 `qwen3.8-flash`, and 198 night and 96 day responses for
