@@ -110,3 +110,13 @@ helpers, and vendored GP routing).
   Submodules, ignored-file preservation, symlinked paths, concurrent workspace
   mutation, and isolation-limit failures are covered by unit tests and fallback
   behavior, not by this live wrapper run.
+
+## Canonical launcher main update, 2026-11-13
+
+After PR #7 squashed the earlier guidance history into launcher `main`, the
+scoped-write/resume feature was rebased as an exact diff onto `998770f`.
+Implementation commit `8a1c8da` passed 48 tests plus 2 subtests, ruff, and
+whitespace checks, then fast-forwarded main without force-push history. Receipt
+head `2485b1e41462cd28cac3dab982e75ba3ed8d3b46` records the reconciliation and
+was reinstalled; source and installed hashes still match the three launcher
+modules above.
