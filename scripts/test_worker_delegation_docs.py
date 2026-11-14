@@ -72,6 +72,54 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
         self.assertNotIn("let the worker decompose", guide)
         self.assertNotIn("worker decides the split", guide)
 
+    def test_both_guides_define_the_judgment_tier(self) -> None:
+        for relative_path in ("AGENTS.md", "docs/worker-inspection.md"):
+            with self.subTest(relative_path=relative_path):
+                guide = self.read(relative_path)
+                self.assertIn("Judgment-tier sub-agents", guide)
+                self.assertIn("Gemini 4 Argon", guide)
+                self.assertIn("Antigravity CLI", guide)
+                self.assertIn("not a bulk work tier", guide)
+                self.assertIn("never enters `Router.tiers`", guide)
+                self.assertIn("shared fallback policy", guide)
+                self.assertIn("gemini-4-argon-high", guide)
+                self.assertIn("the parent keeps the decision", guide)
+                self.assertIn("Gemini 3.8 Flash", guide)
+                self.assertIn("code-review bot", guide)
+        self.assertEqual(
+            self.paragraph_starting_with(
+                "AGENTS.md", "Gemini 4 Argon through the Antigravity CLI"
+            ),
+            self.paragraph_starting_with(
+                "docs/worker-inspection.md",
+                "Gemini 4 Argon through the Antigravity CLI",
+            ),
+        )
+
+    def test_both_guides_define_the_qoder_primary_lane(self) -> None:
+        prefix = "On the maintainer's Mac, fresh offline worker briefs"
+        for relative_path in ("AGENTS.md", "docs/worker-inspection.md"):
+            with self.subTest(relative_path=relative_path):
+                guide = self.read(relative_path)
+                self.assertIn(prefix, guide)
+                self.assertIn("Qoder CLI `Qwen4-Max-Preview`", guide)
+                self.assertIn("`qmodel_latest`", guide)
+                self.assertIn("maximum reasoning", guide)
+                self.assertIn("bounded to 20 attempts per local day", guide)
+                self.assertIn("offline read-only resumes", guide)
+                self.assertIn("Read-only briefs expose only Read/Glob/Grep", guide)
+                self.assertIn("`--owned-path`", guide)
+                self.assertIn("isolated git worktree", guide)
+                self.assertIn("only the declared paths are applied back", guide)
+                self.assertIn("out-of-scope changes are rejected", guide)
+                self.assertIn("bypasses the Responses listener", guide)
+                self.assertIn("MiniMax-first CCR chain", guide)
+                self.assertIn("never enters `Router.tiers`", guide)
+        self.assertEqual(
+            self.paragraph_starting_with("AGENTS.md", prefix),
+            self.paragraph_starting_with("docs/worker-inspection.md", prefix),
+        )
+
     def test_worker_guide_requires_bounded_briefs_and_low_context_inspection(
         self,
     ) -> None:
@@ -180,6 +228,38 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
         self.assertNotIn("five parent tool calls/five minutes", changelog)
         self.assertIn("12-worker ceiling", changelog)
         self.assertIn("scripts/ccr_worker_usage.py", changelog)
+
+    def test_changelog_records_the_judgment_tier(self) -> None:
+        changelog = self.read("CHANGELOG.md")
+        self.assertIn("Gemini 4 Argon", changelog)
+        self.assertIn("judgment tier", changelog)
+        self.assertIn("codex-ccr-worker", changelog)
+        self.assertIn("Gemini 3.8 Flash", changelog)
+
+    def test_changelog_and_policy_docs_record_the_qoder_lane(self) -> None:
+        changelog = self.read("CHANGELOG.md")
+        self.assertIn("launcher-level Qoder primary lane", changelog)
+        self.assertIn("Qwen4-Max-Preview", changelog)
+        self.assertIn("qmodel_latest", changelog)
+        self.assertIn("offline read-only resumes", changelog)
+        self.assertIn("maximum reasoning", changelog)
+        self.assertIn("20 attempts per local day", changelog)
+        self.assertIn("MiniMax-first", changelog)
+        self.assertIn("outside shared fallback policy", changelog)
+        self.assertIn("isolated git worktree", changelog)
+        self.assertIn("`--owned-path`", changelog)
+
+        policy = self.read("docs/shared-fallback-policy.md")
+        self.assertIn("Qoder lane before this HTTP chain", policy)
+        self.assertIn("no `Router.tiers` entry", policy)
+        self.assertIn("owned by `ccr-worker-launcher`", policy)
+        self.assertIn("isolated git worktree", policy)
+        self.assertIn("only the declared paths are applied back", policy)
+
+        local = self.read("docs/local-operation.md")
+        self.assertIn("launcher-level Qoder lane", local)
+        self.assertIn("first 20 daily attempts", local)
+        self.assertIn("scoped writes with declared", local)
 
 
 if __name__ == "__main__":

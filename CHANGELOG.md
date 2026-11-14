@@ -13,6 +13,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Documented the installed launcher-level Qoder primary lane for scoped
+  worker delegation. Fresh offline briefs and offline read-only resumes first
+  request Qoder `Qwen4-Max-Preview` (`qmodel_latest`) with maximum reasoning,
+  bounded to 20 attempts per local day; clean results bypass CCR while every
+  other path retains the governed MiniMax-first `Router.tiers` chain. Qoder
+  deliberately remains outside shared fallback policy because it is an agent
+  CLI, not an HTTP provider.
+- Extended the launcher-level Qoder lane to narrowly scoped writes. With
+  `--write-workspace` plus one or more `--owned-path` declarations, the
+  launcher runs Qoder in an isolated git worktree with Read/Glob/Grep/Write/
+  Edit, no Bash or network, and copies only the declared paths back;
+  out-of-scope or deleted paths are rejected and the worker falls back to the
+  MiniMax-first chain. Read-only briefs keep the original Read/Glob/Grep
+  contract, and parent Qoder Agent SDK environment variables are sanitized
+  before the CLI starts.
+- Documented the opt-in judgment tier for delegated sub-agents: Gemini 4 Argon
+  through the Antigravity CLI (`agy`), separate from the bulk
+  `codex-ccr-worker` lane. The tier sits outside `Router.tiers` and the shared
+  fallback policy, is pinned per call by model and effort, and leaves the
+  decision with the parent; it is not a bulk work tier. The code-review bot's
+  Gemini 3.8 Flash (`gemini-3-8-flash`) profile is being retired, and Gemini 4
+  Argon is not a substitute for that review volume. Availability and
+  schema-constrained output were live-qualified on 2026-10-24.
+
+- Fixed long-context turns failing every tier when the primary is rate-limited.
+  A provider's `maxInflightTokens` budget was applied as a hard per-request
+  ceiling, so a request larger than the whole budget (for example a 675K-token
+  Codex turn against MiniMax's 250K collision budget) was refused locally even
+  when the route was idle; with Z.AI's 5-hour window exhausted and the smaller
+  tiers unavailable, every sweep failed and the client got a 503 that ended the
+  turn. Admission now lets an oversized request run alone when nothing is
+  reserved on that route, and the solo reservation blocks concurrent acquires
+  until it completes. Live-qualified on the main listener: a 308,594-token
+  request was admitted on the first MiniMax attempt and returned 200 in 27s.
+
+- Removed MiniMax's static prefill-token budget and stopped cross-tier
+  rate-limit pacing from stalling deferred work. The 250K `maxInflightTokens`
+  budget (briefly 1.2M) assumed deferred large prefills could fall into a
+  healthy chain; while Z.AI's 5-hour window was exhausted, deferral became
+  queueing and 400-560K Codex turns serialized MiniMax behind one request.
+  The governed MiniMax provider now has no token budget: count AIMD bounds
+  request concurrency, and a sweep with any admission-deferred route uses the
+  jittered base cooldown instead of another tier's rate-limit window.
+  Rate-limited tiers keep their own per-route backoff.
+
 - Fixed deterministic DeepSeek 400s on replayed tool-loop history. The DeepSeek
   Anthropic endpoint rejects assistant turns that follow a `tool_result` turn,
   or that contain `tool_use`, yet lack a leading thinking block ("The
