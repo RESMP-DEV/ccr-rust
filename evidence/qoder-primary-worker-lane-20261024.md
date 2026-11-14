@@ -139,6 +139,8 @@ environment explicitly set to `CCR_QODER_WORKER_BUDGET=0`, wrapper run
 `served_route=qoder,qmodel_latest`, request
 `24024d4a-aa97-4469-9af8-f41dbd4a0681`, and returned
 `NO_SYNTHETIC_BUDGET_OK`. The state file's SHA-256 did not change.
+The obsolete generated `~/.cache/ccr-worker-qoder/` directory was removed after
+that proof; historical counters survive only in dated receipts and evidence.
 
 The global agent core now has a durable `measured_operational_limits` rule:
 synthetic numeric caps require a provider contract/quota API, recorded
