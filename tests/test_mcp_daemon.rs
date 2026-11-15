@@ -326,7 +326,14 @@ async fn test_memory_open_related_nodes() {
     )
     .await;
     assert_eq!(null, one);
-    for bad in [json!(-1), json!(1.5), json!("3")] {
+    // an integral float is a valid JSON Schema integer; repeated names change nothing
+    let float_two = call(
+        "open_related_nodes",
+        json!({ "names": ["a", "a", "missing"], "depth": 2.0 }),
+    )
+    .await;
+    assert_eq!(names(&float_two), ["a", "b", "c"]);
+    for bad in [json!(-1), json!(1.5), json!(-2.0), json!("3")] {
         let err = memory
             .call(
                 "open_related_nodes",

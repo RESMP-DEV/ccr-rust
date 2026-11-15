@@ -232,7 +232,7 @@ impl NativeTool for MemoryTool {
                 "type": "object",
                 "properties": {
                     "names": { "type": "array", "items": { "type": "string" } },
-                    "depth": { "type": "integer", "minimum": 0, "description": "Maximum number of hops to follow (default 1)" }
+                    "depth": { "type": ["integer", "null"], "minimum": 0, "description": "Maximum number of hops to follow (default 1)" }
                 },
                 "required": ["names"]
             }),
@@ -498,12 +498,17 @@ impl MemoryTool {
         let names: Vec<String> =
             serde_json::from_value(args.get("names").cloned().context("missing names")?)?;
         // Omitted or null means one hop; anything else must be a non-negative
-        // integer, matching the advertised schema, so a bad value is an error
+        // integer (2.0 counts, as in JSON Schema), so a bad value is an error
         // instead of a silent one-hop answer.
         let depth = match args.get("depth") {
             None | Some(Value::Null) => 1,
             Some(v) => v
                 .as_u64()
+                .or_else(|| {
+                    v.as_f64()
+                        .filter(|f| f.fract() == 0.0 && *f >= 0.0)
+                        .map(|f| f as u64)
+                })
                 .map(|d| usize::try_from(d).unwrap_or(usize::MAX))
                 .with_context(|| format!("depth must be a non-negative integer, got {v}"))?,
         };
@@ -521,9 +526,11 @@ impl MemoryTool {
             let (from, to) = (EntityId::new(r.from.as_str()), EntityId::new(r.to.as_str()));
             let _ = store.add_relationship(Relationship::new(from, to, r.relation_type.as_str()));
         }
-        let reached: HashSet<String> = names
-            .iter()
-            .filter_map(|n| store.bfs(&EntityId::new(n.as_str()), depth).ok())
+        // One traversal per distinct start name: repeats add nothing.
+        let starts: HashSet<&str> = names.iter().map(String::as_str).collect();
+        let reached: HashSet<String> = starts
+            .into_iter()
+            .filter_map(|n| store.bfs(&EntityId::new(n), depth).ok())
             .flatten()
             .map(|id| id.0)
             .collect();
