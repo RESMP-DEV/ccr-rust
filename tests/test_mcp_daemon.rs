@@ -311,6 +311,23 @@ async fn test_memory_open_related_nodes() {
     )
     .await;
     assert_eq!(names(&two), ["a", "b", "c"]);
+
+    // null is the same as omitted; malformed depth is rejected, not read as one hop
+    let null = call(
+        "open_related_nodes",
+        json!({ "names": ["a"], "depth": null }),
+    )
+    .await;
+    assert_eq!(null, one);
+    for bad in [json!(-1), json!(1.5), json!("3")] {
+        let err = memory
+            .call(
+                "open_related_nodes",
+                json!({ "names": ["a"], "depth": bad }),
+            )
+            .await;
+        assert!(err.is_err(), "depth {bad} should be rejected");
+    }
 }
 
 #[tokio::test]

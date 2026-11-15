@@ -497,10 +497,16 @@ impl MemoryTool {
 
         let names: Vec<String> =
             serde_json::from_value(args.get("names").cloned().context("missing names")?)?;
-        let depth = args
-            .get("depth")
-            .and_then(Value::as_u64)
-            .map_or(1, |d| usize::try_from(d).unwrap_or(usize::MAX));
+        // Omitted or null means one hop; anything else must be a non-negative
+        // integer, matching the advertised schema, so a bad value is an error
+        // instead of a silent one-hop answer.
+        let depth = match args.get("depth") {
+            None | Some(Value::Null) => 1,
+            Some(v) => v
+                .as_u64()
+                .map(|d| usize::try_from(d).unwrap_or(usize::MAX))
+                .with_context(|| format!("depth must be a non-negative integer, got {v}"))?,
+        };
 
         let graph = self.graph.read();
         // Index the graph for traversal. Relations whose endpoints are not
