@@ -178,6 +178,13 @@ async fn test_initialize_and_tools_list() {
     );
     assert!(names.contains(&"query-docs"), "missing context7 query");
 
+    // open_related_nodes is advertised exactly when the memory-graph feature is on
+    assert_eq!(
+        names.contains(&"open_related_nodes"),
+        cfg!(feature = "memory-graph"),
+        "open_related_nodes advertisement does not match the memory-graph feature"
+    );
+
     // memory tools are always present
     assert!(
         names.contains(&"create_entities"),
