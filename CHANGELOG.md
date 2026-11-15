@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added an opt-in `memory-graph` cargo feature that exposes an
+  `open_related_nodes` memory tool: it opens the named entities plus everything
+  reachable from them within `depth` hops (default 1) along relation
+  direction, using the `mattbusel-mem-graph` crate (MIT) for the indexed BFS.
+  With `depth: 0` it returns exactly what `open_nodes` returns. Default builds,
+  the existing memory tools, and the persisted `memory.json` format are
+  unchanged.
+
 - Fixed deterministic DeepSeek 400s on replayed tool-loop history. The DeepSeek
   Anthropic endpoint rejects assistant turns that follow a `tool_result` turn,
   or that contain `tool_use`, yet lack a leading thinking block ("The

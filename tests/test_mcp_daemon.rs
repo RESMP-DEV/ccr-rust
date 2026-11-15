@@ -261,6 +261,58 @@ async fn test_memory_crud() {
     assert!(!search_result["entities"].as_array().unwrap().is_empty());
 }
 
+#[cfg(feature = "memory-graph")]
+#[tokio::test]
+async fn test_memory_open_related_nodes() {
+    use ccr_rust::mcp::tools::{memory::MemoryTool, NativeTool};
+
+    let memory = MemoryTool::new(None);
+    let call = |name: &'static str, args: Value| {
+        let memory = &memory;
+        async move {
+            let result = memory.call(name, args).await.unwrap();
+            assert!(!result.is_error);
+            serde_json::from_str::<Value>(&result.content[0].text).unwrap()
+        }
+    };
+    let entity = |name: &str| json!({ "name": name, "entityType": "node", "observations": [] });
+    let relation = |from: &str, to: &str| json!({ "from": from, "to": to, "relationType": "r" });
+    call(
+        "create_entities",
+        json!({ "entities": [entity("a"), entity("b"), entity("c"), entity("d")] }),
+    )
+    .await;
+    call(
+        "create_relations",
+        json!({ "relations": [relation("a", "b"), relation("b", "c"), relation("d", "a"), relation("a", "ghost")] }),
+    )
+    .await;
+    let names = |graph: &Value| -> Vec<String> {
+        graph["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // depth 0 matches open_nodes exactly, dangling relation included
+    let open = call("open_nodes", json!({ "names": ["a"] })).await;
+    let zero = call("open_related_nodes", json!({ "names": ["a"], "depth": 0 })).await;
+    assert_eq!(zero, open);
+    assert_eq!(zero["relations"].as_array().unwrap().len(), 3);
+
+    // default depth is one hop; only outgoing relations are followed
+    let one = call("open_related_nodes", json!({ "names": ["a"] })).await;
+    assert_eq!(names(&one), ["a", "b"]);
+    let two = call(
+        "open_related_nodes",
+        json!({ "names": ["a", "missing"], "depth": 2 }),
+    )
+    .await;
+    assert_eq!(names(&two), ["a", "b", "c"]);
+}
+
 #[tokio::test]
 async fn test_health_endpoint() {
     let port = 13459;

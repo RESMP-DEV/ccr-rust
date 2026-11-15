@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#[cfg(feature = "memory-graph")]
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -70,7 +72,8 @@ impl MemoryTool {
 #[async_trait]
 impl NativeTool for MemoryTool {
     fn tools(&self) -> Vec<McpTool> {
-        vec![
+        #[allow(unused_mut)]
+        let mut tools = vec![
             tool_def(
                 "create_entities",
                 "Create multiple new entities in the knowledge graph",
@@ -220,7 +223,21 @@ impl NativeTool for MemoryTool {
                     "required": ["names"]
                 }),
             ),
-        ]
+        ];
+        #[cfg(feature = "memory-graph")]
+        tools.push(tool_def(
+            "open_related_nodes",
+            "Open specific nodes plus every node reachable from them by following relations (from -> to) within a number of hops",
+            json!({
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "depth": { "type": "integer", "minimum": 0, "description": "Maximum number of hops to follow (default 1)" }
+                },
+                "required": ["names"]
+            }),
+        ));
+        tools
     }
 
     async fn call(&self, name: &str, arguments: Value) -> Result<ToolResult> {
@@ -235,6 +252,8 @@ impl NativeTool for MemoryTool {
             "read_graph" => self.read_graph(),
             "search_nodes" => self.search_nodes(arguments),
             "open_nodes" => self.open_nodes(arguments),
+            #[cfg(feature = "memory-graph")]
+            "open_related_nodes" => self.open_related_nodes(arguments),
             _ => Ok(ToolResult::error(format!("unknown memory tool: {name}"))),
         }
     }
@@ -461,6 +480,57 @@ impl MemoryTool {
             .filter(|r| {
                 matched_names.contains(&r.from.as_str()) || matched_names.contains(&r.to.as_str())
             })
+            .collect();
+
+        Ok(ToolResult::text(serde_json::to_string(&json!({
+            "entities": matched_entities,
+            "relations": matched_relations,
+        }))?))
+    }
+
+    /// Like `open_nodes`, but also returns every entity reachable from the
+    /// named ones within `depth` hops along relation direction (`from` -> `to`).
+    /// With `depth: 0` the result is identical to `open_nodes`.
+    #[cfg(feature = "memory-graph")]
+    fn open_related_nodes(&self, args: Value) -> Result<ToolResult> {
+        use mem_graph::{EntityId, GraphStore, Relationship};
+
+        let names: Vec<String> =
+            serde_json::from_value(args.get("names").cloned().context("missing names")?)?;
+        let depth = args
+            .get("depth")
+            .and_then(Value::as_u64)
+            .map_or(1, |d| usize::try_from(d).unwrap_or(usize::MAX));
+
+        let graph = self.graph.read();
+        // Index the graph for traversal. Relations whose endpoints are not
+        // entities cannot be followed, so the store rejects them; they are
+        // still reported below, exactly as open_nodes reports them.
+        let mut store = GraphStore::new();
+        for e in &graph.entities {
+            let id = EntityId::new(e.name.as_str());
+            let _ = store.add_entity(mem_graph::Entity::new(id, e.entity_type.as_str()));
+        }
+        for r in &graph.relations {
+            let (from, to) = (EntityId::new(r.from.as_str()), EntityId::new(r.to.as_str()));
+            let _ = store.add_relationship(Relationship::new(from, to, r.relation_type.as_str()));
+        }
+        let reached: HashSet<String> = names
+            .iter()
+            .filter_map(|n| store.bfs(&EntityId::new(n.as_str()), depth).ok())
+            .flatten()
+            .map(|id| id.0)
+            .collect();
+
+        let matched_entities: Vec<&Entity> = graph
+            .entities
+            .iter()
+            .filter(|e| reached.contains(&e.name))
+            .collect();
+        let matched_relations: Vec<&Relation> = graph
+            .relations
+            .iter()
+            .filter(|r| reached.contains(&r.from) || reached.contains(&r.to))
             .collect();
 
         Ok(ToolResult::text(serde_json::to_string(&json!({

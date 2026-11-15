@@ -487,6 +487,7 @@ dependencies = [
  "jsonschema",
  "lazy_static",
  "log",
+ "mattbusel-mem-graph",
  "num_cpus",
  "once_cell",
  "openssl",
@@ -2306,6 +2307,19 @@ checksum = "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08"
 dependencies = [
  "autocfg",
  "rawpointer",
+]
+
+[[package]]
+name = "mattbusel-mem-graph"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14af5c33c848c93e89ccc5e6ed4d9275f046332c77bc6583737f039aeb448865"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]
