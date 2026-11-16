@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added a visible parent decomposition ledger (`Workers:`, `Parent-only:`,
+  `Terminal budget:`) to the repository and worker guides, and pinned the
+  launcher-level Qoder lane identity as DeepSeek V4.1 Flash
+  (`DeepSeek-Flash`, internal key `dfmodel`). Mixed tasks keep live web or
+  account access with the parent or a network-authorized worker, then send
+  offline digestion and scoped patches to Qoder while the parent runs
+  acceptance.
+- Extended `ccr-worker-usage` to report Qoder-lane adoption in text and JSON:
+  a recorded `qoder_primary_attempt` counts as attempted, otherwise a recorded
+  `qoder_bypass_reason` is counted by reason, and receipts with neither field
+  count as `not_recorded`.
+
 - Fixed deterministic DeepSeek 400s on replayed tool-loop history. The DeepSeek
   Anthropic endpoint rejects assistant turns that follow a `tool_result` turn,
   or that contain `tool_use`, yet lack a leading thinking block ("The

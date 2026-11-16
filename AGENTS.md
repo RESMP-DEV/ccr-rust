@@ -121,6 +121,29 @@ coordination, tools the worker infrastructure cannot reach, and final
 integration with the parent. Size, file count, elapsed time, and effort
 already spent are not the criterion.
 
+Before the first parent-side read, search, patch, build, or test whose purpose
+is to make progress on the work itself, write a visible decomposition ledger
+with three lines: `Workers:` every bounded brief, owned surface, acceptance
+evidence, and finish line; `Parent-only:` the narrow live-conversation,
+credential, irreversible, cross-piece judgment, live-service, or
+final-acceptance work retained here; `Terminal budget:` the parent terminal
+actions reserved for constructing briefs, launching workers, inspecting their
+receipts, and performing the named parent-only work. The ledger is a work
+contract, not narration: every parent terminal action must map to
+`Parent-only` or to launching and accepting a worker. Do not set an arbitrary
+numeric parent-tool cap; the ledger is the control.
+
+Delegation starts with the launcher-level Qoder lane for every eligible fresh
+read-only worker, offline read-only resume, and narrowly scoped write. It
+requests Qoder `DeepSeek-Flash` for DeepSeek V4.1 Flash (internal key
+`dfmodel`) with maximum reasoning. Scoped writes must name exact task-owned
+paths, an explicit finish line, and acceptance evidence; Qoder never writes
+production configuration, model routing, credentials, git remotes, or live
+services, never performs destructive cleanup, and runs with no Bash or
+network. A clean, in-scope Qoder result bypasses the Responses listener;
+disabled, unclean, network, and out-of-scope-change tasks use the governed
+MiniMax-first chain.
+
 State the split before launching: which pieces are workers, which remain with
 the parent, and under which condition. Launch the workers before doing parent
 work, send independent pieces concurrently, and do not ask permission to
@@ -169,7 +192,10 @@ verdict as the parent's finding.
 Use `ccr-rust workers list --limit 5` and `ccr-rust workers show RUN --json`
 to inspect native `codex-ccr-worker` artifacts without loading full JSONL
 transcripts, then summarize adoption with `ccr-worker-usage --days 7`
-(source: `scripts/ccr_worker_usage.py`). Keep the launcher's verbose
+(source: `scripts/ccr_worker_usage.py`). Its Qoder-lane breakdown counts a
+recorded `qoder_primary_attempt` as attempted, buckets a recorded
+`qoder_bypass_reason` by reason, and counts a receipt with neither as
+`not_recorded`. Keep the launcher's verbose
 stdout/stderr redirected to private files. Select an exact run ID or receipt
 path; `latest` can change when other workers start. For progress, use
 `workers events RUN --after CURSOR --limit 10 --json` and retain

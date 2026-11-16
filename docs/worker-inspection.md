@@ -16,6 +16,29 @@ coordination, tools the worker infrastructure cannot reach, and final
 integration in the parent turn. Do not use size, file count, elapsed time, or
 effort already spent as the trigger.
 
+Before the first parent-side read, search, patch, build, or test whose purpose
+is to make progress on the work itself, write a visible decomposition ledger
+with three lines: `Workers:` every bounded brief, owned surface, acceptance
+evidence, and finish line; `Parent-only:` the narrow live-conversation,
+credential, irreversible, cross-piece judgment, live-service, or
+final-acceptance work retained here; `Terminal budget:` the parent terminal
+actions reserved for constructing briefs, launching workers, inspecting their
+receipts, and performing the named parent-only work. The ledger is a work
+contract, not narration: every parent terminal action must map to
+`Parent-only` or to launching and accepting a worker. Do not set an arbitrary
+numeric parent-tool cap; the ledger is the control.
+
+Delegation starts with the launcher-level Qoder lane for every eligible fresh
+read-only worker, offline read-only resume, and narrowly scoped write. It
+requests Qoder `DeepSeek-Flash` for DeepSeek V4.1 Flash (internal key
+`dfmodel`) with maximum reasoning. Scoped writes must name exact task-owned
+paths, an explicit finish line, and acceptance evidence; Qoder never writes
+production configuration, model routing, credentials, git remotes, or live
+services, never performs destructive cleanup, and runs with no Bash or
+network. A clean, in-scope Qoder result bypasses the Responses listener;
+disabled, unclean, network, and out-of-scope-change tasks use the governed
+MiniMax-first chain.
+
 State the split before launching: which pieces are workers, which stay with
 the parent and under which parent-only condition, and why. Launch the workers
 before doing parent work, and send independent pieces concurrently. Do not
@@ -133,6 +156,11 @@ profiles, permission choices, requested routes, and elapsed-time totals.
 receipt directories are unavailable. Listener counters are in-memory and reset
 on restart, while receipt history remains local and private. A requested route
 is still not proof of the served upstream route.
+
+The summary also reports Qoder-lane adoption from receipt fields: a recorded
+`qoder_primary_attempt` counts as attempted, otherwise a recorded
+`qoder_bypass_reason` is bucketed by that reason, and a receipt with neither
+counts as `not_recorded`.
 
 ## Commands and output budgets
 

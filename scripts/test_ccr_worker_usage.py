@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import unittest
+from contextlib import redirect_stdout
 from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -137,6 +139,85 @@ ccr_requests_total{tier="zai"} 4
         self.assertEqual(result.requested_routes, {"zai,glm-5.3-flash": 2})
         self.assertEqual((result.read_only, result.network_allowed), (2, 1))
         self.assertEqual(result.elapsed_seconds_total, 15.0)
+
+    def test_run_summary_aggregates_qoder_lane_outcomes(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            today = date.today().strftime("%Y%m%d")
+            statuses = [
+                (
+                    "attempted",
+                    {"outcome": "completed", "qoder_primary_attempt": True},
+                ),
+                (
+                    "attempted-false",
+                    {"outcome": "completed", "qoder_primary_attempt": False},
+                ),
+                (
+                    "attempted-precedence",
+                    {
+                        "outcome": "completed",
+                        "qoder_primary_attempt": True,
+                        "qoder_bypass_reason": "network",
+                    },
+                ),
+                (
+                    "bypass-network",
+                    {"outcome": "completed", "qoder_bypass_reason": "network"},
+                ),
+                (
+                    "bypass-disabled",
+                    {"outcome": "completed", "qoder_bypass_reason": "disabled"},
+                ),
+                ("not-recorded", {"outcome": "completed"}),
+                ("unreadable", ["not", "an", "object"]),
+            ]
+            for index, (name, status) in enumerate(statuses):
+                run_dir = root / f"{today}-{index:06d}-{name}"
+                run_dir.mkdir()
+                (run_dir / "status.json").write_text(
+                    json.dumps(status), encoding="utf-8"
+                )
+            (root / f"{today}-900000-orphan").mkdir()
+
+            result = usage.summarize_runs(root, days=1)
+
+        self.assertEqual(
+            result.qoder_lane,
+            {
+                "attempted": 2,
+                "disabled": 1,
+                "network": 1,
+                "not_recorded": 2,
+            },
+        )
+
+    def test_text_and_json_rendering_include_qoder_lane(self) -> None:
+        runs = usage.RunUsage(
+            days=1,
+            runs=2,
+            outcomes={"completed": 2},
+            timeout_profiles={},
+            read_only=2,
+            network_allowed=0,
+            requested_routes={},
+            elapsed_seconds_total=1.0,
+            qoder_lane={"attempted": 1, "not_recorded": 1},
+        )
+        json_output = io.StringIO()
+        with redirect_stdout(json_output):
+            usage.print_usage(None, runs, json_output=True)
+        self.assertEqual(
+            json.loads(json_output.getvalue())["runs"]["qoder_lane"],
+            {"attempted": 1, "not_recorded": 1},
+        )
+        text_output = io.StringIO()
+        with redirect_stdout(text_output):
+            usage.print_usage(None, runs, json_output=False)
+        self.assertIn(
+            'qoder_lane: {"attempted": 1, "not_recorded": 1}',
+            text_output.getvalue(),
+        )
 
     def test_missing_runs_directory_is_not_reported_as_zero_runs(self) -> None:
         with (
