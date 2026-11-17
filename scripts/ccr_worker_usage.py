@@ -46,6 +46,7 @@ class RunUsage:
     network_allowed: int
     requested_routes: dict[str, int]
     elapsed_seconds_total: float
+    qoder_lane: dict[str, int]
 
 
 def parse_listener_metrics(metrics: str, url: str) -> ListenerUsage:
@@ -116,6 +117,7 @@ def summarize_runs(runs_dir: Path, days: int) -> RunUsage:
     outcomes: Counter[str] = Counter()
     profiles: Counter[str] = Counter()
     routes: Counter[str] = Counter()
+    qoder_lane: Counter[str] = Counter()
     read_only = 0
     network_allowed = 0
     elapsed_total = 0.0
@@ -141,6 +143,12 @@ def summarize_runs(runs_dir: Path, days: int) -> RunUsage:
         outcomes[str(status.get("outcome") or "receipt_pending")] += 1
         profiles[str(status.get("timeout_profile") or "unspecified")] += 1
         routes[str(status.get("requested_route") or "unassigned")] += 1
+        if status.get("qoder_primary_attempt"):
+            qoder_lane["attempted"] += 1
+        elif status.get("qoder_bypass_reason"):
+            qoder_lane[str(status["qoder_bypass_reason"])] += 1
+        else:
+            qoder_lane["not_recorded"] += 1
         read_only += int(bool(status.get("read_only")))
         network_allowed += int(bool(status.get("network_allowed")))
         elapsed_total += elapsed
@@ -154,6 +162,7 @@ def summarize_runs(runs_dir: Path, days: int) -> RunUsage:
         network_allowed=network_allowed,
         requested_routes=dict(sorted(routes.items())),
         elapsed_seconds_total=round(elapsed_total, 3),
+        qoder_lane=dict(sorted(qoder_lane.items())),
     )
 
 
@@ -182,6 +191,7 @@ def print_usage(
         print(
             f"  requested_routes: {json.dumps(runs.requested_routes, sort_keys=True)}"
         )
+        print(f"  qoder_lane: {json.dumps(runs.qoder_lane, sort_keys=True)}")
         print(
             "  permissions: "
             f"read_only={runs.read_only}, network_allowed={runs.network_allowed}"

@@ -173,6 +173,78 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
                     self.paragraph_starting_with("docs/worker-inspection.md", prefix),
                 )
 
+    def test_both_guides_define_the_parent_decomposition_ledger(self) -> None:
+        prefix = "Before the first parent-side read"
+        for relative_path in ("AGENTS.md", "docs/worker-inspection.md"):
+            with self.subTest(relative_path=relative_path):
+                guide = self.read(relative_path)
+                self.assertIn("decomposition ledger", guide)
+                self.assertIn("`Workers:`", guide)
+                self.assertIn("`Parent-only:`", guide)
+                self.assertIn("`Terminal budget:`", guide)
+                self.assertIn("The ledger is a work contract, not narration", guide)
+                self.assertIn("Do not set an arbitrary numeric parent-tool cap", guide)
+                self.assertLess(guide.index("`Workers:`"), guide.index("`Parent-only:`"))
+                self.assertLess(
+                    guide.index("`Parent-only:`"), guide.index("`Terminal budget:`")
+                )
+                self.assertLess(
+                    guide.index("decomposition ledger"),
+                    guide.index("State the split before launching"),
+                )
+        self.assertEqual(
+            self.paragraph_starting_with("AGENTS.md", prefix),
+            self.paragraph_starting_with("docs/worker-inspection.md", prefix),
+        )
+
+    def test_both_guides_pin_the_current_qoder_lane_identity(self) -> None:
+        prefix = "Delegation starts with the launcher-level Qoder lane"
+        for relative_path in ("AGENTS.md", "docs/worker-inspection.md"):
+            with self.subTest(relative_path=relative_path):
+                guide = self.read(relative_path)
+                self.assertIn("`DeepSeek-Flash`", guide)
+                self.assertIn("DeepSeek V4.1 Flash", guide)
+                self.assertIn("`dfmodel`", guide)
+                self.assertIn("maximum reasoning", guide)
+                self.assertIn("no Bash or network", guide)
+                self.assertIn("bypasses the Responses listener", guide)
+                self.assertIn("MiniMax-first chain", guide)
+                self.assertNotIn("Qwen4", guide)
+                self.assertNotIn("qmodel", guide)
+        self.assertEqual(
+            self.paragraph_starting_with("AGENTS.md", prefix),
+            self.paragraph_starting_with("docs/worker-inspection.md", prefix),
+        )
+
+    def test_shared_fallback_guide_splits_mixed_tasks_for_the_qoder_lane(self) -> None:
+        guide = self.read("docs/shared-fallback-policy.md")
+        self.assertIn("Mixed tasks keep the launcher-level Qoder lane usable", guide)
+        self.assertIn("live web or account access", guide)
+        self.assertIn("separately authorized network worker", guide)
+        self.assertIn("offline Qoder worker", guide)
+        self.assertIn("enumerate the exact files first", guide)
+        self.assertIn("run acceptance in the parent", guide)
+        self.assertIn("network-authorized or broad-write worker", guide)
+        self.assertIn("changes no provider policy", guide)
+        self.assertIn("never enters `Router.tiers` or the shared fallback chain", guide)
+        self.assertIn("`DeepSeek-Flash`", guide)
+        self.assertIn("`dfmodel`", guide)
+        self.assertNotIn("Qwen4", guide)
+        self.assertNotIn("qmodel", guide)
+
+    def test_usage_documentation_and_helper_aggregate_the_qoder_lane(self) -> None:
+        for relative_path in (
+            "AGENTS.md",
+            "docs/worker-inspection.md",
+            "scripts/ccr_worker_usage.py",
+        ):
+            with self.subTest(relative_path=relative_path):
+                text = self.read(relative_path)
+                self.assertIn("qoder_primary_attempt", text)
+                self.assertIn("qoder_bypass_reason", text)
+                self.assertIn("not_recorded", text)
+        self.assertIn("qoder_lane", self.read("scripts/ccr_worker_usage.py"))
+
     def test_changelog_records_the_operator_workflow_change(self) -> None:
         changelog = self.read("CHANGELOG.md")
         self.assertIn("decomposition first", changelog)
@@ -180,6 +252,12 @@ class WorkerDelegationDocumentationTests(unittest.TestCase):
         self.assertNotIn("five parent tool calls/five minutes", changelog)
         self.assertIn("12-worker ceiling", changelog)
         self.assertIn("scripts/ccr_worker_usage.py", changelog)
+        self.assertIn("decomposition ledger", changelog)
+        self.assertIn("`DeepSeek-Flash`", changelog)
+        self.assertIn("`dfmodel`", changelog)
+        self.assertIn("qoder_bypass_reason", changelog)
+        self.assertNotIn("Qwen4", changelog)
+        self.assertNotIn("qmodel", changelog)
 
 
 if __name__ == "__main__":
