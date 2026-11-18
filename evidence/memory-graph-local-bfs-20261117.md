@@ -27,9 +27,13 @@ payload. Relations incident to any returned entity are returned, including
 dangling endpoints. The visited set bounds cycles, self-loops, and huge depths
 by the entity count.
 
-The local traversal considers only relations whose two endpoints are stored
-entities. This preserves the previous traversal behavior while continuing to
-report dangling relations through the output filter, matching `open_nodes`.
+The local traversal starts once from all distinct valid start names and follows
+only relations whose two endpoints are stored entities. This preserves the
+previous traversal behavior while avoiding redundant per-start work and
+continuing to report dangling relations through the output filter, matching
+`open_nodes`. The adjacency index and traversal are O(entities + relations) per
+call and remain under the graph read lock; caching would require a
+mutation-version contract outside this feature's scope.
 
 ## Verification
 
@@ -39,7 +43,7 @@ sccache enabled:
 | Check | Result |
 | --- | --- |
 | `cargo fmt --check` | pass |
-| `cargo test --locked --features memory-graph --test test_mcp_daemon test_memory_open_related_nodes` | 2/2 pass |
+| `cargo test --locked --features memory-graph --test test_mcp_daemon test_memory_open_related_nodes` | 3/3 pass, including daemon `tools/call` dispatch |
 | `cargo test --locked --test test_mcp_daemon test_initialize_and_tools_list` | 1/1 pass without the feature |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | pass |
 | `cargo check --locked --no-default-features` | pass |
@@ -73,8 +77,8 @@ ran every acceptance command above.
 
 ## Non-claims
 
-- No live MCP daemon `tools/call` round trip was run over a network listener;
-  the daemon advertisement path and direct native-tool dispatch were tested.
+- The daemon test exercises a loopback JSON-RPC `tools/call` round trip in the
+  test harness; no separately installed production daemon was started.
 - No production listener was restarted or installed, and no routing policy
   changed.
 - The pre-existing Python formatting, SLOC ratchet, and dependency advisory

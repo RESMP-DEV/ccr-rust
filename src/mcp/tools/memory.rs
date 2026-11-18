@@ -512,6 +512,9 @@ impl MemoryTool {
         };
 
         let graph = self.graph.read();
+        // The index and traversal are O(entities + relations) per call. They
+        // stay under the read lock so mutations cannot tear the graph; a cache
+        // would need a mutation-version contract that this tool does not own.
         // Follow only relations whose endpoints are entities. Relations with a
         // dangling endpoint are still reported below, exactly as open_nodes
         // reports them.
@@ -525,35 +528,30 @@ impl MemoryTool {
                     .push(r.to.as_str());
             }
         }
-        // One traversal per distinct start name; unknown names contribute nothing.
-        let starts: HashSet<&str> = names.iter().map(String::as_str).collect();
-        let mut reached: HashSet<&str> = HashSet::new();
-        for start in starts {
-            if !entity_names.contains(start) {
-                continue;
-            }
-            let mut visited: HashSet<&str> = HashSet::new();
-            visited.insert(start);
-            let mut frontier = vec![start];
-            // The visited set bounds the work by the entity count, so cycles,
-            // self-loops, and huge depths all terminate.
-            for _ in 0..depth {
-                let mut next = Vec::new();
-                for node in frontier {
-                    if let Some(targets) = adjacency.get(node) {
-                        for &to in targets {
-                            if visited.insert(to) {
-                                next.push(to);
-                            }
+        // Run one multi-source traversal. Unknown starts contribute nothing.
+        let mut reached: HashSet<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| entity_names.contains(*name))
+            .collect();
+        let mut frontier: Vec<&str> = reached.iter().copied().collect();
+        // The reached set bounds the work by the entity count, so cycles,
+        // self-loops, and huge depths all terminate.
+        for _ in 0..depth {
+            let mut next = Vec::new();
+            for node in frontier {
+                if let Some(targets) = adjacency.get(node) {
+                    for &to in targets {
+                        if reached.insert(to) {
+                            next.push(to);
                         }
                     }
                 }
-                if next.is_empty() {
-                    break;
-                }
-                frontier = next;
             }
-            reached.extend(visited);
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
         }
 
         let matched_entities: Vec<&Entity> = graph

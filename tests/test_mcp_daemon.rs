@@ -270,6 +270,80 @@ async fn test_memory_crud() {
 
 #[cfg(feature = "memory-graph")]
 #[tokio::test]
+async fn test_memory_open_related_nodes_through_daemon() {
+    let port = 13464;
+    let _handle = start_daemon(port).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let init = mcp_post(
+        port,
+        &json!({
+            "jsonrpc": "2.0", "id": "init", "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "test", "version": "1.0" } }
+        }),
+    )
+    .await;
+    assert!(init.get("error").is_none(), "initialize failed: {init}");
+
+    let create = mcp_post(
+        port,
+        &json!({
+            "jsonrpc": "2.0", "id": "create", "method": "tools/call",
+            "params": {
+                "name": "create_entities",
+                "arguments": { "entities": [
+                    { "name": "root", "entityType": "node", "observations": [] },
+                    { "name": "child", "entityType": "node", "observations": [] },
+                    { "name": "grandchild", "entityType": "node", "observations": [] }
+                ] }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(create["result"]["isError"], false);
+
+    let relate = mcp_post(
+        port,
+        &json!({
+            "jsonrpc": "2.0", "id": "relate", "method": "tools/call",
+            "params": {
+                "name": "create_relations",
+                "arguments": { "relations": [
+                    { "from": "root", "to": "child", "relationType": "contains" },
+                    { "from": "child", "to": "grandchild", "relationType": "contains" }
+                ] }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(relate["result"]["isError"], false);
+
+    let related = mcp_post(
+        port,
+        &json!({
+            "jsonrpc": "2.0", "id": "related", "method": "tools/call",
+            "params": { "name": "open_related_nodes", "arguments": { "names": ["root"], "depth": 2 } }
+        }),
+    )
+    .await;
+    assert_eq!(related["result"]["isError"], false);
+    let payload: Value = serde_json::from_str(
+        related["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text"),
+    )
+    .expect("JSON");
+    let names: Vec<&str> = payload["entities"]
+        .as_array()
+        .expect("entities")
+        .iter()
+        .map(|entity| entity["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, ["root", "child", "grandchild"]);
+}
+
+#[cfg(feature = "memory-graph")]
+#[tokio::test]
 async fn test_memory_open_related_nodes() {
     use ccr_rust::mcp::tools::{memory::MemoryTool, NativeTool};
 
