@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#[cfg(feature = "memory-graph")]
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -70,7 +72,8 @@ impl MemoryTool {
 #[async_trait]
 impl NativeTool for MemoryTool {
     fn tools(&self) -> Vec<McpTool> {
-        vec![
+        #[cfg_attr(not(feature = "memory-graph"), allow(unused_mut))]
+        let mut tools = vec![
             tool_def(
                 "create_entities",
                 "Create multiple new entities in the knowledge graph",
@@ -220,7 +223,21 @@ impl NativeTool for MemoryTool {
                     "required": ["names"]
                 }),
             ),
-        ]
+        ];
+        #[cfg(feature = "memory-graph")]
+        tools.push(tool_def(
+            "open_related_nodes",
+            "Open specific nodes plus every node reachable from them by following relations (from -> to) within a number of hops",
+            json!({
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "depth": { "type": ["integer", "null"], "minimum": 0, "description": "Maximum number of hops to follow (default 1)" }
+                },
+                "required": ["names"]
+            }),
+        ));
+        tools
     }
 
     async fn call(&self, name: &str, arguments: Value) -> Result<ToolResult> {
@@ -235,6 +252,8 @@ impl NativeTool for MemoryTool {
             "read_graph" => self.read_graph(),
             "search_nodes" => self.search_nodes(arguments),
             "open_nodes" => self.open_nodes(arguments),
+            #[cfg(feature = "memory-graph")]
+            "open_related_nodes" => self.open_related_nodes(arguments),
             _ => Ok(ToolResult::error(format!("unknown memory tool: {name}"))),
         }
     }
@@ -461,6 +480,93 @@ impl MemoryTool {
             .filter(|r| {
                 matched_names.contains(&r.from.as_str()) || matched_names.contains(&r.to.as_str())
             })
+            .collect();
+
+        Ok(ToolResult::text(serde_json::to_string(&json!({
+            "entities": matched_entities,
+            "relations": matched_relations,
+        }))?))
+    }
+
+    /// Like `open_nodes`, but also returns every entity reachable from the
+    /// named ones within `depth` hops along relation direction (`from` -> `to`).
+    /// With `depth: 0` the result is identical to `open_nodes`.
+    #[cfg(feature = "memory-graph")]
+    fn open_related_nodes(&self, args: Value) -> Result<ToolResult> {
+        let names: Vec<String> =
+            serde_json::from_value(args.get("names").cloned().context("missing names")?)?;
+        // Omitted or null means one hop; anything else must be a non-negative
+        // integer (2.0 counts, as in JSON Schema), so a bad value is an error
+        // instead of a silent one-hop answer.
+        let depth = match args.get("depth") {
+            None | Some(Value::Null) => 1,
+            Some(v) => v
+                .as_u64()
+                .or_else(|| {
+                    v.as_f64()
+                        .filter(|f| f.fract() == 0.0 && *f >= 0.0)
+                        .map(|f| f as u64)
+                })
+                .map(|d| usize::try_from(d).unwrap_or(usize::MAX))
+                .with_context(|| format!("depth must be a non-negative integer, got {v}"))?,
+        };
+
+        if depth == 0 {
+            return self.open_nodes(args);
+        }
+
+        let graph = self.graph.read();
+        // The index and traversal are O(entities + relations) per call. They
+        // stay under the read lock so mutations cannot tear the graph; a cache
+        // would need a mutation-version contract that this tool does not own.
+        // Follow only relations whose endpoints are entities. Relations with a
+        // dangling endpoint are still reported below, exactly as open_nodes
+        // reports them.
+        let entity_names: HashSet<&str> = graph.entities.iter().map(|e| e.name.as_str()).collect();
+        let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+        for r in &graph.relations {
+            if entity_names.contains(r.from.as_str()) && entity_names.contains(r.to.as_str()) {
+                adjacency
+                    .entry(r.from.as_str())
+                    .or_default()
+                    .push(r.to.as_str());
+            }
+        }
+        // Run one multi-source traversal. Unknown starts contribute nothing.
+        let mut reached: HashSet<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| entity_names.contains(*name))
+            .collect();
+        let mut frontier: Vec<&str> = reached.iter().copied().collect();
+        // The reached set bounds the work by the entity count, so cycles,
+        // self-loops, and huge depths all terminate.
+        for _ in 0..depth {
+            let mut next = Vec::new();
+            for node in frontier {
+                if let Some(targets) = adjacency.get(node) {
+                    for &to in targets {
+                        if reached.insert(to) {
+                            next.push(to);
+                        }
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+
+        let matched_entities: Vec<&Entity> = graph
+            .entities
+            .iter()
+            .filter(|e| reached.contains(e.name.as_str()))
+            .collect();
+        let matched_relations: Vec<&Relation> = graph
+            .relations
+            .iter()
+            .filter(|r| reached.contains(r.from.as_str()) || reached.contains(r.to.as_str()))
             .collect();
 
         Ok(ToolResult::text(serde_json::to_string(&json!({

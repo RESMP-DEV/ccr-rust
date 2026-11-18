@@ -78,6 +78,7 @@ harness = false
 default = ["dashboard", "gp", "sindexer"]
 dashboard = ["reqwest/blocking"]
 gp = ["dep:gp-routing"]
+memory-graph = []
 sindexer = ["dep:sindexer"]
 telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:reqwest-otel", "dep:http-body"]
 
