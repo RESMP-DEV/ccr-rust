@@ -72,7 +72,7 @@ impl MemoryTool {
 #[async_trait]
 impl NativeTool for MemoryTool {
     fn tools(&self) -> Vec<McpTool> {
-        #[allow(unused_mut)]
+        #[cfg_attr(not(feature = "memory-graph"), allow(unused_mut))]
         let mut tools = vec![
             tool_def(
                 "create_entities",
@@ -510,6 +510,10 @@ impl MemoryTool {
                 .map(|d| usize::try_from(d).unwrap_or(usize::MAX))
                 .with_context(|| format!("depth must be a non-negative integer, got {v}"))?,
         };
+
+        if depth == 0 {
+            return self.open_nodes(args);
+        }
 
         let graph = self.graph.read();
         // The index and traversal are O(entities + relations) per call. They

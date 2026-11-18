@@ -33,7 +33,9 @@ previous traversal behavior while avoiding redundant per-start work and
 continuing to report dangling relations through the output filter, matching
 `open_nodes`. The adjacency index and traversal are O(entities + relations) per
 call and remain under the graph read lock; caching would require a
-mutation-version contract outside this feature's scope.
+mutation-version contract outside this feature's scope. A `depth` of zero
+delegates directly to `open_nodes`, making that equality structural and
+avoiding index construction.
 
 ## Verification
 
