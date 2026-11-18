@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #[cfg(feature = "memory-graph")]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -493,8 +493,6 @@ impl MemoryTool {
     /// With `depth: 0` the result is identical to `open_nodes`.
     #[cfg(feature = "memory-graph")]
     fn open_related_nodes(&self, args: Value) -> Result<ToolResult> {
-        use mem_graph::{EntityId, GraphStore, Relationship};
-
         let names: Vec<String> =
             serde_json::from_value(args.get("names").cloned().context("missing names")?)?;
         // Omitted or null means one hop; anything else must be a non-negative
@@ -514,36 +512,59 @@ impl MemoryTool {
         };
 
         let graph = self.graph.read();
-        // Index the graph for traversal. Relations whose endpoints are not
-        // entities cannot be followed, so the store rejects them; they are
-        // still reported below, exactly as open_nodes reports them.
-        let mut store = GraphStore::new();
-        for e in &graph.entities {
-            let id = EntityId::new(e.name.as_str());
-            let _ = store.add_entity(mem_graph::Entity::new(id, e.entity_type.as_str()));
-        }
+        // Follow only relations whose endpoints are entities. Relations with a
+        // dangling endpoint are still reported below, exactly as open_nodes
+        // reports them.
+        let entity_names: HashSet<&str> = graph.entities.iter().map(|e| e.name.as_str()).collect();
+        let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
         for r in &graph.relations {
-            let (from, to) = (EntityId::new(r.from.as_str()), EntityId::new(r.to.as_str()));
-            let _ = store.add_relationship(Relationship::new(from, to, r.relation_type.as_str()));
+            if entity_names.contains(r.from.as_str()) && entity_names.contains(r.to.as_str()) {
+                adjacency
+                    .entry(r.from.as_str())
+                    .or_default()
+                    .push(r.to.as_str());
+            }
         }
-        // One traversal per distinct start name: repeats add nothing.
+        // One traversal per distinct start name; unknown names contribute nothing.
         let starts: HashSet<&str> = names.iter().map(String::as_str).collect();
-        let reached: HashSet<String> = starts
-            .into_iter()
-            .filter_map(|n| store.bfs(&EntityId::new(n), depth).ok())
-            .flatten()
-            .map(|id| id.0)
-            .collect();
+        let mut reached: HashSet<&str> = HashSet::new();
+        for start in starts {
+            if !entity_names.contains(start) {
+                continue;
+            }
+            let mut visited: HashSet<&str> = HashSet::new();
+            visited.insert(start);
+            let mut frontier = vec![start];
+            // The visited set bounds the work by the entity count, so cycles,
+            // self-loops, and huge depths all terminate.
+            for _ in 0..depth {
+                let mut next = Vec::new();
+                for node in frontier {
+                    if let Some(targets) = adjacency.get(node) {
+                        for &to in targets {
+                            if visited.insert(to) {
+                                next.push(to);
+                            }
+                        }
+                    }
+                }
+                if next.is_empty() {
+                    break;
+                }
+                frontier = next;
+            }
+            reached.extend(visited);
+        }
 
         let matched_entities: Vec<&Entity> = graph
             .entities
             .iter()
-            .filter(|e| reached.contains(&e.name))
+            .filter(|e| reached.contains(e.name.as_str()))
             .collect();
         let matched_relations: Vec<&Relation> = graph
             .relations
             .iter()
-            .filter(|r| reached.contains(&r.from) || reached.contains(&r.to))
+            .filter(|r| reached.contains(r.from.as_str()) || reached.contains(r.to.as_str()))
             .collect();
 
         Ok(ToolResult::text(serde_json::to_string(&json!({

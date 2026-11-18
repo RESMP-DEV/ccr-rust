@@ -344,6 +344,113 @@ async fn test_memory_open_related_nodes() {
     }
 }
 
+#[cfg(feature = "memory-graph")]
+#[tokio::test]
+async fn test_memory_open_related_nodes_traversal_edges() {
+    use ccr_rust::mcp::tools::{memory::MemoryTool, NativeTool};
+
+    let memory = MemoryTool::new(None);
+    let call = |name: &'static str, args: Value| {
+        let memory = &memory;
+        async move {
+            let result = memory.call(name, args).await.unwrap();
+            assert!(!result.is_error);
+            serde_json::from_str::<Value>(&result.content[0].text).unwrap()
+        }
+    };
+    let entity = |name: &str| json!({ "name": name, "entityType": "node", "observations": [] });
+    let relation = |from: &str, to: &str| json!({ "from": from, "to": to, "relationType": "r" });
+    call(
+        "create_entities",
+        json!({
+            "entities": [
+                entity("a"),
+                entity("b"),
+                entity("c"),
+                entity("d"),
+                entity("leaf"),
+                entity("self"),
+            ]
+        }),
+    )
+    .await;
+    call(
+        "create_relations",
+        json!({
+            "relations": [
+                relation("a", "b"),
+                relation("b", "c"),
+                relation("c", "a"),
+                relation("self", "self"),
+                relation("d", "leaf"),
+                relation("leaf", "ghost"),
+                relation("missing", "d"),
+            ]
+        }),
+    )
+    .await;
+    let names = |graph: &Value| -> Vec<String> {
+        graph["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // A cycle terminates even when depth far exceeds the cycle length.
+    let cycle = call(
+        "open_related_nodes",
+        json!({ "names": ["a"], "depth": u64::MAX }),
+    )
+    .await;
+    assert_eq!(names(&cycle), ["a", "b", "c"]);
+
+    // A self-loop is visited once and adds no entity; the depth > 0 payload
+    // still matches open_nodes exactly, self-loop relation included.
+    let self_open = call("open_nodes", json!({ "names": ["self"] })).await;
+    let self_loop = call(
+        "open_related_nodes",
+        json!({ "names": ["self"], "depth": u64::MAX }),
+    )
+    .await;
+    assert_eq!(self_loop, self_open);
+    assert_eq!(names(&self_loop), ["self"]);
+
+    // A leaf start reaches only itself, so depth > 0 equals open_nodes exactly,
+    // including the dangling outgoing relation.
+    let leaf_open = call("open_nodes", json!({ "names": ["leaf"] })).await;
+    let leaf = call(
+        "open_related_nodes",
+        json!({ "names": ["leaf"], "depth": 5 }),
+    )
+    .await;
+    assert_eq!(leaf, leaf_open);
+    assert_eq!(names(&leaf), ["leaf"]);
+    assert_eq!(leaf["relations"].as_array().unwrap().len(), 2);
+
+    // Unknown starts are ignored even when a dangling relation names them.
+    let unknown_open = call("open_nodes", json!({ "names": ["missing"] })).await;
+    let unknown = call(
+        "open_related_nodes",
+        json!({ "names": ["missing"], "depth": 3 }),
+    )
+    .await;
+    assert_eq!(unknown, unknown_open);
+    assert_eq!(unknown, json!({ "entities": [], "relations": [] }));
+
+    // Multiple starts return the union of their closures.
+    let union = call(
+        "open_related_nodes",
+        json!({ "names": ["a", "d"], "depth": 1 }),
+    )
+    .await;
+    assert_eq!(names(&union), ["a", "b", "d", "leaf"]);
+    // Every relation incident to a reached entity is returned, including b->c,
+    // c->a, missing->d, and the dangling leaf->ghost; only self->self is absent.
+    assert_eq!(union["relations"].as_array().unwrap().len(), 6);
+}
+
 #[tokio::test]
 async fn test_health_endpoint() {
     let port = 13459;
