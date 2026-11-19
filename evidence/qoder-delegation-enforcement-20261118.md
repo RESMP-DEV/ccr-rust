@@ -118,6 +118,14 @@ Launcher repository, commit `14ea248`:
 
 Clean ccr-rust port:
 
+- Main-branch commit `0cc8485` was pushed to `RESMP-DEV/ccr-rust` and used
+  for `cargo install --path . --force`. The release install replaced both
+  `ccr-rust` and `stress`; `ccr-rust version` reports 1.3.0/release with the
+  expected feature set.
+- Installed `ccr-rust workers show 20261118-171214-qjukon05 --json` reports
+  `engine: qoder`, `served_route: qoder,dfmodel`, and
+  `qoder_attempt_outcome: completed`; human output renders
+  `Qoder: lane=served`.
 - `cargo fmt --check`: passed.
 - `cargo test --locked --lib workers::`: 41 passed.
 - `cargo test --locked --test integration_worker_inspector`: 4 passed.
