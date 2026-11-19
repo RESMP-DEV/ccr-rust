@@ -36,6 +36,10 @@ fn display_value(value: &Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+fn optional_text(value: &Value, key: &str, limit: usize) -> Option<String> {
+    value[key].as_str().map(|entry| text(entry, limit))
+}
+
 pub(super) fn read_receipt(path: &Path) -> Result<Value> {
     let mut bytes = Vec::new();
     File::open(path)?
@@ -128,6 +132,12 @@ pub(super) fn list_entry(path: &Path) -> Result<Value> {
         "task_verified",
         "needs_attention",
         "model_requested",
+        "engine",
+        "served_route",
+        "model_identity",
+        "qoder_primary_requested",
+        "qoder_bypass_reason",
+        "qoder_attempt_outcome",
         "elapsed_seconds",
         "commands_completed",
         "failed_commands",
@@ -264,6 +274,12 @@ pub(super) fn summarize(path: &Path, max_chars: usize) -> Result<Value> {
         "salvage": receipt.get("salvage").cloned().unwrap_or(Value::Null),
         "needs_attention": outcome != "completed" || failed_commands > 0 || failed_items > 0 || errors > 0 || !warnings.is_empty(),
         "model_requested": receipt["model"].as_str().map(|value| text(value, 128)),
+        "engine": optional_text(&receipt, "engine", 80),
+        "served_route": optional_text(&receipt, "served_route", 128),
+        "model_identity": optional_text(&receipt, "model_identity", 128),
+        "qoder_primary_requested": receipt["qoder_primary_requested"].as_bool(),
+        "qoder_bypass_reason": optional_text(&receipt, "qoder_bypass_reason", 80),
+        "qoder_attempt_outcome": optional_text(&receipt["qoder_primary_attempt"], "outcome", 80),
         "provider_verified": false, "elapsed_seconds": receipt["elapsed_seconds"].as_f64(),
         "exit_code": receipt["exit_code"].as_i64(), "read_only": receipt["read_only"].as_bool(),
         "network_allowed": receipt["network_allowed"].as_bool(),

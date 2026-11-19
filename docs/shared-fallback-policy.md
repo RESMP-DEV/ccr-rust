@@ -176,12 +176,24 @@ Mixed tasks keep the launcher-level Qoder lane usable. Qoder requests
 reasoning and runs with no Bash or network. When a task needs live web or
 account access, the parent or a separately authorized network worker fetches
 the primary evidence, then an offline Qoder worker performs source digestion,
-comparison, and synthesis. For implementation work, enumerate the exact files
-first, send scoped patch generation or repair to Qoder, and run acceptance in
-the parent. Do not turn a whole mixed task into one network-authorized or
-broad-write worker merely because one component needs that privilege. This
-changes no provider policy: the Qoder lane is a launcher-level choice and
-never enters `Router.tiers` or the shared fallback chain.
+comparison, or synthesis. For implementation work, a discovery worker maps the
+exact files, then Qoder generates a scoped patch with declared owned paths;
+the parent replays only the named acceptance command. Do not turn a whole
+mixed task into one network-authorized or broad-write worker merely because
+one component needs that privilege.
+
+Delegation is not optional for discovery. Path, symbol, and entry-point
+discovery is a bounded read-only worker brief, and source audit, patch
+authoring, test running, log/evidence collection, and drafting findings are
+worker work. Every actionable user turn starts a fresh
+`Workers:`/`Parent-only:`/`Terminal budget:` ledger. Qoder ineligibility
+changes the selected worker lane, never the decision to delegate:
+command-bearing verify or repair briefs pass `--no-qoder-primary`, while
+offline audits and scoped patch generation use Qoder first. `create_thread`
+and native Codex child tasks are never a delegation mechanism; `Workers:`
+means `codex-ccr-worker` or the named judgment tier. This changes no provider
+policy: the Qoder lane is a launcher-level choice and never enters
+`Router.tiers` or the shared fallback chain.
 
 The module is validated against `MACHINE_SHARED_PROVIDERS` on every load, so an
 installed copy of `ccr_fallback_policy.py` that predates a source change will

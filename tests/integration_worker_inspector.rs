@@ -111,6 +111,12 @@ fn command_event(id: &str, exit_code: i64, status: &str) -> Value {
     })
 }
 
+fn run_entry<'a>(runs: &'a [Value], run_id: &str) -> &'a Value {
+    runs.iter()
+        .find(|run| run["run_id"] == run_id)
+        .unwrap_or_else(|| panic!("missing run {run_id}"))
+}
+
 #[test]
 fn json_lifecycle_covers_list_show_events_and_detail() {
     let directory = TempDir::new().unwrap();
@@ -199,6 +205,105 @@ fn json_lifecycle_covers_list_show_events_and_detail() {
 }
 
 #[test]
+fn qoder_lane_fields_are_exposed_in_list_show_and_human_output() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let fixtures = [
+        (
+            "2026-09-24-served",
+            json!({
+                "outcome": "completed",
+                "engine": "qoder",
+                "served_route": "qoder,dfmodel",
+                "model_identity": "DeepSeek-V4.1-Flash-1017",
+                "qoder_primary_requested": true,
+                "qoder_primary_attempt": {"outcome": "completed"}
+            }),
+        ),
+        (
+            "2026-09-24-fallback",
+            json!({
+                "outcome": "completed",
+                "engine": "codex-qoder-fallback",
+                "qoder_primary_requested": true,
+                "qoder_primary_attempt": {"outcome": "failed"}
+            }),
+        ),
+        (
+            "2026-09-24-bypass",
+            json!({"outcome": "completed", "qoder_bypass_reason": "disabled"}),
+        ),
+        ("2026-09-24-legacy", json!({"outcome": "completed"})),
+    ];
+    for (name, receipt) in fixtures {
+        write(&root.join(name).join("status.json"), &receipt.to_string());
+    }
+
+    let listing = worker_json(root, &["list"]);
+    let runs = listing["runs"].as_array().unwrap();
+    let served = run_entry(runs, "2026-09-24-served");
+    assert_eq!(served["engine"], "qoder");
+    assert_eq!(served["served_route"], "qoder,dfmodel");
+    assert_eq!(served["model_identity"], "DeepSeek-V4.1-Flash-1017");
+    assert_eq!(served["qoder_primary_requested"], true);
+    assert_eq!(served["qoder_bypass_reason"], Value::Null);
+    assert_eq!(served["qoder_attempt_outcome"], "completed");
+
+    let fallback = run_entry(runs, "2026-09-24-fallback");
+    assert_eq!(fallback["engine"], "codex-qoder-fallback");
+    assert_eq!(fallback["qoder_attempt_outcome"], "failed");
+    assert_eq!(fallback["served_route"], Value::Null);
+
+    let bypass = run_entry(runs, "2026-09-24-bypass");
+    assert_eq!(bypass["qoder_bypass_reason"], "disabled");
+    assert_eq!(bypass["qoder_primary_requested"], Value::Null);
+    assert_eq!(bypass["qoder_attempt_outcome"], Value::Null);
+
+    let legacy = run_entry(runs, "2026-09-24-legacy");
+    for key in [
+        "engine",
+        "served_route",
+        "model_identity",
+        "qoder_primary_requested",
+        "qoder_bypass_reason",
+        "qoder_attempt_outcome",
+    ] {
+        assert_eq!(legacy[key], Value::Null, "legacy {key} must stay null");
+    }
+
+    let shown = worker_json(root, &["show", "2026-09-24-served"]);
+    assert_eq!(shown["engine"], "qoder");
+    assert_eq!(shown["served_route"], "qoder,dfmodel");
+    assert_eq!(shown["model_identity"], "DeepSeek-V4.1-Flash-1017");
+    assert_eq!(shown["qoder_attempt_outcome"], "completed");
+
+    let human = |arguments: &[&str]| {
+        let output = isolated_command(root)
+            .args(["workers", "--runs-dir", root.to_str().unwrap()])
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let shown = human(&["show", "2026-09-24-served"]);
+    assert!(shown.contains("Qoder: lane=served"));
+    assert!(shown.contains("attempt=completed"));
+    assert!(shown.contains("served_route=qoder,dfmodel"));
+    assert!(shown.contains("model_identity=DeepSeek-V4.1-Flash-1017"));
+    assert!(human(&["show", "2026-09-24-fallback"]).contains("Qoder: lane=fallback"));
+    let bypass = human(&["show", "2026-09-24-bypass"]);
+    assert!(bypass.contains("Qoder: lane=bypass"));
+    assert!(bypass.contains("bypass=disabled"));
+    assert!(human(&["show", "2026-09-24-legacy"]).contains("Qoder: lane=not_recorded"));
+    let human_listing = human(&["list"]);
+    assert!(human_listing.contains("  Qoder: lane=served"));
+    assert!(human_listing.contains("  Qoder: lane=fallback"));
+    assert!(human_listing.contains("  Qoder: lane=bypass"));
+    assert!(!human_listing.contains("lane=not_recorded"));
+}
+
+#[test]
 fn validated_flags_use_meaningful_exit_codes_and_stderr() {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
@@ -275,7 +380,8 @@ fn human_rendering_is_bounded_and_control_sanitized() {
         &json!({
             "outcome": "failed",
             "error": "one\nFORGED_WARNING\tmore\u{1b}",
-            "model": "model\nFORGED_MODEL"
+            "model": "model\nFORGED_MODEL",
+            "engine": "qoder\nFORGED_ENGINE"
         })
         .to_string(),
     );
@@ -300,6 +406,7 @@ fn human_rendering_is_bounded_and_control_sanitized() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("ATTENTION"));
     assert!(stdout.contains("one FORGED_WARNING more\u{FFFD}"));
+    assert!(stdout.contains("Qoder: lane=recorded engine=qoder FORGED_ENGINE"));
     assert!(!stdout.contains("\nFORGED_"));
     assert!(!stdout.contains('\u{1b}'));
     assert!(!stdout.contains('\t'));

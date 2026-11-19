@@ -157,6 +157,100 @@ fn summarize_surfaces_recovery_artifacts_without_trusting_them() {
     assert_eq!(shown["task_verified"], false);
 }
 
+#[test]
+fn qoder_lane_fields_are_reported_and_missing_fields_stay_null() {
+    let directory = TempDir::new().unwrap();
+    let served = directory.path().join("qoder-served");
+    write(
+        &served.join("status.json"),
+        &json!({
+            "outcome": "completed",
+            "engine": "qoder",
+            "served_route": "qoder,dfmodel",
+            "model_identity": "DeepSeek-V4.1-Flash-1017",
+            "qoder_primary_requested": true,
+            "qoder_primary_attempt": {"outcome": "completed"}
+        })
+        .to_string(),
+    );
+    let shown = summarize(&served, 240).unwrap();
+    assert_eq!(shown["engine"], "qoder");
+    assert_eq!(shown["served_route"], "qoder,dfmodel");
+    assert_eq!(shown["model_identity"], "DeepSeek-V4.1-Flash-1017");
+    assert_eq!(shown["qoder_primary_requested"], true);
+    assert_eq!(shown["qoder_bypass_reason"], Value::Null);
+    assert_eq!(shown["qoder_attempt_outcome"], "completed");
+    let listed = list_entry(&served).unwrap();
+    for key in [
+        "engine",
+        "served_route",
+        "model_identity",
+        "qoder_primary_requested",
+        "qoder_bypass_reason",
+        "qoder_attempt_outcome",
+    ] {
+        assert_eq!(listed[key], shown[key], "list drops {key}");
+    }
+
+    let fallback = directory.path().join("qoder-fallback");
+    write(
+        &fallback.join("status.json"),
+        &json!({
+            "outcome": "completed",
+            "engine": "codex-qoder-fallback",
+            "qoder_primary_requested": true,
+            "qoder_primary_attempt": {"outcome": "failed"}
+        })
+        .to_string(),
+    );
+    let shown = summarize(&fallback, 240).unwrap();
+    assert_eq!(shown["engine"], "codex-qoder-fallback");
+    assert_eq!(shown["qoder_primary_requested"], true);
+    assert_eq!(shown["qoder_attempt_outcome"], "failed");
+    assert_eq!(shown["served_route"], Value::Null);
+    assert_eq!(shown["model_identity"], Value::Null);
+    assert_eq!(shown["qoder_bypass_reason"], Value::Null);
+
+    let bypass = directory.path().join("qoder-bypass");
+    write(
+        &bypass.join("status.json"),
+        &json!({"outcome": "completed", "qoder_bypass_reason": "disabled"}).to_string(),
+    );
+    let shown = summarize(&bypass, 240).unwrap();
+    assert_eq!(shown["qoder_bypass_reason"], "disabled");
+    assert_eq!(shown["qoder_primary_requested"], Value::Null);
+    assert_eq!(shown["qoder_attempt_outcome"], Value::Null);
+    assert_eq!(shown["engine"], Value::Null);
+
+    let legacy = directory.path().join("qoder-legacy");
+    write(
+        &legacy.join("status.json"),
+        &json!({"outcome": "completed", "model": "zai,glm-5.3-flashx"}).to_string(),
+    );
+    let shown = summarize(&legacy, 240).unwrap();
+    for key in [
+        "engine",
+        "served_route",
+        "model_identity",
+        "qoder_primary_requested",
+        "qoder_bypass_reason",
+        "qoder_attempt_outcome",
+    ] {
+        assert_eq!(shown[key], Value::Null, "legacy {key} must stay null");
+    }
+    assert_eq!(shown["model_requested"], "zai,glm-5.3-flashx");
+
+    let malformed = directory.path().join("qoder-malformed");
+    write(
+        &malformed.join("status.json"),
+        &json!({"outcome": "completed", "qoder_primary_attempt": "legacy"}).to_string(),
+    );
+    assert_eq!(
+        summarize(&malformed, 240).unwrap()["qoder_attempt_outcome"],
+        Value::Null
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_missing_run_paths_are_safe_for_summary_events_and_listing() {
