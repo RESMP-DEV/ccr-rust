@@ -391,8 +391,7 @@ impl TransformerRegistry {
     /// files) into this registry. Built-in transformer names always win over
     /// a plugin of the same name. Returns the registered plugin names.
     pub fn register_plugins(&mut self, plugins: &PluginsConfig) -> Vec<String> {
-        let mut builtins: Vec<String> = self.transformers.keys().cloned().collect();
-        builtins.extend(OPTION_ONLY_BUILTINS.iter().map(|name| name.to_string()));
+        let builtins = self.reserved_names();
         let builtin_names: Vec<&str> = builtins.iter().map(String::as_str).collect();
         let resolved = plugin_catalog::resolve_plugins(plugins, &builtin_names);
         let mut registered = Vec::new();
@@ -415,6 +414,17 @@ impl TransformerRegistry {
     /// List all registered transformer names (built-ins and plugins).
     pub fn names(&self) -> Vec<String> {
         self.transformers.keys().cloned().collect()
+    }
+
+    /// Built-in names that always win over a plugin of the same name.
+    ///
+    /// Includes the option-only built-ins that `create_with_options` handles
+    /// but that are not keys in the transformer map, so the CLI listing and
+    /// server registration agree on what is reserved.
+    pub fn reserved_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.transformers.keys().cloned().collect();
+        names.extend(OPTION_ONLY_BUILTINS.iter().map(|name| name.to_string()));
+        names
     }
 
     /// Register a transformer with a given name.
@@ -598,6 +608,13 @@ mod tests {
                 "option-only built-in {name} is not creatable"
             );
         }
+    }
+
+    #[test]
+    fn reserved_names_include_option_only_builtins() {
+        let names = TransformerRegistry::new().reserved_names();
+        assert!(names.iter().any(|name| name == "maxtoken"));
+        assert!(names.iter().any(|name| name == "anthropic"));
     }
 
     #[test]

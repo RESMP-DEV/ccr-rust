@@ -29,4 +29,4 @@ All examples require `jq` (Homebrew: `brew install jq`).
 | Plugin | Stages | What it does |
 |--------|--------|--------------|
 | `strip-cache-control.sh` | both | Removes Anthropic `cache_control` markers from every block. Useful for OpenAI-compatible upstreams that reject unknown fields on otherwise-valid payloads. |
-| `log-payload.sh` | both | Appends one JSON line (`stage`, `plugin`, `payload`) to `$CCR_PLUGIN_LOG` (default `/tmp/ccr-plugin.log`), then forwards the payload unchanged. Use it to see exactly what the router sends and receives; remove it once diagnosed. |
+| `log-payload.sh` | both | Appends one JSON line (`stage`, `plugin`, `payload`) to `$CCR_PLUGIN_LOG` (default `${XDG_STATE_HOME:-$HOME/.local/state}/ccr-rust/plugin-payload.jsonl`, mode 0600), then forwards the payload unchanged. Use it to see exactly what the router sends and receives; remove it once diagnosed. |

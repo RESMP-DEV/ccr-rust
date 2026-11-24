@@ -11,11 +11,11 @@
 exec jq '
   def strip_blocks:
     if type == "object" then
-      (if (has("type") and (.type | type) == "string") then del(.cache_control) else . end)
-      | with_entries(
+      (del(.cache_control)
+       | with_entries(
           if (.key | IN("input", "input_schema", "parameters", "properties")) then .
           else .value |= strip_blocks
-          end)
+          end))
     elif type == "array" then map(strip_blocks)
     else . end;
   strip_blocks'

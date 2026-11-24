@@ -34,7 +34,6 @@ tmp=$(mktemp) || exit 1
 trap 'rm -f "$tmp"' EXIT
 cat > "$tmp"
 jq -c --arg stage "$CCR_STAGE" --arg plugin "$CCR_PLUGIN_NAME" \
-    --slurpfile payload "$tmp" \
-    '{stage: $stage, plugin: $plugin, payload: $payload[0]}' \
+    '{stage: $stage, plugin: $plugin, payload: .}' "$tmp" \
     >> "$log_file"
 cat "$tmp"

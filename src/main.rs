@@ -652,7 +652,7 @@ fn list_plugins(config_path: &str, json: bool) -> anyhow::Result<()> {
 
     let registry = TransformerRegistry::new();
     let mut rows: Vec<PluginRow> = registry
-        .names()
+        .reserved_names()
         .into_iter()
         .map(|name| PluginRow {
             name,
