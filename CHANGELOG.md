@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added runtime transformer plugins. The `Plugins` config section declares
+  external executable transformers (`command`, `args`, `timeout_ms`, `env`,
+  `stages`, `on_error`) and `~/.claude-code-router/plugins` is scanned for
+  drop-in executables, restoring the Node.js router's plugin extensibility
+  without recompiling. Plugins speak a stdin/stdout JSON protocol with
+  `CCR_STAGE`/`CCR_PLUGIN_NAME` context, register in both transformer
+  registry construction paths with built-in names taking precedence, are
+  validated at config load alongside every other entry-point gate, and are
+  inspectable through the new `ccr-rust plugins [--json]` command. The
+  default `on_error` is passthrough with a warn log; timed-out plugins are
+  torn down by process group. See docs/plugins.md and examples/plugins/.
 - Exposed Qoder lane fields in `ccr-rust workers list` and `workers show`.
   JSON output now carries `engine`, `served_route`, `model_identity`,
   `qoder_primary_requested`, `qoder_bypass_reason`, and

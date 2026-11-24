@@ -486,6 +486,7 @@ dependencies = [
  "humantime",
  "jsonschema",
  "lazy_static",
+ "libc",
  "log",
  "num_cpus",
  "once_cell",

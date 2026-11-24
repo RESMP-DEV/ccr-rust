@@ -122,6 +122,17 @@ Examples:
     /// Validate config file syntax and providers
     #[command(after_help = "Example:\n  ccr-rust --config examples/config.minimal.json validate")]
     Validate,
+    /// List the effective transformer plugin set (built-in, config, drop-in)
+    #[command(after_help = "\
+Examples:
+  ccr-rust plugins                        Effective plugin set for the default config
+  ccr-rust --config my.json plugins       Effective plugin set for one config file
+  ccr-rust plugins --json                 Machine-readable report")]
+    Plugins {
+        /// Emit one JSON array instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
     /// Diagnose config, provider credentials/catalogs, and listener health
     #[command(after_help = "\
 Examples:
@@ -445,7 +456,15 @@ async fn run_server(
 
     let ewma_tracker = std::sync::Arc::new(EwmaTracker::new());
     metrics::init_persistence(config.persistence(), &ewma_tracker)?;
-    let transformer_registry = std::sync::Arc::new(TransformerRegistry::new());
+    let transformer_registry = {
+        let mut registry = TransformerRegistry::new();
+        let plugins = registry.register_plugins(config.plugins());
+        tracing::info!(
+            "Transformer registry: {} external plugin(s) registered",
+            plugins.len()
+        );
+        std::sync::Arc::new(registry)
+    };
     let ratelimit_tracker = std::sync::Arc::new(RateLimitTracker::new());
     #[cfg(feature = "gp")]
     let gp_router = if config.router().gp_routing.enabled {
@@ -624,6 +643,74 @@ fn validate_config(config_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Report the effective transformer plugin set for a config: built-in
+/// transformers plus the external plugins resolved from `Plugins`
+/// (declarations and the drop-in directory). The same resolution registers
+/// plugins at server start, so this listing is what the router runs.
+fn list_plugins(config_path: &str, json: bool) -> anyhow::Result<()> {
+    let config = Config::from_file(config_path)?;
+
+    let registry = TransformerRegistry::new();
+    let mut rows: Vec<PluginRow> = registry
+        .reserved_names()
+        .into_iter()
+        .map(|name| PluginRow {
+            name,
+            source: "builtin".to_string(),
+            command: String::new(),
+            stages: String::new(),
+            on_error: String::new(),
+            timeout_ms: None,
+        })
+        .collect();
+
+    let builtin_names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+    for plugin in transformer::resolve_plugins(config.plugins(), &builtin_names) {
+        rows.push(PluginRow {
+            name: plugin.name,
+            source: plugin.source.label().to_string(),
+            command: plugin.spec.command.clone(),
+            stages: plugin.spec.stages.label().to_string(),
+            on_error: plugin.spec.on_error.label().to_string(),
+            timeout_ms: Some(plugin.spec.timeout_ms),
+        });
+    }
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Plugins for {} ({} entries):", config_path, rows.len());
+    for row in &rows {
+        if row.source == "builtin" {
+            println!("  {:<24} builtin", row.name);
+        } else {
+            println!(
+                "  {:<24} {:<9} stages={} on_error={} timeout={}ms  {}",
+                row.name,
+                row.source,
+                row.stages,
+                row.on_error,
+                row.timeout_ms.unwrap_or_default(),
+                row.command
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct PluginRow {
+    name: String,
+    source: String,
+    command: String,
+    stages: String,
+    on_error: String,
+    timeout_ms: Option<u64>,
+}
+
 async fn run_doctor(
     config_path: &str,
     host: &str,
@@ -774,10 +861,12 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "telemetry"))]
     let telemetry_enabled = false;
     let subscriber = tracing_subscriber::registry().with(
-        tracing_subscriber::fmt::layer().with_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ccr_rust=info,tower_http=info".into()),
-        ),
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "ccr_rust=info,tower_http=info".into()),
+            ),
     );
     #[cfg(feature = "telemetry")]
     let subscriber = subscriber.with(telemetry_layer);
@@ -821,6 +910,9 @@ async fn main() -> Result<()> {
             }
             Some(Commands::Validate) => {
                 validate_config(&config_path)?;
+            }
+            Some(Commands::Plugins { json }) => {
+                list_plugins(&config_path, json)?;
             }
             Some(Commands::Doctor {
                 host,

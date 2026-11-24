@@ -14,10 +14,11 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 
 1. [CLI commands](cli.md) — start, status, validate, dashboard, captures, mcp, mcp-daemon, and more
 2. [Configuration](configuration.md) — providers, API keys, environment variables, full schema
-3. [Examples](../examples/README.md) — copy-paste minimal and multi-tier configs, plus a smoke-test script
-4. [Presets](presets.md) — one-command setups for common scenarios
-5. [Deployment](deployment.md) — multi-machine, systemd/launchd, Docker
-6. [Troubleshooting](troubleshooting.md) — common issues, debug tips, logs
+3. [Plugins](plugins.md) — runtime-loadable transformer plugins: wire protocol, config, failure semantics
+4. [Examples](../examples/README.md) — copy-paste minimal and multi-tier configs, plus a smoke-test script
+5. [Presets](presets.md) — one-command setups for common scenarios
+6. [Deployment](deployment.md) — multi-machine, systemd/launchd, Docker
+7. [Troubleshooting](troubleshooting.md) — common issues, debug tips, logs
 
 ## Client Integrations
 

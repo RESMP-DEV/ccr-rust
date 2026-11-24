@@ -7,7 +7,13 @@
 mod builtin;
 pub use builtin::*;
 
-use crate::config::TransformerEntry;
+mod external;
+pub use external::{ExternalTransformer, PluginStageError};
+
+mod plugin_catalog;
+pub use plugin_catalog::{resolve_plugins, PluginSource, ResolvedPlugin};
+
+use crate::config::{PluginsConfig, TransformerEntry};
 use crate::transform::glm::GlmTransformer;
 use crate::transform::kimi::KimiTransformer;
 use crate::transform::minimax::MinimaxTransformer;
@@ -18,7 +24,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 // ============================================================================
 // Transformer Trait
@@ -52,6 +58,20 @@ pub trait Transformer: Send + Sync {
     #[allow(dead_code)]
     fn is_passthrough(&self, request: &Value) -> bool {
         let _ = request;
+        false
+    }
+
+    /// Whether this transformer runs an external process.
+    ///
+    /// Streaming frame paths skip external transformers: a frame is an
+    /// individual event rather than the aggregated response document, and
+    /// spawning a process per frame would multiply latency by the frame count.
+    fn is_external(&self) -> bool {
+        false
+    }
+
+    /// Whether a failure rejects the whole request (`on_error: "fail"`).
+    fn fail_mode(&self) -> bool {
         false
     }
 
@@ -277,6 +297,40 @@ impl TransformerChain {
         Ok(response)
     }
 
+    /// Apply only in-process response transformers to one streaming frame.
+    ///
+    /// External plugins are skipped because a frame is an individual event, not
+    /// the aggregated response document the plugin contract promises.
+    pub fn apply_response_frame(&self, mut response: Value) -> Result<Value> {
+        for transformer in self.transformers.iter().rev() {
+            if transformer.is_external() {
+                debug!(name = %transformer.name(), "skipping external plugin on a streaming frame");
+                continue;
+            }
+            debug!(name = %transformer.name(), "applying response transformer to a frame");
+            response = transformer.transform_response(response)?;
+        }
+        Ok(response)
+    }
+
+    /// Whether any transformer in the chain rejects the whole request on
+    /// failure. Callers use this to refuse fallbacks that would return
+    /// untransformed content.
+    pub fn fail_mode(&self) -> bool {
+        self.transformers
+            .iter()
+            .any(|transformer| transformer.fail_mode())
+    }
+
+    /// Name of the first transformer that rejects the whole request on
+    /// failure, so a rejected response can name the plugin responsible.
+    pub fn fail_mode_plugin(&self) -> Option<String> {
+        self.transformers
+            .iter()
+            .find(|transformer| transformer.fail_mode())
+            .map(|transformer| transformer.name().to_string())
+    }
+
     /// Check if the entire chain is a passthrough (all transformers are identity).
     #[allow(dead_code)]
     pub fn is_passthrough(&self, request: &Value) -> bool {
@@ -310,6 +364,10 @@ pub struct TransformerRegistry {
     transformers: HashMap<String, Arc<dyn Transformer>>,
 }
 
+/// Built-in transformers that exist only through `create_with_options`, so
+/// they are not keys in the registry map but must still be reserved.
+const OPTION_ONLY_BUILTINS: &[&str] = &["maxtoken"];
+
 impl TransformerRegistry {
     /// Create a new transformer registry with default transformers registered.
     pub fn new() -> Self {
@@ -342,6 +400,54 @@ impl TransformerRegistry {
         registry.register("output_compress", Arc::new(OutputCompressTransformer));
 
         registry
+    }
+
+    /// Create a registry with built-in transformers plus the external
+    /// plugins resolved from the `Plugins` config section.
+    pub fn new_with_plugins(plugins: &PluginsConfig) -> Self {
+        let mut registry = Self::new();
+        registry.register_plugins(plugins);
+        registry
+    }
+
+    /// Register external plugins (config declarations plus drop-in directory
+    /// files) into this registry. Built-in transformer names always win over
+    /// a plugin of the same name. Returns the registered plugin names.
+    pub fn register_plugins(&mut self, plugins: &PluginsConfig) -> Vec<String> {
+        let builtins = self.reserved_names();
+        let builtin_names: Vec<&str> = builtins.iter().map(String::as_str).collect();
+        let resolved = plugin_catalog::resolve_plugins(plugins, &builtin_names);
+        let mut registered = Vec::new();
+        for plugin in resolved {
+            info!(
+                name = %plugin.name,
+                source = plugin.source.label(),
+                command = %plugin.spec.command,
+                "registered external transformer plugin"
+            );
+            self.transformers.insert(
+                plugin.name.clone(),
+                Arc::new(ExternalTransformer::new(plugin.name.clone(), plugin.spec)),
+            );
+            registered.push(plugin.name);
+        }
+        registered
+    }
+
+    /// List all registered transformer names (built-ins and plugins).
+    pub fn names(&self) -> Vec<String> {
+        self.transformers.keys().cloned().collect()
+    }
+
+    /// Built-in names that always win over a plugin of the same name.
+    ///
+    /// Includes the option-only built-ins that `create_with_options` handles
+    /// but that are not keys in the transformer map, so the CLI listing and
+    /// server registration agree on what is reserved.
+    pub fn reserved_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.transformers.keys().cloned().collect();
+        names.extend(OPTION_ONLY_BUILTINS.iter().map(|name| name.to_string()));
+        names
     }
 
     /// Register a transformer with a given name.
@@ -395,7 +501,7 @@ impl TransformerRegistry {
     pub fn validate_entries(&self, entries: &[TransformerEntry]) -> Vec<String> {
         let mut errors = Vec::new();
         for entry in entries {
-            if self.get(entry.name()).is_none() && !matches!(entry.name(), "maxtoken") {
+            if self.get(entry.name()).is_none() && !OPTION_ONLY_BUILTINS.contains(&entry.name()) {
                 errors.push(format!("Unknown transformer: {}", entry.name()));
             }
         }
@@ -441,6 +547,83 @@ mod tests {
         })
     }
 
+    struct CountingTransformer {
+        external: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Transformer for CountingTransformer {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn transform_response(&self, response: Value) -> Result<Value> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(response)
+        }
+
+        fn is_external(&self) -> bool {
+            self.external
+        }
+    }
+
+    #[test]
+    fn streaming_frames_skip_external_plugins() {
+        let external_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let builtin_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = TransformerChain::new()
+            .with_transformer(Arc::new(CountingTransformer {
+                external: true,
+                calls: external_calls.clone(),
+            }))
+            .with_transformer(Arc::new(CountingTransformer {
+                external: false,
+                calls: builtin_calls.clone(),
+            }));
+
+        chain
+            .apply_response_frame(serde_json::json!({"content": []}))
+            .unwrap();
+        assert_eq!(external_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(builtin_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        chain
+            .apply_response(serde_json::json!({"content": []}))
+            .unwrap();
+        assert_eq!(external_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(builtin_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    struct FailModeTransformer {
+        fail: bool,
+    }
+
+    impl Transformer for FailModeTransformer {
+        fn name(&self) -> &str {
+            if self.fail {
+                "redact-pii"
+            } else {
+                "identity"
+            }
+        }
+
+        fn fail_mode(&self) -> bool {
+            self.fail
+        }
+    }
+
+    #[test]
+    fn fail_mode_plugin_names_the_first_fail_mode_transformer() {
+        let chain = TransformerChain::new()
+            .with_transformer(Arc::new(FailModeTransformer { fail: false }))
+            .with_transformer(Arc::new(FailModeTransformer { fail: true }));
+        assert_eq!(chain.fail_mode_plugin().as_deref(), Some("redact-pii"));
+
+        let passthrough =
+            TransformerChain::new().with_transformer(Arc::new(FailModeTransformer { fail: false }));
+        assert_eq!(passthrough.fail_mode_plugin(), None);
+    }
+
     #[test]
     fn identity_passthrough() {
         let transformer = IdentityTransformer;
@@ -465,6 +648,26 @@ mod tests {
 
         let result = transformer.transform_request(request).unwrap();
         assert_eq!(result["max_tokens"], 5000);
+    }
+
+    #[test]
+    fn option_only_builtins_are_creatable() {
+        let registry = TransformerRegistry::new();
+        for name in OPTION_ONLY_BUILTINS {
+            assert!(
+                registry
+                    .create_with_options(name, &serde_json::json!({}))
+                    .is_some(),
+                "option-only built-in {name} is not creatable"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_names_include_option_only_builtins() {
+        let names = TransformerRegistry::new().reserved_names();
+        assert!(names.iter().any(|name| name == "maxtoken"));
+        assert!(names.iter().any(|name| name == "anthropic"));
     }
 
     #[test]

@@ -285,7 +285,10 @@ pub async fn stream_response_translated(
                 }
             });
 
-            if let Ok(transformed) = chain.apply_response(resp_value) {
+            // This aggregate exists only for tracing, so external plugins are
+            // skipped: spawning a process to produce a discarded result costs
+            // latency and the plugin never sees an aggregated stream document.
+            if let Ok(transformed) = chain.apply_response_frame(resp_value) {
                 trace!(transformed_response = %serde_json::to_string(&transformed).unwrap_or_default(),
                        "streaming response transformed");
             }
@@ -531,10 +534,12 @@ pub async fn stream_anthropic_response_with_tracking(
                                     }
                                 }
 
-                                // Apply response transformers if chain is not empty
+                                // Apply in-process response transformers if the
+                                // chain is not empty. External plugins are
+                                // skipped per frame; see `apply_response_frame`.
                                 let output_frame = if !chain.is_empty() {
                                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
-                                        if let Ok(transformed) = chain.apply_response(value) {
+                                        if let Ok(transformed) = chain.apply_response_frame(value) {
                                             serde_json::to_string(&transformed).unwrap_or_else(|_| json_str.to_string())
                                         } else {
                                             json_str.to_string()

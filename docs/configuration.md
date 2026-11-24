@@ -118,7 +118,11 @@ See [Gemini Integration](gemini-integration.md) for detailed security guidance.
   "PROXY_URL": "http://proxy.example.com:8080",
   "POOL_MAX_IDLE_PER_HOST": 64,
   "POOL_IDLE_TIMEOUT_MS": 90000,
-  "SSE_BUFFER_SIZE": 32
+  "SSE_BUFFER_SIZE": 32,
+  "Plugins": {
+    "dir": "~/.claude-code-router/plugins",
+    "plugins": {}
+  }
 }
 ```
 
@@ -518,6 +522,23 @@ Behavioral details:
 - With unlimited sweeps and no hold cap, a request whose client stays
   connected is retried until it succeeds. Make sure the client's own timeout
   (Claude Code / Anthropic SDK default: 10 minutes) matches your tolerance.
+
+## Plugins
+
+Runtime-loadable transformer plugins: executable programs that transform
+requests and responses without recompiling the router. Referenced from a
+provider's transformer `use` list exactly like built-ins.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Plugins.dir` | string | `~/.claude-code-router/plugins` | Directory scanned for executable drop-in plugins (plugin name = file stem). A missing directory is not an error. |
+| `Plugins.plugins` | object | `{}` | Named plugin declarations (`command`, `args`, `timeout_ms`, `env`, `stages`, `on_error`) that override same-named drop-ins. Built-in transformer names always win. |
+
+Declared plugins are validated at config load, so `start`, `validate`, and
+`doctor` fail fast on a broken command. Inspect the effective set with
+`ccr-rust plugins` (add `--json` for machine-readable output). Full wire
+protocol, failure semantics, and examples: [plugins.md](plugins.md) and
+[examples/plugins/](../examples/plugins/).
 
 ## Server Configuration
 

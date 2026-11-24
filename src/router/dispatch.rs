@@ -333,6 +333,50 @@ pub(crate) fn canonical_model_name<'a>(
     }
 }
 
+/// Classify a transformer-stage error for the router.
+///
+/// A fail-mode plugin error is request-fatal: it must not be retried on the
+/// same tier and must not cascade to a tier whose chain may omit the plugin.
+pub(crate) fn map_transform_error(error: anyhow::Error) -> TryRequestError {
+    if error
+        .downcast_ref::<crate::transformer::PluginStageError>()
+        .is_some()
+    {
+        TryRequestError::PluginRejected(error)
+    } else {
+        TryRequestError::Other(error)
+    }
+}
+
+/// Run a request transformer stage off the async runtime workers.
+///
+/// A plugin stage blocks for its full timeout, so running it inline parks a
+/// Tokio worker and can starve unrelated requests, health, and metrics.
+pub(crate) async fn apply_request_offloaded(
+    chain: TransformerChain,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, TryRequestError> {
+    tokio::task::spawn_blocking(move || chain.apply_request(request))
+        .await
+        .map_err(|error| {
+            TryRequestError::Other(anyhow::anyhow!("transformer stage join error: {error}"))
+        })?
+        .map_err(map_transform_error)
+}
+
+/// Run a response transformer stage off the async runtime workers.
+pub(crate) async fn apply_response_offloaded(
+    chain: TransformerChain,
+    response: serde_json::Value,
+) -> Result<serde_json::Value, TryRequestError> {
+    tokio::task::spawn_blocking(move || chain.apply_response(response))
+        .await
+        .map_err(|error| {
+            TryRequestError::Other(anyhow::anyhow!("transformer stage join error: {error}"))
+        })?
+        .map_err(map_transform_error)
+}
+
 pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, TryRequestError> {
     let TryRequestArgs {
         config,
@@ -390,9 +434,7 @@ pub(super) async fn try_request(args: TryRequestArgs<'_>) -> Result<Response, Tr
     } else {
         let req_value =
             serde_json::to_value(request).map_err(|e| TryRequestError::Other(e.into()))?;
-        chain
-            .apply_request(req_value)
-            .map_err(TryRequestError::Other)?
+        apply_request_offloaded(chain.clone(), req_value).await?
     };
 
     // Only use passthrough when the chain has no transformers (transformers may
@@ -1103,15 +1145,37 @@ pub(super) async fn try_request_via_openai_protocol(
             }
 
             // Apply response transformers if chain is not empty.
+            let fail_mode_plugin = chain.fail_mode_plugin();
             let final_resp = if chain.is_empty() {
                 anthropic_resp
             } else {
                 let resp_value = serde_json::to_value(&anthropic_resp)
                     .map_err(|e| TryRequestError::Other(e.into()))?;
-                let transformed = chain
-                    .apply_response(resp_value)
-                    .map_err(TryRequestError::Other)?;
-                serde_json::from_value::<AnthropicResponse>(transformed).unwrap_or(anthropic_resp)
+                let transformed = apply_response_offloaded(chain, resp_value).await?;
+                match serde_json::from_value::<AnthropicResponse>(transformed) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Some(plugin) = fail_mode_plugin {
+                            // A fail-mode transform produced output that is not
+                            // a valid Anthropic response. Returning the
+                            // original would send the untransformed payload,
+                            // which is exactly what fail mode forbids.
+                            return Err(TryRequestError::PluginRejected(
+                                anyhow::Error::new(crate::transformer::PluginStageError {
+                                    plugin,
+                                    message: format!(
+                                        "fail-mode transformer produced a response that is not a valid Anthropic response: {error}"
+                                    ),
+                                }),
+                            ));
+                        }
+                        warn!(
+                            %error,
+                            "transformed response is not a valid Anthropic response; returning the original"
+                        );
+                        anthropic_resp
+                    }
+                }
             };
 
             let response_body =
@@ -1416,12 +1480,11 @@ pub(super) async fn try_request_via_anthropic_protocol(
             }
         }
 
+        let fail_mode_plugin = chain.fail_mode_plugin();
         let transformed_response_value = match serde_json::from_slice::<serde_json::Value>(&body) {
-            Ok(response_value) if !chain.is_empty() => Some(
-                chain
-                    .apply_response(response_value)
-                    .map_err(TryRequestError::Other)?,
-            ),
+            Ok(response_value) if !chain.is_empty() => {
+                Some(apply_response_offloaded(chain, response_value).await?)
+            }
             Ok(response_value) => Some(response_value),
             Err(_) => None,
         };
@@ -1429,7 +1492,24 @@ pub(super) async fn try_request_via_anthropic_protocol(
         if let Some(response_value) = transformed_response_value {
             let anthropic_resp = match serde_json::from_value::<AnthropicResponse>(response_value) {
                 Ok(response) => response,
-                Err(_) => {
+                Err(error) => {
+                    if let Some(plugin) = fail_mode_plugin {
+                        // A fail-mode transform produced output that is not a
+                        // valid Anthropic response. Returning the original
+                        // body would send the untransformed payload.
+                        return Err(TryRequestError::PluginRejected(
+                            anyhow::Error::new(crate::transformer::PluginStageError {
+                                plugin,
+                                message: format!(
+                                    "fail-mode transformer produced a response that is not a valid Anthropic response: {error}"
+                                ),
+                            }),
+                        ));
+                    }
+                    warn!(
+                        %error,
+                        "transformed response is not a valid Anthropic response; returning the original"
+                    );
                     let mut response = (
                         status,
                         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -1569,6 +1649,81 @@ mod tests {
 
         assert_eq!(headers.get("authorization").unwrap(), "Bearer ak-test");
         assert!(headers.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn plugin_stage_errors_are_request_fatal() {
+        let plugin_error =
+            map_transform_error(anyhow::Error::new(crate::transformer::PluginStageError {
+                plugin: "redact-pii".to_string(),
+                message: "plugin 'redact-pii': request stage timed out".to_string(),
+            }));
+        assert!(matches!(plugin_error, TryRequestError::PluginRejected(_)));
+
+        let other = map_transform_error(anyhow::anyhow!("serialize failed"));
+        assert!(matches!(other, TryRequestError::Other(_)));
+    }
+
+    struct SlowTransformer {
+        running: Arc<std::sync::atomic::AtomicBool>,
+        started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl Transformer for SlowTransformer {
+        fn name(&self) -> &str {
+            "slow"
+        }
+
+        fn transform_request(
+            &self,
+            request: serde_json::Value,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Ok(mut guard) = self.started.lock() {
+                if let Some(sender) = guard.take() {
+                    let _ = sender.send(());
+                }
+            }
+            // Block until the test releases the stage, so the assertion below
+            // cannot race a fixed sleep on a loaded runner.
+            if let Ok(mut guard) = self.release.lock() {
+                if let Some(receiver) = guard.take() {
+                    let _ = receiver.recv();
+                }
+            }
+            self.running
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(request)
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_stage_runs_off_the_async_worker() {
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let chain = TransformerChain::new().with_transformer(Arc::new(SlowTransformer {
+            running: running.clone(),
+            started: std::sync::Mutex::new(Some(started_tx)),
+            release: std::sync::Mutex::new(Some(release_rx)),
+        }));
+
+        let task = tokio::spawn(apply_request_offloaded(
+            chain,
+            serde_json::json!({"model": "test"}),
+        ));
+        started_rx
+            .await
+            .expect("the stage must start on the blocking pool");
+        assert!(
+            running.load(std::sync::atomic::Ordering::SeqCst),
+            "the async worker must be free while the plugin stage blocks"
+        );
+        release_tx.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        assert!(!running.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -1775,6 +1930,7 @@ mod tests {
             TryRequestError::Rejected(code, _) => code,
             TryRequestError::Other(_) => panic!("expected deterministic rejection"),
             TryRequestError::RateLimited(_) => panic!("expected deterministic rejection"),
+            TryRequestError::PluginRejected(_) => panic!("expected deterministic rejection"),
         }
     }
 

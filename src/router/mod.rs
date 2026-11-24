@@ -409,6 +409,31 @@ fn note_rate_limited_tier(
     tiers.push((route.to_string(), tier_name.to_string(), retry_after));
 }
 
+/// Terminal response for a `on_error: "fail"` transformer rejection.
+///
+/// The payload is refused as a whole: no retry, no cascade to a tier whose
+/// chain may omit the plugin, and no untransformed passthrough.
+fn plugin_rejected_response(error: anyhow::Error) -> Response {
+    let plugin = error
+        .downcast_ref::<crate::transformer::PluginStageError>()
+        .map(|failure| failure.plugin.as_str());
+    // The client response names the plugin but never includes the plugin's
+    // stderr, which can carry the rejected payload or a secret from the
+    // plugin's environment. The server log keeps the full detail.
+    let message = match plugin {
+        Some(plugin) => format!("request rejected by fail-mode plugin '{plugin}'"),
+        None => "request rejected by a fail-mode transformer".to_string(),
+    };
+    let error_resp = serde_json::json!({
+        "error": {
+            "type": "api_error",
+            "message": message,
+            "code": "transform_rejected"
+        }
+    });
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(error_resp)).into_response()
+}
+
 fn rate_limit_exhausted_response(
     retry_after: Option<std::time::Duration>,
     rate_limited_tiers: &[RateLimitedRoute],
@@ -1021,6 +1046,28 @@ async fn handle_messages_inner(
                         rejected_tiers.insert(tier.to_string());
                         break;
                     }
+                    Err(TryRequestError::PluginRejected(e)) => {
+                        timer.finish_failure_with_limit(effective_timeout_secs);
+                        #[cfg(feature = "gp")]
+                        if let (Some(gp_router), Some(plan)) =
+                            (state.gp_router.as_ref(), gp_plan.as_ref())
+                        {
+                            gp_router.record_attempt(plan, tier, attempt, None, config);
+                        }
+                        sync_ewma_gauge(&state.ewma_tracker);
+                        error!(
+                            tier = tier_name,
+                            "fail-mode transformer rejected the request; not retrying or cascading: {e}"
+                        );
+                        record_failure(tier_name, "transform_rejected");
+                        // `on_error: "fail"` exists so a correctness-critical
+                        // transform (PII redaction) is never bypassed. Retrying
+                        // the same tier re-runs a deterministic failure, and
+                        // cascading would reach a tier whose chain may not
+                        // include the plugin at all, forwarding the untransformed
+                        // payload. Reject the whole request here instead.
+                        return plugin_rejected_response(e);
+                    }
                     Err(TryRequestError::Other(e)) => {
                         timer.finish_failure_with_limit(effective_timeout_secs);
                         #[cfg(feature = "gp")]
@@ -1327,6 +1374,28 @@ mod tests {
     use super::translate_request::*;
     use super::translate_response::*;
     use super::*;
+
+    #[tokio::test]
+    async fn plugin_rejection_response_names_the_plugin() {
+        let error = anyhow::Error::new(crate::transformer::PluginStageError {
+            plugin: "redact-pii".to_string(),
+            message: "plugin 'redact-pii': request stage timed out".to_string(),
+        });
+        let response = plugin_rejected_response(error);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "transform_rejected");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("redact-pii"),
+            "unexpected message: {body}"
+        );
+    }
 
     #[test]
     fn test_normalize_string_content() {
