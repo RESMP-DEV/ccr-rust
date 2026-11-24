@@ -182,7 +182,7 @@ impl ExternalTransformer {
         let mut stdout = child.stdout.take().expect("stdout piped");
         let mut stderr = child.stderr.take().expect("stderr piped");
         // The join handle is dropped on purpose: completion is observed
-        // through `stdin_done_rx`, bounded by the drain grace.
+        // through `stdin_done_rx`, bounded by the timeout deadline.
         std::thread::spawn(move || {
             let _ = stdin.write_all(&input);
             let _ = stdin_done_tx.send(());

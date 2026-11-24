@@ -316,6 +316,10 @@ pub struct TransformerRegistry {
     transformers: HashMap<String, Arc<dyn Transformer>>,
 }
 
+/// Built-in transformers that exist only through `create_with_options`, so
+/// they are not keys in the registry map but must still be reserved.
+const OPTION_ONLY_BUILTINS: &[&str] = &["maxtoken"];
+
 impl TransformerRegistry {
     /// Create a new transformer registry with default transformers registered.
     pub fn new() -> Self {
@@ -363,10 +367,7 @@ impl TransformerRegistry {
     /// a plugin of the same name. Returns the registered plugin names.
     pub fn register_plugins(&mut self, plugins: &PluginsConfig) -> Vec<String> {
         let mut builtins: Vec<String> = self.transformers.keys().cloned().collect();
-        // `maxtoken` is registered only by `create_with_options`, so it is not
-        // in `self.transformers`; reserve it as well so a plugin cannot shadow
-        // the option-only built-in.
-        builtins.push("maxtoken".to_string());
+        builtins.extend(OPTION_ONLY_BUILTINS.iter().map(|name| name.to_string()));
         let builtin_names: Vec<&str> = builtins.iter().map(String::as_str).collect();
         let resolved = plugin_catalog::resolve_plugins(plugins, &builtin_names);
         let mut registered = Vec::new();
@@ -442,7 +443,7 @@ impl TransformerRegistry {
     pub fn validate_entries(&self, entries: &[TransformerEntry]) -> Vec<String> {
         let mut errors = Vec::new();
         for entry in entries {
-            if self.get(entry.name()).is_none() && !matches!(entry.name(), "maxtoken") {
+            if self.get(entry.name()).is_none() && !OPTION_ONLY_BUILTINS.contains(&entry.name()) {
                 errors.push(format!("Unknown transformer: {}", entry.name()));
             }
         }
@@ -512,6 +513,19 @@ mod tests {
 
         let result = transformer.transform_request(request).unwrap();
         assert_eq!(result["max_tokens"], 5000);
+    }
+
+    #[test]
+    fn option_only_builtins_are_creatable() {
+        let registry = TransformerRegistry::new();
+        for name in OPTION_ONLY_BUILTINS {
+            assert!(
+                registry
+                    .create_with_options(name, &serde_json::json!({}))
+                    .is_some(),
+                "option-only built-in {name} is not creatable"
+            );
+        }
     }
 
     #[test]
