@@ -1,0 +1,4 @@
+- Request decoding errors are converted to specific HTTP status codes via dedicated helper functions (`body_read_error_status`, `decode_error_status`) rather than inline match arms.
+- SSE frames are emitted through small helpers in `content_part_events.rs` that construct typed event payloads keyed on `ResponseOutputItemIdentity`, keeping frame assembly out of the stream parser.
+- Streaming state is encapsulated in a single `ResponsesStreamConverter` struct whose fields track per-output-item indices, pending quote artifacts, reasoning blocks, tool arguments, and usage, with `push_frame` returning accumulated output strings and `finish` flushing terminals.
+- Test coverage is split per concern into sibling test files (`agent_message_tests`, `reasoning_tests`, `request_edge_tests`, `incremental_stream/tests`) instead of inline `#[test]` blocks.

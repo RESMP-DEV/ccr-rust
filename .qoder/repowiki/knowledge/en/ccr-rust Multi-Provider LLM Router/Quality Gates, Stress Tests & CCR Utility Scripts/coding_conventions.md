@@ -1,0 +1,4 @@
+- Each script declares `ROOT = Path(__file__).resolve().parents[1]` to locate the workspace root instead of relying on cwd.
+- SSE stress tests keep all components (mock server, proxy, client) as separate Python modules launched by `run_stress_test.sh`, avoiding any hard dependency between them.
+- CLI entrypoints use `argparse` with explicit defaults documented alongside their flags in the README table rather than argparse help alone.
+- Hotspot files in the SLOC ratchet (`check_sloc.py`) receive per-file ceilings via the `HOTSPOT_CEILINGS` dict, while the global `TOTAL_CEILING` and `FILE_CEILING` apply as the default cap.

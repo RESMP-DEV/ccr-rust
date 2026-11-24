@@ -13,79 +13,94 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CATALOG = Path.home() / ".codex" / "ccr-live-model-catalog.json"
-SOURCE_SLUG = "glm-5.3"
+# The metadata donor for every generated entry. It is the model CCR serves as
+# its canonical Z.AI coding-plan primary, and 2026-11-23 moved it from
+# glm-5.3 to glm-5.4. The donor must exist in the live catalog with its own
+# real capability fields: the builder never clones another model's context
+# window, modalities, or effort labels onto a slug that has no entry of its
+# own, because a cloned profile would assert capability fields nobody
+# measured. A live catalog without a glm-5.4 entry therefore fails the sync
+# with a structured error instead of writing a fabricated glm-5.4 profile.
+SOURCE_SLUG = "glm-5.4"
 GLM_REASONING_EFFORTS = ("low", "high", "max")
 
 ENTRIES: tuple[dict[str, str], ...] = (
     {
         "slug": "ccr-primary",
-        "display_name": "CCR Primary (GLM 5.3)",
-        "description": "Stable CCR primary alias; metadata mirrors the current GLM 5.3 primary tier.",
+        "display_name": "CCR Primary (GLM 5.4)",
+        "description": "Stable CCR primary alias; metadata mirrors the current GLM 5.4 primary tier.",
     },
     {
-        "slug": "glm-5.3-flash",
-        "display_name": "GLM 5.3 Flash (Z.ai via CCR)",
-        "description": "GLM 5.3 Flash through the bare CCR alias; metadata mirrors GLM 5.3.",
+        "slug": "glm-5.4",
+        "display_name": "GLM 5.4 (Z.ai via CCR)",
+        "description": "GLM 5.4 through the bare CCR alias; metadata mirrors GLM 5.4.",
     },
     {
-        "slug": "zai,glm-5.3-flash",
-        "display_name": "GLM 5.3 Flash (Z.ai via CCR)",
-        "description": "GLM 5.3 Flash through the explicit Z.ai CCR route; metadata mirrors GLM 5.3.",
+        "slug": "zai,glm-5.4",
+        "display_name": "GLM 5.4 (Z.ai via CCR)",
+        "description": "GLM 5.4 through the explicit Z.ai CCR route; metadata mirrors GLM 5.4.",
     },
     {
         "slug": "qwen3.8-flash",
         "display_name": "Qwen 3.8 Flash (via CCR)",
-        "description": "Qwen 3.8 Flash through the bare CCR alias; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "Qwen 3.8 Flash through the bare CCR alias; metadata mirrors GLM 5.4 tool tuning.",
     },
     {
         "slug": "qwen,qwen3.8-flash",
         "display_name": "Qwen 3.8 Flash (via CCR)",
-        "description": "Qwen 3.8 Flash through the exact Qwen CCR route; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "Qwen 3.8 Flash through the exact Qwen CCR route; metadata mirrors GLM 5.4 tool tuning.",
     },
     {
         "slug": "qwen3.8-max",
         "display_name": "Qwen 3.8 Max (via CCR)",
-        "description": "Qwen 3.8 Max through the bare CCR alias; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "Qwen 3.8 Max through the bare CCR alias; metadata mirrors GLM 5.4 tool tuning.",
     },
     {
         "slug": "qwen,qwen3.8-max",
         "display_name": "Qwen 3.8 Max (via CCR)",
-        "description": "Qwen 3.8 Max through the exact Qwen CCR route; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "Qwen 3.8 Max through the exact Qwen CCR route; metadata mirrors GLM 5.4 tool tuning.",
     },
     {
         "slug": "MiniMax-M3.1-Flash",
         "display_name": "MiniMax M3.1 Flash (via CCR)",
-        "description": "MiniMax M3.1 Flash through the bare CCR alias; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "MiniMax M3.1 Flash through the bare CCR alias; metadata mirrors GLM 5.4 tool tuning.",
     },
     {
         "slug": "minimax,MiniMax-M3.1-Flash",
         "display_name": "MiniMax M3.1 Flash (via CCR)",
-        "description": "MiniMax M3.1 Flash through the exact MiniMax CCR route; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "MiniMax M3.1 Flash through the exact MiniMax CCR route; metadata mirrors GLM 5.4 tool tuning.",
     },
     {
         "slug": "deepseek-v4.1-flash-1017",
         "display_name": "DeepSeek V4.1 Flash 1017 (via CCR)",
-        "description": "Qwen's dated DeepSeek checkpoint through the bare CCR alias; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "Qwen's dated DeepSeek checkpoint through the bare CCR alias; metadata mirrors GLM 5.4 tool tuning.",
     },
     {
         "slug": "qwen,deepseek-v4.1-flash-1017",
         "display_name": "DeepSeek V4.1 Flash 1017 (via CCR)",
-        "description": "Qwen's dated DeepSeek checkpoint through the exact Qwen CCR route; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "Qwen's dated DeepSeek checkpoint through the exact Qwen CCR route; metadata mirrors GLM 5.4 tool tuning.",
     },
     {
         "slug": "deepseek-v4.1-flash",
         "display_name": "DeepSeek V4.1 Flash (via CCR)",
-        "description": "Qwen's undated DeepSeek checkpoint through the bare CCR alias; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "Qwen's undated DeepSeek checkpoint through the bare CCR alias; metadata mirrors GLM 5.4 tool tuning.",
     },
     {
         "slug": "qwen,deepseek-v4.1-flash",
         "display_name": "DeepSeek V4.1 Flash (via CCR)",
-        "description": "Qwen's undated DeepSeek checkpoint through the exact Qwen CCR route; metadata mirrors GLM 5.3 tool tuning.",
+        "description": "Qwen's undated DeepSeek checkpoint through the exact Qwen CCR route; metadata mirrors GLM 5.4 tool tuning.",
     },
 )
 
 RETIRED_SLUGS = frozenset(
     {
+        # 2026-11-23: GLM-5.4 supersedes GLM-5.3 and GLM-5.3 Flash as the
+        # Z.AI coding-plan model and the Z.AI vision head, so their slugs are
+        # no longer advertised routes.
+        "glm-5.3",
+        "zai,glm-5.3",
+        "glm-5.3-flash",
+        "zai,glm-5.3-flash",
         "glm-5.3-flashx",
         "zai,glm-5.3-flashx",
         "MiniMax-M3.1-Flash-Preview",

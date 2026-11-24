@@ -1,0 +1,4 @@
+- Large fields are exposed as bounded previews via `report::text` plus a `{"text", "truncated"}` envelope rather than raw strings, keeping terminal output within fixed limits.
+- Cursor-based pagination is implemented by seeking to `after-1`, verifying the byte is LF, then resuming from `after`, allowing incremental consumption of large `events.jsonl` traces.
+- Optional files (receipts, final reports) are opened with explicit `NotFound` handling that converts missing files into warnings or `None` rather than propagating errors.
+- Test modules are colocated in sibling `*_tests.rs` files and included via `#[cfg(test)] #[path = ...] mod ...` at the bottom of the corresponding source file.

@@ -1,0 +1,30 @@
+schema_version: 1
+module_path: mcp_server/server_runtime
+title: MCP Server Runtime (HTTP Daemon & Process-Backed Proxy)
+scope:
+    - src/mcp/daemon.rs
+    - src/mcp/server.rs
+    - src/mcp/backend.rs
+source_files: []
+depends_on: []
+related_to:
+    - path: mcp_server/protocol_catalog_auth
+      reason: Server stdio proxy reads JsonRpcMessage and ToolCatalog types defined in protocol.rs/catalog.rs/auth.rs to multiplex JSON-RPC frames.
+kk_module_id: c0fb5929-08b5-4209-bc4f-ba195501f7e3
+kk_ordinal: 1
+kk_cards:
+    architecture_design:
+        id: 05e39d37-dafb-4d31-af4a-68187f9102e6
+        title: MCP Server Runtime (HTTP Daemon & Process-Backed Proxy)
+    coding_conventions:
+        id: 56a6ff1a-5947-4fd4-a514-4efcad670cb4
+        title: MCP Server Runtime (HTTP Daemon & Process-Backed Proxy)
+    overview:
+        id: e78f51cf-0753-4060-8a19-641cc951ea83
+        title: MCP Server Runtime (HTTP Daemon & Process-Backed Proxy)
+    tech_stack:
+        id: e73eaa3d-a05b-4dd3-8955-037ac548cf93
+        title: MCP Server Runtime (HTTP Daemon & Process-Backed Proxy)
+    unique_setup_and_commands:
+        id: 07598ee8-4fd0-4647-a96e-5cb802b35d30
+        title: MCP Server Runtime (HTTP Daemon & Process-Backed Proxy)

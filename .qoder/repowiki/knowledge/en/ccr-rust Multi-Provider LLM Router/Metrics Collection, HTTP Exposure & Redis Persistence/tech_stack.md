@@ -1,0 +1,1 @@
+Prometheus client (`prometheus` crate) for metrics registration and scraping; Axum for HTTP handlers; Redis (`redis` crate with `Commands` + raw `SCAN`/`DEL` commands) for durable persistence; `lazy_static` for global metric registers; `parking_lot::RwLock` for concurrent access to in-memory state.

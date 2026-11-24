@@ -1,0 +1,1 @@
+Axum web framework with `http_body_util::LengthLimitError` for request-body budget enforcement; SSE framing built manually via string concatenation of `event:` / `data:` lines.

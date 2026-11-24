@@ -316,16 +316,29 @@ pub(super) struct TryRequestArgs<'a> {
     pub(super) render_refusal_as_anthropic_text: bool,
 }
 
-/// Pin every MiniMax M3-family request to the official M3.1 Flash ID.
+/// Resolve the model id that goes on the wire for one provider.
 ///
-/// MiniMax originally returned the older M3 model for the shorter M3.1 alias.
-/// On 2026-10-19 its catalog lists `MiniMax-M3.1-Flash` and both M3.1 IDs
-/// self-report distinctly. Canonicalize legacy M3 aliases and preview pins to
-/// the official non-preview deployment so existing routes follow the launch.
+/// A provider-level `modelMap` wins over every built-in rule: it is the
+/// operator's explicit statement of which upstream model serves a requested
+/// id, so a retired model name can be aliased onto its successor without
+/// changing client pins.
+///
+/// Otherwise every MiniMax M3-family request is pinned to the official M3.1
+/// Flash ID. MiniMax originally returned the older M3 model for the shorter
+/// M3.1 alias. On 2026-10-19 its catalog lists `MiniMax-M3.1-Flash` and both
+/// M3.1 IDs self-report distinctly. Canonicalize legacy M3 aliases and
+/// preview pins to the official non-preview deployment so existing routes
+/// follow the launch.
 pub(crate) fn canonical_model_name<'a>(
     provider: &crate::config::Provider,
     model_name: &'a str,
 ) -> Cow<'a, str> {
+    // The mapped id is owned by the provider config, whose lifetime is not
+    // tied to `model_name`, so it is copied into an owned value rather than
+    // borrowed. Only mapped routes pay for it; unmapped routes stay borrowed.
+    if let Some(mapped) = crate::config::model_map::resolve(provider, model_name) {
+        return Cow::Owned(mapped.to_string());
+    }
     if is_minimax_provider_name(&provider.name, &provider.api_base_url) && is_m3_model(model_name) {
         Cow::Borrowed(MINIMAX_M3_1_FLASH)
     } else {
@@ -944,6 +957,7 @@ pub(super) async fn try_request_via_openai_protocol(
 
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
+            served_model: model_name.to_string(),
             ratelimit_key: ratelimit_key.to_string(),
             ratelimit_generation,
             local_estimate,
@@ -1065,12 +1079,15 @@ pub(super) async fn try_request_via_openai_protocol(
                     .and_then(|details| details.get("cached_tokens"))
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or_default();
+                let reasoning_tokens = crate::router::usage_metrics::openai_reasoning_tokens(usage);
                 record_usage(
                     tier_name,
                     usage.prompt_tokens,
                     usage.completion_tokens,
                     cache_read_tokens,
                     0,
+                    Some(model_name),
+                    reasoning_tokens,
                 );
                 verify_token_usage(tier_name, local_estimate, usage.prompt_tokens);
                 if let Some(cost) = provider.pricing_for_model(model_name).and_then(|p| {
@@ -1349,6 +1366,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
 
         let ctx = StreamVerifyCtx {
             tier_name: tier_name.to_string(),
+            served_model: model_name.to_string(),
             ratelimit_key: ratelimit_key.to_string(),
             ratelimit_generation,
             local_estimate,
@@ -1498,6 +1516,8 @@ pub(super) async fn try_request_via_anthropic_protocol(
                 output_tokens,
                 cache_read_tokens,
                 cache_creation_tokens,
+                Some(model_name),
+                anthropic_resp.usage.reasoning_tokens.unwrap_or(0),
             );
             // Drift verification receives the raw upstream prompt volume: when
             // the provider omitted usage there is nothing to compare, and the
@@ -1533,6 +1553,10 @@ pub(super) async fn try_request_via_anthropic_protocol(
         Ok(response)
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch_model_map_tests.rs"]
+mod dispatch_model_map_tests;
 
 #[cfg(test)]
 mod tests {

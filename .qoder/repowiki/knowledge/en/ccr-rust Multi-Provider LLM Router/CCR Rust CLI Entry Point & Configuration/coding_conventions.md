@@ -1,0 +1,4 @@
+- Optional subsystems are exposed both from the library root and from `main.rs` using identical `#[cfg(feature = "...")] mod foo { pub use ccr_rust::foo::*; }` re-export blocks, keeping CLI and library feature gates in sync.
+- Configuration types live in `config/types.rs` and are validated/parsed in `config/mod.rs`, which re-exports the types while keeping validation helpers `pub(crate)`.
+- Environment-driven behavior is read through dedicated helper functions (e.g. `allow_unexpanded_credentials_override`, `contains_env_placeholder`) rather than inline `std::env::var` calls scattered across validators.
+- CLI commands declare their help text and examples inline via `#[command(after_help = ...)]` attributes on each `Subcommand` variant instead of separate help files.

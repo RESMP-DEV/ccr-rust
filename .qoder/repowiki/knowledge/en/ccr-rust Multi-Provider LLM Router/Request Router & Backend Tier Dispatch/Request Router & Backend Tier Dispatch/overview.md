@@ -1,0 +1,1 @@
+Routes incoming Anthropic/OpenAI/Responses API requests to backend model tiers, handling hedging, retries, streaming, protocol translation, and EWMA/GP-based tier selection.

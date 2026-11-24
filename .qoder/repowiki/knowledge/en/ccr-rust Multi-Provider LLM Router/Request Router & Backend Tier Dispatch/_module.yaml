@@ -1,0 +1,29 @@
+schema_version: 1
+module_path: router
+title: Request Router & Backend Tier Dispatch
+scope:
+    - src/router/
+    - src/routing.rs
+    - src/gp_router.rs
+source_files: []
+depends_on: []
+related_to:
+    - path: transformers/provider_adapters
+      reason: Router builds TransformerRegistry and invokes per-provider transformers (Anthropic/OpenAI/DeepSeek/GLM/Kimi/Minimax) before proxying.
+    - path: main_service
+      reason: src/main.rs mounts Axum routes including POST /v1/responses → router::handle_responses and wires AppState from router.
+kk_module_id: 473f636b-0985-424a-846c-76cd1c85e54a
+kk_ordinal: 1
+kk_cards:
+    architecture_design:
+        id: 66397e1b-25a4-4be3-946b-120e03686321
+        title: Request Router & Backend Tier Dispatch
+    coding_conventions:
+        id: 625d58e5-3190-4200-93c1-413d2e653d25
+        title: Request Router & Backend Tier Dispatch
+    overview:
+        id: 80955d91-31bd-4d23-8549-588708a2d5c3
+        title: Request Router & Backend Tier Dispatch
+    tech_stack:
+        id: a927af05-4945-4737-9df7-425c8771c373
+        title: Request Router & Backend Tier Dispatch

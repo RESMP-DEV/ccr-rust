@@ -1,0 +1,1 @@
+Example configs are launched by exporting the required API keys, copying the desired file to `~/.claude-code-router/config.json`, then running `ccr-rust validate` followed by `ccr-rust start`; end-to-end smoke tests run via `./examples/smoke-test.sh`. All examples bind `127.0.0.1:3456`, so only one can run at a time unless overridden.

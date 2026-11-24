@@ -1,0 +1,1 @@
+Auxiliary Python/Rust tooling that enforces source-line ratchets, runs a deterministic quality matrix, benchmarks SSE concurrency, and provides smoke/recovery/worker-usage utilities for ccr-rust.

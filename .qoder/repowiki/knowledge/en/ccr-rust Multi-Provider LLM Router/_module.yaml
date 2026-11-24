@@ -1,0 +1,58 @@
+schema_version: 1
+module_path: root
+title: ccr-rust Multi-Provider LLM Router
+scope:
+    - README.md
+    - CONTRIBUTING.md
+    - REVIEW.md
+    - AGENTS.md
+    - .gitignore
+    - Cargo.toml
+    - Cargo.lock
+    - Dockerfile
+    - docker-compose.yml
+    - deny.toml
+    - osv-scanner.toml
+    - ruff.toml
+    - build.rs
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: b865e9a0-f9e5-497e-b73e-65b4393e014a
+kk_cards:
+    architecture_design:
+        id: 692aa8a4-eb69-4fad-92f2-2fac9441f67d
+        title: ccr-rust Multi-Provider LLM Router
+    coding_conventions:
+        id: 5a2d81da-85c7-4c18-9ffd-cb491351deb4
+        title: ccr-rust Multi-Provider LLM Router
+    overview:
+        id: dbd5e024-76c3-437d-9641-6e05a0601cc6
+        title: ccr-rust Multi-Provider LLM Router
+    tech_stack:
+        id: 90904ef2-a016-4c0e-895d-6c3e1394af54
+        title: ccr-rust Multi-Provider LLM Router
+    unique_setup_and_commands:
+        id: eac699ea-49a2-4c1e-89e2-cfb56d71c558
+        title: ccr-rust Multi-Provider LLM Router
+    build_system:
+        id: 5a697dcd-bbd0-4dbe-978b-0652ceddb331
+        title: Rust Cargo-based Build with Supply-Chain Security Gates
+    configuration_system:
+        id: 55c94c86-b34b-44d6-afa4-9ff864aae565
+        title: JSON Config with Env Expansion, Presets, and Multi-Stage Validation
+    dependency_management:
+        id: beea2d3e-b9c4-4b30-9897-96e4fca609a6
+        title: Rust Dependency Management via Cargo, cargo-deny, and OSV Scanner
+    error_handling:
+        id: 4c55ee0e-deeb-4024-ab4b-94cf1c3dd727
+        title: "Rust Error Handling: TryRequestError, anyhow Result, and Provider Rejection Semantics"
+    logging_system:
+        id: 702b6bd5-0393-4260-90ea-4532ad082e36
+        title: Tracing-Based Structured Logging with Optional OpenTelemetry Export
+kk_repo_cards:
+    - build_system
+    - configuration_system
+    - dependency_management
+    - error_handling
+    - logging_system

@@ -1,0 +1,1 @@
+Operates on the default directory `~/.cache/ccr-worker-runs` (overridable via `--runs-dir` or `CCR_WORKER_RUNS_DIR`); requires prior worker runs that wrote `status.json`, `events.jsonl`, `final.txt`, and `stderr.txt` to be present.

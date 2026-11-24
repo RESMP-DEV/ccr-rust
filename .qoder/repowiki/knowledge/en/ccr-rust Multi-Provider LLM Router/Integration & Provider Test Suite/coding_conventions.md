@@ -1,0 +1,4 @@
+- Each integration scenario lives in its own `integration_<feature>.rs` file that defines a single `#[tokio::test]` function per case.
+- Test fixtures build JSON payloads with the `serde_json::json!` macro (e.g. `codex_request_body`, `generate_chat_request`) rather than hand-constructed structs.
+- Upstream provider calls are always intercepted via `wiremock::MockServer` with explicit `method()`/`path()` matchers instead of hitting the network.
+- Shared test infrastructure (app builder, config factory, SSE helpers) is centralized under `support/mod.rs` and re-exported via `pub(crate)` so individual test files stay focused on assertions.

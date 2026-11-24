@@ -41,6 +41,7 @@ for launch commands, Codex profiles, presets, direct connections, and fallback.
 - [Authentication suites](auth-suites.md) — separate API plans and native Claude/ChatGPT logins
 - [Switching plans](switching-plans.md) — Kimi/GLM selection, profiles, presets, and fallback
 - [Observability](observability.md) — Prometheus metrics, TUI dashboard, token/latency tracking
+- [Per-model benchmark harness](observability.md#per-model-benchmark-harness) — fixed task suite, per-route scorecards, and what the numbers do not prove
 - [Configuration recovery](config-recovery.md) — snapshots, verified restore, drift checks, and secret-free replication
 - [Quality matrix](quality-matrix.md) — offline quality checks, coverage/mutation modes, and receipts
 - [Idle restarts](idle-restart.md) — listener drain gate for preserving live LLM turns

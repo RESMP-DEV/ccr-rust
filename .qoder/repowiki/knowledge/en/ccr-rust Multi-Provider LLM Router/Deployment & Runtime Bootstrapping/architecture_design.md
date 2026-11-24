@@ -1,0 +1,5 @@
+Three parallel deployment targets ship as static manifests with no build step:
+- `deploy/` provides unit files (`ccr-rust.service`) and macOS launch agents (`com.ccr.rust.plist`, `com.kearm.strata-b550-tunnel.plist`) that exec `/usr/local/bin/ccr-rust start --config /etc/ccr/config.json`; systemd runs it as user `ccr` with `Restart=always`, while launchd uses `KeepAlive` and logs to `/usr/local/var/log/`.
+- `k8s/` defines a `Deployment` (2 replicas, image `ghcr.io/resmp-dev/ccr-rust:latest`, container port 3456) backed by a `ConfigMap` mounted at `/etc/ccr/config.json`, exposed through a `ClusterIP` `Service` on port 3456, with HTTP `/health` liveness/readiness probes and Prometheus annotations pointing to port 3456.
+- `monitoring/prometheus-snippet.yml` is a standalone snippet adding a `ccr-rust` job scraping `/metrics` every 10s from `localhost:3456`.
+Dependency direction is one-way: manifests reference the binary's CLI contract (`start`, `--config`, `/health`, `/metrics`, port 3456) but the module contains no code.

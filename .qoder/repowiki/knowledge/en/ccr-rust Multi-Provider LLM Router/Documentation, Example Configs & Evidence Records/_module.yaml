@@ -1,0 +1,28 @@
+schema_version: 1
+module_path: docs_and_examples
+title: Documentation, Example Configs & Evidence Records
+scope:
+    - docs/
+    - examples/
+    - evidence/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: b9df7c69-d92e-450e-8813-096172bc0414
+kk_ordinal: 11
+kk_cards:
+    architecture_design:
+        id: 7a6e1ef3-8e4a-4723-887f-d58d1747e687
+        title: Documentation, Example Configs & Evidence Records
+    coding_conventions:
+        id: bcf26b4d-583d-4bea-aa7b-da17b07857cb
+        title: Documentation, Example Configs & Evidence Records
+    overview:
+        id: 4a209de9-a5c0-4ebc-b00c-eaf29573ee75
+        title: Documentation, Example Configs & Evidence Records
+    tech_stack:
+        id: f59d6bfc-1e3e-471a-84d7-94281182f004
+        title: Documentation, Example Configs & Evidence Records
+    unique_setup_and_commands:
+        id: 545f7c13-5d1b-4d51-8d7a-37ffaa969e75
+        title: Documentation, Example Configs & Evidence Records

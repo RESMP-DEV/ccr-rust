@@ -1,0 +1,264 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: en
+commit: 259b4525ff551042425fbf8f2e3db7ecf66d6d64
+branch: HEAD
+exported_at: "2026-10-25T22:52:51Z"
+modules:
+    core_runtime:
+        dir_name: Core Runtime Proxy, Admission & Diagnostic Subsystems
+        title: "Core Runtime: Proxy, Admission & Diagnostic Subsystems"
+        scope:
+            - src/admission.rs
+            - src/client_auth.rs
+            - src/proxy.rs
+            - src/ratelimit.rs
+            - src/retry_budget.rs
+            - src/sse.rs
+            - src/stickiness.rs
+            - src/schema_validate.rs
+            - src/debug_capture.rs
+            - src/turn_capture.rs
+            - src/dashboard.rs
+            - src/doctor.rs
+            - src/bin/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    deploy_infra:
+        dir_name: Deployment & Runtime Bootstrapping
+        title: Deployment & Runtime Bootstrapping
+        scope:
+            - deploy/
+            - k8s/
+            - monitoring/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    docs_and_examples:
+        dir_name: Documentation, Example Configs & Evidence Records
+        title: Documentation, Example Configs & Evidence Records
+        scope:
+            - docs/
+            - examples/
+            - evidence/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    frontend_adapters:
+        dir_name: Frontend Adapters (OpenAI Codex & Anthropic Claude Code)
+        title: Frontend Adapters (OpenAI Codex & Anthropic Claude Code)
+        scope:
+            - src/frontend/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    main_service:
+        dir_name: CCR Rust CLI Entry Point & Configuration
+        title: CCR Rust CLI Entry Point & Configuration
+        scope:
+            - src/main.rs
+            - src/lib.rs
+            - src/config/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    mcp_server:
+        dir_name: MCP Server (Model Context Protocol)
+        title: MCP Server (Model Context Protocol)
+        scope:
+            - src/mcp/
+        source_files: []
+        children:
+            - mcp_server/protocol_catalog_auth
+            - mcp_server/server_runtime
+            - mcp_server/tools
+        depends_on: []
+        related_to: []
+    mcp_server/protocol_catalog_auth:
+        dir_name: MCP Protocol Types, Tool Catalog & Bearer Auth
+        title: MCP Protocol Types, Tool Catalog & Bearer Auth
+        scope:
+            - src/mcp/protocol.rs
+            - src/mcp/catalog.rs
+            - src/mcp/auth.rs
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    mcp_server/server_runtime:
+        dir_name: MCP Server Runtime (HTTP Daemon & Process-Backed Proxy)
+        title: MCP Server Runtime (HTTP Daemon & Process-Backed Proxy)
+        scope:
+            - src/mcp/daemon.rs
+            - src/mcp/server.rs
+            - src/mcp/backend.rs
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: mcp_server/protocol_catalog_auth
+              reason: Server stdio proxy reads JsonRpcMessage and ToolCatalog types defined in protocol.rs/catalog.rs/auth.rs to multiplex JSON-RPC frames.
+    mcp_server/tools:
+        dir_name: MCP Tool Implementations
+        title: MCP Tool Implementations
+        scope:
+            - src/mcp/tools/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: mcp_server/protocol_catalog_auth
+              reason: Concrete tool implementations register through ToolCatalog and use McpToolCallParams/JsonRpcMessage schemas from protocol/catalog/auth modules.
+    metrics:
+        dir_name: Metrics Collection, HTTP Exposure & Redis Persistence
+        title: Metrics Collection, HTTP Exposure & Redis Persistence
+        scope:
+            - src/metrics/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: deploy_infra
+              reason: monitoring/prometheus-scrape.yml targets the metrics module's HTTP exposition endpoint (default :9090) so Prometheus can scrape CCR request/token/cost counters.
+    root:
+        dir_name: ccr-rust Multi-Provider LLM Router
+        title: ccr-rust Multi-Provider LLM Router
+        scope:
+            - README.md
+            - CONTRIBUTING.md
+            - REVIEW.md
+            - AGENTS.md
+            - .gitignore
+            - Cargo.toml
+            - Cargo.lock
+            - Dockerfile
+            - docker-compose.yml
+            - deny.toml
+            - osv-scanner.toml
+            - ruff.toml
+            - build.rs
+        source_files: []
+        children:
+            - core_runtime
+            - deploy_infra
+            - docs_and_examples
+            - frontend_adapters
+            - main_service
+            - mcp_server
+            - metrics
+            - router
+            - scripts_and_benchmarks
+            - tests
+            - transformers
+            - workers
+        depends_on: []
+        related_to: []
+    router:
+        dir_name: Request Router & Backend Tier Dispatch
+        title: Request Router & Backend Tier Dispatch
+        scope:
+            - src/router/
+            - src/routing.rs
+            - src/gp_router.rs
+        source_files: []
+        children:
+            - router/core_router
+            - router/responses_api
+        depends_on: []
+        related_to:
+            - path: transformers/provider_adapters
+              reason: Router builds TransformerRegistry and invokes per-provider transformers (Anthropic/OpenAI/DeepSeek/GLM/Kimi/Minimax) before proxying.
+            - path: main_service
+              reason: src/main.rs mounts Axum routes including POST /v1/responses → router::handle_responses and wires AppState from router.
+    router/core_router:
+        dir_name: Request Router & Backend Tier Dispatch
+        title: Request Router & Backend Tier Dispatch
+        scope:
+            - src/router/
+            - src/routing.rs
+            - src/gp_router.rs
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    router/responses_api:
+        dir_name: OpenAI Responses API Compatibility Layer
+        title: OpenAI Responses API Compatibility Layer
+        scope:
+            - src/router/responses_api/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: router/core_router
+              reason: responses_api/handler.rs calls crate::router::openai_compat::handle_responses_chat_completions to translate Responses into chat-completions pipeline.
+    scripts_and_benchmarks:
+        dir_name: Quality Gates, Stress Tests & CCR Utility Scripts
+        title: Quality Gates, Stress Tests & CCR Utility Scripts
+        scope:
+            - scripts/
+            - benchmarks/
+            - benches/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    tests:
+        dir_name: Integration & Provider Test Suite
+        title: Integration & Provider Test Suite
+        scope:
+            - tests/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: scripts_and_benchmarks
+              reason: scripts/smoke.py, recovery.py, worker-usage.py and tests/*.py are parallel external harnesses that start ccr-rust and assert the same router behavior.
+    transformers:
+        dir_name: Transformer Registry & Provider Format Pipeline
+        title: Transformer Registry & Provider Format Pipeline
+        scope:
+            - src/transform/
+            - src/transformer/
+        source_files: []
+        children:
+            - transformers/output_compression
+            - transformers/provider_adapters
+        depends_on: []
+        related_to: []
+    transformers/output_compression:
+        dir_name: Output Compression Transformer
+        title: Output Compression Transformer
+        scope:
+            - src/transform/output_compress/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    transformers/provider_adapters:
+        dir_name: LLM Provider & Format Transformer Pipeline
+        title: LLM Provider & Format Transformer Pipeline
+        scope:
+            - src/transform/
+            - src/transformer/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend_adapters
+              reason: Frontend adapters detect OpenAI Codex/Anthropic Claude Code requests and delegate protocol translation to provider adapter transformers.
+    workers:
+        dir_name: Worker Run Inspector CLI
+        title: Worker Run Inspector CLI
+        scope:
+            - src/workers/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []

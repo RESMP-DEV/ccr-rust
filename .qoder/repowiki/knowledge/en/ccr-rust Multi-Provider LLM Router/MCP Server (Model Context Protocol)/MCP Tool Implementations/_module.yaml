@@ -1,0 +1,24 @@
+schema_version: 1
+module_path: mcp_server/tools
+title: MCP Tool Implementations
+scope:
+    - src/mcp/tools/
+source_files: []
+depends_on: []
+related_to:
+    - path: mcp_server/protocol_catalog_auth
+      reason: Concrete tool implementations register through ToolCatalog and use McpToolCallParams/JsonRpcMessage schemas from protocol/catalog/auth modules.
+kk_module_id: 0b009698-4e9e-4022-b774-ffd73fba9306
+kk_cards:
+    architecture_design:
+        id: 40ee4b6a-4117-4917-8481-b9111a8bca85
+        title: MCP Tool Implementations
+    coding_conventions:
+        id: 5299bb73-9edf-4f3f-8417-d5a07c6b5837
+        title: MCP Tool Implementations
+    overview:
+        id: bae3926a-01a9-4b9e-a937-11954057e759
+        title: MCP Tool Implementations
+    tech_stack:
+        id: 93aa67cf-8dff-4d04-9a85-5dbe66deb291
+        title: MCP Tool Implementations

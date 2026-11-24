@@ -1,0 +1,1 @@
+Tokio async runtime for concurrent primary+hedge attempts; parking_lot RwLock/Mutex for shared EWMA state; external `gp_routing` crate for the GP surrogate (Thompson sampling, UCB, KPLS feature mapping); chrono for time-based request features.

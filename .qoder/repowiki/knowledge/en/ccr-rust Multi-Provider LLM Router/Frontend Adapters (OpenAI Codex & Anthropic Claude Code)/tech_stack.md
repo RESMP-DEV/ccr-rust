@@ -1,0 +1,1 @@
+Rust with `serde` + `serde_json` for polymorphic JSON deserialization (tagged enums like `ContentBlock`), `axum::http::HeaderMap` for HTTP header inspection, and `tracing` for debug-level logging inside parsers.

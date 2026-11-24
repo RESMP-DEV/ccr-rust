@@ -53,20 +53,23 @@ required on the Anthropic-compatible base URL:
 ```
 
 For a volume-worker chain, put Qwen after an entitled Flash tier and before
-the final fallback. The governed workstation uses:
+the final fallback. A user-configured volume chain looks like:
 
 ```text
-zai,glm-5.3-flash
+zai,glm-5.4
 qwen,qwen3.8-flash
 minimax,MiniMax-M3.1-Flash
 qwen,deepseek-v4.1-flash-1017
 qwen,deepseek-v4.1-flash
 ```
 
-GLM-5.3 remains the main/auth primary but is deliberately absent from this
-worker chain: worker volume should not consume the judgment seat.
-Main/auth additionally place `qwen,qwen3.8-max` immediately after GLM-5.3 and
-before the Flash/Qwen volume fallbacks.
+The Z.AI seat is `zai,glm-5.4`, which superseded GLM-5.3 and GLM-5.3-Flash on
+2026-11-23, so one model now carries both the main/auth primary and the Z.AI
+tier and there is no second GLM seat behind it. The governed workstation
+chain carries no Qwen lane: the Qwen Token Plan left that chain and the
+main/auth `qwen,qwen3.8-max` seat on 2026-10-19 when its monthly utilization
+window was exhausted. The current governed chain is listed in
+[Shared fallback policy](shared-fallback-policy.md).
 
 Qwen serves `deepseek-v4.1-flash-1017` and `deepseek-v4.1-flash` as distinct
 IDs: each request echoes the exact ID named. The dated `1017` ID is Qwen's
@@ -131,6 +134,11 @@ console reads are entered.
 | Interactive coding or agent session with cold, low-cache long context | Prefer Qwen plan `deepseek-v4.1-flash-1017`, the dated current checkpoint; the undated ID remains an explicit fallback. Both are listed at $0.08/$0.32 per M day and $0.04/$0.16 night, better than native off-peak $0.15/$0.60 on uncached tokens. |
 | Broad interactive Qwen flash use | Qwen plan `qwen3.8-flash`, especially in the night window; listed blended credit cost is about $0.047/M day and $0.019/M night. |
 | Judgment prompt | Choose the model first and preserve its quota; price is secondary. Keep GLM-5.3 out of worker fallback chains. |
+
+For delegated sub-agent judgment, the opt-in tier is Gemini 4 Argon through
+the Antigravity CLI, not a CCR fallback seat; see
+[Worker inspection](worker-inspection.md#judgment-tier-sub-agents). It is
+separate from this plan's routing chain.
 
 The 2026-10-18/19 noninteractive wire measurement passed both Qwen routes
 through CCR in both windows: 306 night and 96 day responses for

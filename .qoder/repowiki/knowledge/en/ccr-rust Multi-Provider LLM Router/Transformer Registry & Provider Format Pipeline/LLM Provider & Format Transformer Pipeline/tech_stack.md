@@ -1,0 +1,1 @@
+Rust with `serde_json::Value` for request/response payloads, `regex` for pattern matching in output compression, and `tracing` for logging within the registry builder.

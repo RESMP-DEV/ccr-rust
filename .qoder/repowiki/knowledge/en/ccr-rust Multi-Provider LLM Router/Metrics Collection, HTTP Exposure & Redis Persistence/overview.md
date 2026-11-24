@@ -1,0 +1,1 @@
+Collects CCR request, token, cost, stream and admission metrics via Prometheus counters/gauges/histograms, exposes them through HTTP endpoints, and optionally persists state to Redis.

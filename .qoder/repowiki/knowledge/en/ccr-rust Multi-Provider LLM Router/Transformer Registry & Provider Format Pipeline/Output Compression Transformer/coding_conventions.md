@@ -1,0 +1,3 @@
+- Command-specific compressors implement the same `try_compress(text: &str) -> Option<String>` signature, allowing the central dispatcher to try them uniformly.
+- Universal pre-processing steps (ANSI strip, blank-line collapse, progress-bar removal) are applied before any command-specific pattern matching.
+- Global constants define policy thresholds (`MIN_INPUT_LEN`, `MAX_RATIO`) at the top of `mod.rs` rather than being scattered across callers.

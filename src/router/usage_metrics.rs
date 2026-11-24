@@ -3,6 +3,8 @@
 use serde_json::Value;
 use tracing::debug;
 
+use super::types::OpenAIUsage;
+
 /// Normalized usage metrics containing token counts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedUsage {
@@ -76,6 +78,30 @@ fn default_normalized_usage() -> NormalizedUsage {
     }
 }
 
+/// Reasoning tokens reported inside an OpenAI-style usage object.
+///
+/// The value lives under `completion_tokens_details.reasoning_tokens` and is a
+/// labeled subset of `completion_tokens`, never an addition to it.
+pub fn openai_reasoning_tokens(usage: &OpenAIUsage) -> u64 {
+    usage
+        .completion_tokens_details
+        .as_ref()
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+}
+
+/// Reasoning tokens reported inside an Anthropic usage object.
+///
+/// Anthropic reports them beside `output_tokens`; like the OpenAI form, they
+/// are a labeled subset of output and are never added to it.
+pub fn anthropic_reasoning_tokens(usage: &Value) -> u64 {
+    usage
+        .get("reasoning_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +171,22 @@ mod tests {
         assert_eq!(normalized.output_tokens, 0);
         assert_eq!(normalized.cache_read_tokens, 0);
         assert_eq!(normalized.cache_creation_tokens, 0);
+    }
+
+    /// Reasoning tokens arrive under `completion_tokens_details` and are a
+    /// labeled subset of the completion tokens.
+    #[test]
+    fn openai_reasoning_tokens_are_read_from_completion_details() {
+        let usage = OpenAIUsage {
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            prompt_tokens_details: None,
+            completion_tokens_details: Some(json!({"reasoning_tokens": 7})),
+        };
+        assert_eq!(openai_reasoning_tokens(&usage), 7);
+
+        let without_details = OpenAIUsage::default();
+        assert_eq!(openai_reasoning_tokens(&without_details), 0);
     }
 
     #[test]

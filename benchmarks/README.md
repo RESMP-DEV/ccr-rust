@@ -133,3 +133,52 @@ These are not added to the project's main dependencies. Install with:
 ```bash
 uv pip install aiohttp uvicorn starlette
 ```
+
+## Per-Model Benchmark Harness
+
+This directory also holds the reference point for the per-model benchmark
+harness, which compares provider routes on a fixed, verifiable task suite
+instead of on load behavior. The harness itself lives in `scripts/` because it
+is an operator tool with an offline unit-test gate, not a load generator.
+
+```bash
+# Parse the suite and print the plan without contacting the router
+python3 scripts/ccr_model_benchmark.py --models zai,glm-5.4 --dry-run
+
+# Run the suite against one route, three repetitions per scenario
+python3 scripts/ccr_model_benchmark.py --models zai,glm-5.4 --reps 3
+
+# Compare two routes and keep machine-readable scorecards
+python3 scripts/ccr_model_benchmark.py \
+  --models zai,glm-5.4 \
+  --models zai,glm-5.3-flash
+```
+
+Scorecards are written to `build/reports/model-benchmark/<slug>.json`, one per
+route. Correctness and speed are recorded separately: a run passes only when a
+checker accepts the whole response, and latency, token throughput, and
+stability sit beside that verdict instead of replacing it.
+
+Each run also records the tier that served it, taken from the `x-ccr-tier` and
+`x-ccr-rate-limited-tiers` response headers, and each route's scorecard
+counts the runs that a fallback tier answered instead of the requested
+provider. A clean per-model comparison should use a single-tier listener or
+read those served-tier fields, because a multi-tier listener answers the
+requested model only while that model serves the request.
+
+The difference from the SSE stress suite above is the question being asked.
+The stress suite asks whether the router stays healthy under concurrent
+streams; the benchmark asks whether one route answers a known contract
+correctly and repeatably. The vision scenario is skipped with an explicit
+reason for routes that are not declared vision-capable, and the code-fix
+scenario is skipped with `--no-exec` rather than executing returned snippets.
+
+Offline gate:
+
+```bash
+python3 -m unittest discover -s scripts -p "test_ccr_model_benchmark.py"
+```
+
+Full documentation, including the metric definitions and the explicit
+non-claims, is in
+[docs/observability.md](../docs/observability.md#per-model-benchmark-harness).

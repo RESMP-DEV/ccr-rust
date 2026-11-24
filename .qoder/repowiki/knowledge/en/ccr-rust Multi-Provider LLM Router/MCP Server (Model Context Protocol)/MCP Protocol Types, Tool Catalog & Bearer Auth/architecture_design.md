@@ -1,0 +1,5 @@
+Three sibling modules under `src/mcp/` form the protocol surface of the MCP server:
+- `protocol.rs` declares shared serde structs (`JsonRpcMessage`, `McpTool`, `McpToolCallParams`) used by both the catalog and auth-aware routing layer; optional fields use `skip_serializing_if = "Option::is_none"` to keep wire payloads minimal.
+- `catalog.rs` owns a `ToolCatalog` that maps tool names to backend indices and stores tool schemas; it exposes `add_backend_tools` (with duplicate-name replacement), `compress` (four levels: none/minimal/medium/high/aggressive stripping description or inputSchema), `get_schema`, and `route`. The catalog depends only on `super::protocol`.
+- `auth.rs` implements a constant-time checked `BearerAuth` validator over axum `HeaderMap`s, pre-hashing the configured token with SHA-256 so every request performs only digest comparison via `subtle::ConstantTimeEq`.
+Dependency direction is one-way: `catalog` and `auth` depend on `protocol`; nothing in this scope depends back on them. All public types are `pub(super)` except the catalog struct itself, keeping the module pair internal to the MCP server crate.

@@ -1,0 +1,1 @@
+Bootstraps the ccr-rust binary across three runtimes: systemd on Linux, launchd on macOS, and a Kubernetes cluster, plus Prometheus scrape configuration for metrics.

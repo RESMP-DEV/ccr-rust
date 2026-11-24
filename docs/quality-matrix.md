@@ -31,6 +31,18 @@ The default owns these boundaries:
 | Checkout debug binary | `cargo build --all-features --locked` |
 | Python policy/runtime helpers | `CCR_TEST_BINARY=$PWD/target/debug/ccr-rust python3 -m unittest discover` |
 | Vendored GP surrogate | `cargo test --manifest-path vendor/gp-routing/Cargo.toml --locked` |
+| Per-model benchmark harness (offline) | `python3 -m unittest discover -s scripts -p "test_ccr_model_benchmark.py"` |
+
+The per-model benchmark harness is covered by the same offline boundary. Its
+tests match the `test_*.py` discovery pattern, so they run inside the
+`python3 -m unittest discover` check above without a separate command, and
+they need no network: every checker, the aggregation logic, and the dry-run
+CLI are exercised against recorded responses and locally executed snippets.
+The harness itself is documented in
+[Observability](observability.md#per-model-benchmark-harness). The live
+benchmark run is deliberately outside this matrix, because it issues real
+provider requests through the local listener and its numbers change with
+provider load, network path, and route configuration.
 
 The Rust ratchet caps total nonblank `src/**/*.rs` lines at the measured
 merged-main baseline, caps every file at 2,500 nonblank lines, and gives the

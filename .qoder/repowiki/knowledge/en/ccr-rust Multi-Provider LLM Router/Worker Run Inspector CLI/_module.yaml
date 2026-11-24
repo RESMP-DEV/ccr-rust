@@ -1,0 +1,26 @@
+schema_version: 1
+module_path: workers
+title: Worker Run Inspector CLI
+scope:
+    - src/workers/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: 6a9d2dd4-8d4a-4f8a-bb8d-05c70c52de25
+kk_ordinal: 3
+kk_cards:
+    architecture_design:
+        id: ee756d8f-4f0f-4b27-95f4-5af5c042f822
+        title: Worker Run Inspector CLI
+    coding_conventions:
+        id: 0415baf8-cae2-40b1-a388-da4494db6411
+        title: Worker Run Inspector CLI
+    overview:
+        id: 8688b862-3f6f-406e-82b9-24fba3e58ff3
+        title: Worker Run Inspector CLI
+    tech_stack:
+        id: 6398f2e9-f7a4-461c-9332-59cef5e681e1
+        title: Worker Run Inspector CLI
+    unique_setup_and_commands:
+        id: c633da2c-1143-4995-8231-81682ee4b0d5
+        title: Worker Run Inspector CLI

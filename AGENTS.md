@@ -115,17 +115,87 @@ On a new task, enumerate its pieces before touching the work, reading only
 what the briefs need: owned paths, entry points, and acceptance commands.
 Send every piece that can be stated as a bounded `codex-ccr-worker` order with
 its own scope, owned files or surface, acceptance check, and finish line; a
-one-piece task is still delegated. Keep only live conversation, cross-piece
-judgment, credentials or other irreversible actions, live-service
-coordination, tools the worker infrastructure cannot reach, and final
-integration with the parent. Size, file count, elapsed time, and effort
-already spent are not the criterion.
+one-piece task is still delegated. Path, symbol, and entry-point discovery is
+a bounded read-only worker brief, not parent exploration: a parent grep, a
+file read for orientation, or broad shell discovery is a delegated piece that
+was not delegated. Source audit, patch authoring, test running, log and
+evidence collection, and drafting findings are worker work even when the
+parent could do them faster. Route judgment-heavy pieces to the judgment tier
+below; send the remaining bounded pieces to `codex-ccr-worker`. Parent-only
+work is a closed list: live conversation, credentials or other irreversible
+action, live-service coordination, parent-harness-only capability, final
+accept/reject/commit/merge, and cross-piece conflict resolution. Size, file
+count, elapsed time, and effort already spent are not the criterion.
+
+`create_thread` and native Codex child tasks are never a delegation
+mechanism; `Workers:` means a `codex-ccr-worker` run or the named judgment
+tier.
 
 State the split before launching: which pieces are workers, which remain with
 the parent, and under which condition. Launch the workers before doing parent
 work, send independent pieces concurrently, and do not ask permission to
 launch a worker the user's task already authorizes. Do not collapse several
 delegable pieces into one broader interactive pass because they share a theme.
+
+Write a fresh visible decomposition ledger with three lines at the start of
+every actionable user turn, before any progress-making tool: `Workers:`
+every bounded brief, owned surface, acceptance evidence, and finish line;
+`Parent-only:` the closed list of live conversation, credentials or other
+irreversible action, live-service coordination, parent-harness-only
+capability, final accept/reject/commit/merge, and cross-piece conflict
+resolution; and `Terminal budget:` the parent terminal actions reserved for
+constructing briefs, launching workers, inspecting their receipts, and
+performing the named parent-only work. The ledger is a work contract, not
+narration.
+
+Every parent terminal action maps to `Parent-only` or to launching and
+accepting a worker. An action that maps to neither is delegated, not
+justified. While workers run, the parent may prepare independent briefs or
+wait; it may not silently take over a delegated piece. At synthesis, cite
+each worker run beside the parent's independent verification and record the
+consolidated result in the project receipt.
+
+On the maintainer's Mac, fresh offline worker briefs and offline read-only
+resumes first use the launcher-level Qoder lane: Qoder CLI `DeepSeek-Flash`
+(`dfmodel`, DeepSeek V4.1 Flash) with maximum reasoning. Read-only briefs
+expose only Read/Glob/Grep. Briefs launched with `--write-workspace` and one
+or more `--owned-path` declarations run in an isolated git worktree with
+Read/Glob/Grep/Write/Edit, no Bash or network, and only the declared paths
+are applied back; out-of-scope changes are rejected and the worker falls back
+to the MiniMax-first CCR chain. A clean Qoder result bypasses the Responses
+listener; network, write-workspace without `--owned-path`, disabled, and
+unclean tasks use that chain directly as a worker brief, never parent
+execution. Qoder ineligibility changes the selected worker lane, never the
+decision to delegate: command-requiring verify or repair briefs pass
+`--no-qoder-primary` and run on the MiniMax-first chain, while offline source
+audits and scoped patch generation use Qoder first. Qoder has no synthetic
+attempt-count budget; local concurrency, task deadlines, explicit opt-out,
+and real provider errors govern execution. Qoder never enters `Router.tiers`
+or the shared fallback policy.
+
+### Judgment-tier sub-agents
+
+Gemini 4 Argon through the Antigravity CLI (`agy`) is the opt-in judgment
+tier for delegated sub-agents; it is a judgment tier, not a bulk work tier.
+Use it for bounded review, architecture and tradeoff analysis, adjudicating
+ambiguous or conflicting evidence, and independent verification. Keep
+implementation volume, mechanical edits, and broad searches on the bulk
+worker lane. It is a delegation tier, not a CCR route: it never enters
+`Router.tiers` or the shared fallback policy, so it cannot silently become a
+fallback or consume worker capacity. Pin the model and effort per call
+(`gemini-4-argon-high` for hard judgment, `-medium` for routine second
+opinions), set an explicit print timeout, and treat the structured report as
+evidence; the parent keeps the decision and final integration.
+
+The code-review bot's Gemini 3.8 Flash (`gemini-3-8-flash`) profile is being
+retired; Gemini 4 Argon is not a substitute for that bulk review volume.
+
+On the maintainer's Mac, `agy` is at `~/.local/bin/agy`. Check
+`command -v agy` and `agy models` before relying on it; the interactive model
+default is not a policy. Use a disposable worktree when the judgment call must
+not write, and see
+[docs/worker-inspection.md](docs/worker-inspection.md#judgment-tier-sub-agents)
+for the canonical invocation and control surface.
 
 ### Deterministic brief contract
 

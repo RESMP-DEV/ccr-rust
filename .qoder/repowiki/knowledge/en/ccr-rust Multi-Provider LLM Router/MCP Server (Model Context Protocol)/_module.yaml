@@ -1,0 +1,23 @@
+schema_version: 1
+module_path: mcp_server
+title: MCP Server (Model Context Protocol)
+scope:
+    - src/mcp/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: 1aab6589-ba7f-4476-b0ec-adb42a9af440
+kk_ordinal: 4
+kk_cards:
+    architecture_design:
+        id: 0e95bcc5-49af-4783-b0f3-05fe3fcd00fb
+        title: MCP Server (Model Context Protocol)
+    coding_conventions:
+        id: 4fffad1c-9045-4680-b9c8-8bca06bbdca7
+        title: MCP Server (Model Context Protocol)
+    overview:
+        id: f89710e9-aff1-47e6-9904-33b652ee2b2b
+        title: MCP Server (Model Context Protocol)
+    tech_stack:
+        id: b1c95427-b46e-4b33-afe3-c66266e229a6
+        title: MCP Server (Model Context Protocol)

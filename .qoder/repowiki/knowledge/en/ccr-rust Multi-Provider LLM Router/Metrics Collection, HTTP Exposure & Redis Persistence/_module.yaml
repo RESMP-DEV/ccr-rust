@@ -1,0 +1,28 @@
+schema_version: 1
+module_path: metrics
+title: Metrics Collection, HTTP Exposure & Redis Persistence
+scope:
+    - src/metrics/
+source_files: []
+depends_on: []
+related_to:
+    - path: deploy_infra
+      reason: monitoring/prometheus-scrape.yml targets the metrics module's HTTP exposition endpoint (default :9090) so Prometheus can scrape CCR request/token/cost counters.
+kk_module_id: 8a685437-ff01-4d0f-96c7-fae622bb978f
+kk_ordinal: 6
+kk_cards:
+    architecture_design:
+        id: 59633b39-c99f-4f72-871b-ce3de99cd97c
+        title: Metrics Collection, HTTP Exposure & Redis Persistence
+    coding_conventions:
+        id: c13e5a45-770f-4e43-a02c-545937822ab8
+        title: Metrics Collection, HTTP Exposure & Redis Persistence
+    overview:
+        id: d52104fa-407b-4fad-b280-6930fa9c0e1c
+        title: Metrics Collection, HTTP Exposure & Redis Persistence
+    tech_stack:
+        id: 191ee322-8ab0-4580-b213-d95d4faeb9d0
+        title: Metrics Collection, HTTP Exposure & Redis Persistence
+    unique_setup_and_commands:
+        id: ce1917e8-6d25-4a79-a4ef-d8ddae9d911f
+        title: Metrics Collection, HTTP Exposure & Redis Persistence

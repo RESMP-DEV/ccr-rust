@@ -16,6 +16,12 @@
 //! budget is a configured ceiling, never an AIMD target, because a 429 that
 //! stems from token volume must not shrink the request-count limit that the
 //! AIMD controller owns.
+//!
+//! The token budget guards against collisions between concurrent prefills; it
+//! is not a hard per-request ceiling. A request larger than the whole budget
+//! is admitted when the route is otherwise idle, so long-context fallback
+//! traffic can still be served instead of failing locally on every tier. That
+//! solo reservation then blocks every concurrent acquire until it completes.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,12 +93,15 @@ impl TierAdmission {
     ///
     /// The reservation is a compare-exchange loop, so two concurrent
     /// acquires cannot both see room for the same budget, and a request that
-    /// does not fit never lands in the in-flight total.
+    /// does not fit never lands in the in-flight total. A request that
+    /// exceeds the whole budget is allowed only when nothing is reserved
+    /// yet: it then runs alone, and its reservation blocks concurrent
+    /// acquires until it is released.
     fn try_reserve_tokens(&self, estimate: u64, token_ceiling: u64) -> bool {
         let mut current = self.inflight_tokens.load(Ordering::Acquire);
         loop {
             let next = current.saturating_add(estimate);
-            if next > token_ceiling {
+            if next > token_ceiling && current > 0 {
                 return false;
             }
             match self.inflight_tokens.compare_exchange_weak(
@@ -286,7 +295,9 @@ impl AdmissionTracker {
     ///
     /// The estimate matters only for the token gate: a route with no token
     /// budget is at capacity exactly when its request count reaches the
-    /// AIMD limit.
+    /// AIMD limit. An idle token budget reports room even for a request
+    /// larger than the whole budget, matching the solo-overflow rule in
+    /// [`Self::acquire`].
     pub fn at_capacity(
         &self,
         key: &str,
@@ -301,7 +312,7 @@ impl AdmissionTracker {
         }
         if let Some(token_ceiling) = provider_token_limit {
             let tokens = state.inflight_tokens.load(Ordering::Acquire);
-            if tokens.saturating_add(token_estimate) > token_ceiling {
+            if tokens > 0 && tokens.saturating_add(token_estimate) > token_ceiling {
                 return true;
             }
         }
@@ -456,6 +467,56 @@ mod tests {
             "dropping the permit returns its tokens to the budget"
         );
         assert!(tracker.acquire("p,m", Some(4), 600, Some(1_000)).is_some());
+    }
+
+    /// A request larger than the whole token budget runs alone on an idle
+    /// route: the budget is a collision guard, not a per-request ceiling.
+    /// Its solo reservation still blocks every concurrent acquire.
+    #[test]
+    fn oversized_request_is_admitted_alone_and_blocks_concurrent_requests() {
+        let tracker = Arc::new(AdmissionTracker::new());
+        tracker.configure("p,m", Some(4), Some(1_000));
+
+        assert!(
+            !tracker.at_capacity("p,m", Some(4), 1_500, Some(1_000)),
+            "an idle route must report the oversized request as admissible"
+        );
+        let permit = tracker
+            .acquire("p,m", Some(4), 1_500, Some(1_000))
+            .expect("an oversized request may run alone when the route is idle");
+        assert_eq!(tokens_in_flight(&tracker, "p,m"), 1_500);
+        assert!(
+            tracker.at_capacity("p,m", Some(4), 100, Some(1_000)),
+            "no concurrent request fits beside the solo reservation"
+        );
+        assert!(tracker.acquire("p,m", Some(4), 100, Some(1_000)).is_none());
+
+        drop(permit);
+        assert_eq!(tokens_in_flight(&tracker, "p,m"), 0);
+        assert!(tracker
+            .acquire("p,m", Some(4), 1_500, Some(1_000))
+            .is_some());
+    }
+
+    /// An oversized request must wait for the route to drain: it cannot
+    /// displace a reservation that is already in flight.
+    #[test]
+    fn oversized_request_does_not_displace_an_inflight_reservation() {
+        let tracker = Arc::new(AdmissionTracker::new());
+        tracker.configure("p,m", Some(4), Some(1_000));
+
+        let small = tracker
+            .acquire("p,m", Some(4), 600, Some(1_000))
+            .expect("the small request fits");
+        assert!(tracker
+            .acquire("p,m", Some(4), 1_500, Some(1_000))
+            .is_none());
+        assert!(tracker.at_capacity("p,m", Some(4), 1_500, Some(1_000)));
+
+        drop(small);
+        assert!(tracker
+            .acquire("p,m", Some(4), 1_500, Some(1_000))
+            .is_some());
     }
 
     /// A route without a token budget is gated by request count only: an

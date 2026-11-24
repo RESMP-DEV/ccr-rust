@@ -1,0 +1,1 @@
+Wires MCP JSON-RPC tool schemas, a per-backend tool catalog, and HTTP/stdio server entry points around a registry of concrete tool implementations.

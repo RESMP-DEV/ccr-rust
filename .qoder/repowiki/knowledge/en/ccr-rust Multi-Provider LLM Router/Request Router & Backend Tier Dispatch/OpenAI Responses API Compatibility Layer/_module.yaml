@@ -1,0 +1,24 @@
+schema_version: 1
+module_path: router/responses_api
+title: OpenAI Responses API Compatibility Layer
+scope:
+    - src/router/responses_api/
+source_files: []
+depends_on: []
+related_to:
+    - path: router/core_router
+      reason: responses_api/handler.rs calls crate::router::openai_compat::handle_responses_chat_completions to translate Responses into chat-completions pipeline.
+kk_module_id: b6674b77-40c3-4137-b7b5-0e3f27ae85ec
+kk_cards:
+    architecture_design:
+        id: 036dd94d-3785-4e2e-a110-ede02e07ed3f
+        title: OpenAI Responses API Compatibility Layer
+    coding_conventions:
+        id: 400ccaba-06f7-43a3-9738-ab7eb3e4aa10
+        title: OpenAI Responses API Compatibility Layer
+    overview:
+        id: d2311d90-5139-462d-bcff-9f6e5cc89125
+        title: OpenAI Responses API Compatibility Layer
+    tech_stack:
+        id: 761d4a78-7255-486e-90e8-9507a0c6c5e9
+        title: OpenAI Responses API Compatibility Layer

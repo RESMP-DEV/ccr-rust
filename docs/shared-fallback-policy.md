@@ -13,15 +13,15 @@ The policy deliberately authorizes requests to cross its provider tiers.
 ## Define and synchronize
 
 Keep `fallback-policy.json` beside the existing listener configurations. For
-example, with `zai` already defined in both consumers and advertising the three
-GLM model IDs below:
+example, with `zai` and `minimax` already defined in both consumers and
+advertising the GLM model ID below:
 
 ```json
 {
   "version": 1,
   "routes": [
-    "zai,glm-5.3-flash",
-    "zai,glm-5.3",
+    "minimax,MiniMax-M3.1-Flash",
+    "zai,glm-5.4",
     "kimi,k3-256k"
   ],
   "providers": [{
@@ -33,8 +33,8 @@ GLM model IDs below:
     "transformer": {"use": [["maxtoken", {"max_tokens": 32768}]]}
   }],
   "consumers": {
-    "glm-workers.json": {"primary": "zai,glm-5.3-flash"},
-    "config.json": {"primary": "zai,glm-5.3"}
+    "glm-workers.json": {"primary": "minimax,MiniMax-M3.1-Flash"},
+    "config.json": {"primary": "zai,glm-5.4"}
   }
 }
 ```
@@ -97,16 +97,41 @@ requested `MiniMax-M3.1-Flash-Preview` was measured serving `zai,glm-5.3`
 before the alias existed). An operator alias entry is never overridden, and a
 model name offered by two providers stays unaliased rather than guessing.
 The approved main-machine shared chain is MiniMax `MiniMax-M3.1-Flash`,
-GLM-5.3-Flash, DeepSeek `deepseek-flash`, Meta Model API
+GLM-5.4, DeepSeek `deepseek-flash`, Meta Model API
 (`meta,muse-spark-1.3`, added 2026-10-23 as the last cloud tier on a key
 with free credits), the keyed B550 Strata Coder
 (`strata-b550,qwen3.8-flash-next-coder`), and resident
-`local27,qwen3.8-27b-mxfp4`, with no private consumer seat. GLM-5.3 stays
-the main and auth primary and is not a worker fallback. The scoped-worker
-primary moved to MiniMax on 2026-10-21 by user authorization: the Z.AI GLM
+`local27,qwen3.8-27b-mxfp4`, with no private consumer seat. GLM-5.4 is
+the main and auth primary and the Z.AI vision head: it reads images, while the
+superseded GLM-5.3 is text-only. It is the only Z.AI tier in the chain, so a
+rate-limited GLM falls through to the next tier instead of a second GLM model.
+On 2026-11-23 every consumer primary moved back to `zai,glm-5.4`: the
+scoped-worker primary moved off MiniMax and the OCR lane moved off its
+OpenRouter code-review primary, by user direction that GLM-5.3 must never be
+served again. MiniMax stays first in the shared chain and OpenRouter stays
+available to the OCR consumer as a direct-only seat, so an exhausted Z.AI
+window degrades a lane instead of ending it. `Provider.models` is an
+advertisement, not an access control: an explicit client pin such as
+`zai,glm-5.3` was dispatched to that provider with that model id on the wire
+and the retired model answered it. The `zai` provider therefore carries a
+provider-level `modelMap` that rewrites `glm-5.3`, `glm-5.3-flash`, and
+`glm-5.3-flashx` onto `glm-5.4` at dispatch time, so a stale client pin is
+served the successor. Evidence: `evidence/glm54-cutover-20261123.md`.
+The scoped-worker
+primary had moved to MiniMax on 2026-10-21 by user authorization: the Z.AI GLM
 plan kept exhausting its monthly utilization window, so GLM Flash moved
 behind MiniMax instead of burning that window first on every scoped-worker
-dispatch. Both GLM tiers were
+dispatch. Since 2026-10-24, the installed worker launcher adds a Qoder lane
+before this HTTP chain for fresh offline briefs and offline read-only resumes.
+Qoder requests `DeepSeek-Flash` (`dfmodel`, DeepSeek V4.1 Flash) at maximum reasoning.
+Read-only briefs expose only Read/Glob/Grep;
+`--write-workspace` briefs with declared
+`--owned-path` entries run in an isolated git worktree with Read/Glob/Grep/
+Write/Edit, no Bash or network, and only the declared paths are applied back.
+This lane is owned by `ccr-worker-launcher`; it deliberately has no
+`Router.tiers` entry, provider definition, credential placeholder, catalog
+slug, or listener restart. A clean Qoder result bypasses CCR, while all other
+eligible paths use the governed MiniMax-first chain above. Both GLM tiers were
 cordoned 2026-10-18 after the Z.AI monthly tool quota reported 4000/4000
 used, then restored the same day by user direction once that premise was
 disproved: Z.AI meters usage without distinguishing model sessions from tool
@@ -119,13 +144,50 @@ on 2026-10-19: its monthly utilization window was exhausted, so every dispatch
 paid one guaranteed refusal before reaching a tier that could still serve. An
 exhausted window is not something routing can optimize around; the lane is
 skipped until it recovers. Qwen and native GMI stay registered but unrouted,
-as does the former FlashX head, so a dated re-approval restores them without
-rewiring credentials. DeepSeek returned to the chain on 2026-10-21 after its
+as do the superseded GLM-5.3, GLM-5.3-Flash, and former FlashX heads, so a
+dated re-approval restores them without rewiring credentials. DeepSeek
+returned to the chain on 2026-10-21 after its
 balance was topped up and a live request passed. The B550 Strata service is
 single-flight with a 16384-token context; local27 remains the final tier for
 over-long or unavailable B550 requests. MiniMax
 canonicalizes M3-family and legacy preview requests to the official
 `MiniMax-M3.1-Flash` ID.
+Tetra stays registered but unrouted as of 2026-11-23 until live host
+authorization, `com.kearm.tetra-vllm-tunnel`, its credential reference, and
+endpoint health are restored together. Its prepared endpoint is loopback-only
+on Tetra and would forward `127.0.0.1:18317` to Tetra `127.0.0.1:8317`. Its
+provider remains single-flight, forces `reasoning_effort: none`, and injects a
+missing 32768-token output limit. The harmless bearer credential exists because
+shared providers require an environment-backed reference; the remote service
+itself remains unauthenticated and must stay reachable only through the SSH
+tunnel. Tetra is not a normal local tier because Elliot may reclaim or stop the
+guest service at any time; CCR never manages the remote engine.
+
+A mixed task splits along the lane boundary instead of becoming one broad
+network-authorized or broad-write worker. The three-line decomposition ledger
+still governs it: `Workers:` holds the offline analysis or scoped write,
+`Parent-only:` holds only closed-list work such as the acceptance decision,
+and `Terminal budget:` covers launching the worker and running acceptance.
+The parent or a separately authorized network worker fetches the primary
+evidence first; an offline Qoder worker then digests, compares, or
+synthesizes it, or generates a scoped patch; a `--write-workspace` brief
+names the exact task-owned paths through `--owned-path`; and the parent runs
+the acceptance command and inspects the diff only as the final accept/reject
+step. Qoder never writes production configuration, model routing,
+credentials, git remotes, or live services, and a clean Qoder result is
+evidence for parent acceptance, never acceptance itself.
+
+Delegation is not optional for discovery. Path, symbol, and entry-point
+discovery is a bounded read-only worker brief, not parent exploration, and
+source audit, patch authoring, test running, log and evidence collection, and
+drafting findings are worker work. Every actionable user turn starts a fresh
+`Workers:`/`Parent-only:`/`Terminal budget:` ledger before progress-making
+tools. Qoder ineligibility changes the selected worker lane, never the
+decision to delegate: command-requiring verify or repair briefs pass
+`--no-qoder-primary` and run on the MiniMax-first chain, while offline source
+audits and scoped patch generation use Qoder first. `create_thread` and
+native Codex child tasks are never a delegation mechanism; `Workers:` means a
+`codex-ccr-worker` run or the named judgment tier.
 
 Before changing or restarting a shared provider route, run:
 

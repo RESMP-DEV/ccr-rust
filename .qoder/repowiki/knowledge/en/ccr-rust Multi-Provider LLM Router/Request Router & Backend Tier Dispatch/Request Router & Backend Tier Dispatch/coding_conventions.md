@@ -1,0 +1,5 @@
+- Optional components in `AppState` are compiled out behind `#[cfg(feature = "gp")]` with an `Option<()>` fallback so the rest of the router code compiles unchanged without GP support.
+- Long-running background state (EWMA tracker, GP observation buffer, retry budget, rate limiter, admission tracker) is shared via `Arc`-wrapped types passed through `AppState` rather than global singletons.
+- Streaming responses go through the `stream_anthropic_response_with_tracking` / `stream_response_translated` helpers in `streaming.rs` instead of hand-written `EventStream` wiring in handlers.
+- Provider protocol differences (Anthropic vs OpenAI vs Responses) are handled by dedicated submodules (`translate_request`, `translate_response`, `responses_protocol`, `openai_compat`) rather than inline if/else branches on protocol name.
+- Per-request telemetry uses RAII guards (`ActiveRequestGuard`, `AttemptTimer`) that increment counters on construction and decrement them in `Drop`, ensuring metrics are recorded even on early returns.

@@ -1,0 +1,1 @@
+Rust with `async_trait` for async tool dispatch, `serde_json` for schema/result serialization, `reqwest` for HTTP-based tools (Exa, Jina), `tokio::sync::Semaphore` for concurrency control in Pyright, and `parking_lot::RwLock` for in-memory graph mutation.

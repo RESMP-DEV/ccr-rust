@@ -1,0 +1,1 @@
+Pluggable adapter layer that detects incoming OpenAI Codex and Anthropic Claude Code requests, normalizes them into a shared internal request/response model, and serializes responses back to the originating API format.

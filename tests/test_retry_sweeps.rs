@@ -9,13 +9,14 @@
 //! controlled number of times before recovering.
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,72 @@ async fn spawn_flaky_upstream(failures: usize, failure_status: u16) -> (String, 
     (format!("http://{addr}"), hits)
 }
 
+/// Upstream that holds its first request open until released, then answers.
+/// The `started` notification fires once the request is genuinely in flight.
+async fn spawn_blocking_upstream() -> (String, Arc<Notify>, Arc<Notify>) {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let handler_started = started.clone();
+    let handler_release = release.clone();
+    let app = Router::new().route(
+        "/chat/completions",
+        post(move || {
+            let started = handler_started.clone();
+            let release = handler_release.clone();
+            async move {
+                started.notify_one();
+                release.notified().await;
+                axum::Json(json!({
+                    "id": "resp_blocked",
+                    "object": "chat.completion",
+                    "created": 1234567890,
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "released"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                }))
+                .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), started, release)
+}
+
+/// Upstream that always answers 429 with a Retry-After header.
+async fn spawn_rate_limited_upstream(retry_after: &'static str) -> (String, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    let app = Router::new().route(
+        "/chat/completions",
+        post(move || {
+            let hits = counter.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                axum::http::Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header(header::RETRY_AFTER, retry_after)
+                    .body(Body::from("rate limited"))
+                    .unwrap()
+                    .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), hits)
+}
+
 /// Build test config pointing at the flaky upstream. `retry_sweeps` is the
 /// raw `Router.retrySweeps` JSON value.
 fn make_test_config(upstream_url: &str, retry_sweeps: Value) -> String {
@@ -89,6 +156,41 @@ fn make_test_config(upstream_url: &str, retry_sweeps: Value) -> String {
             "default": "mock,test-model",
             // Zero in-tier retries so hit counts map 1:1 to sweeps.
             "tierRetries": {"mock": {"max_retries": 0}},
+            "retrySweeps": retry_sweeps
+        },
+        "API_TIMEOUT_MS": 5000
+    });
+    serde_json::to_string_pretty(&config).unwrap()
+}
+
+/// Two-tier config: `slow` has a token budget that one large request exhausts,
+/// so a second request is admission-deferred; `limited` always rate-limits.
+fn make_two_tier_config(slow_url: &str, limited_url: &str, retry_sweeps: Value) -> String {
+    let config = json!({
+        "Providers": [
+            {
+                "name": "slow",
+                "api_base_url": slow_url,
+                "api_key": "test-key",
+                "models": ["test-model"],
+                "maxInflightTokens": 1000
+            },
+            {
+                "name": "limited",
+                "api_base_url": limited_url,
+                "api_key": "test-key",
+                "models": ["test-model"]
+            }
+        ],
+        "Router": {
+            "default": "slow,test-model",
+            "tiers": ["slow,test-model", "limited,test-model"],
+            "strictTierOrder": true,
+            // Zero in-tier retries so hit counts map 1:1 to sweeps.
+            "tierRetries": {
+                "slow": {"max_retries": 0},
+                "limited": {"max_retries": 0}
+            },
             "retrySweeps": retry_sweeps
         },
         "API_TIMEOUT_MS": 5000
@@ -131,6 +233,10 @@ fn load_config(config_json: &str) -> ccr_rust::config::Config {
 }
 
 async fn send_message(app: Router) -> (StatusCode, Value) {
+    send_message_with_content(app, "hello".to_string()).await
+}
+
+async fn send_message_with_content(app: Router, content: String) -> (StatusCode, Value) {
     let resp = app
         .oneshot(
             Request::builder()
@@ -140,7 +246,7 @@ async fn send_message(app: Router) -> (StatusCode, Value) {
                 .body(Body::from(
                     serde_json::to_vec(&json!({
                         "model": "test-model",
-                        "messages": [{"role": "user", "content": "hello"}],
+                        "messages": [{"role": "user", "content": content}],
                         "max_tokens": 32
                     }))
                     .unwrap(),
@@ -412,6 +518,50 @@ async fn rate_limited_tier_holds_then_synthesizes_429() {
     assert!(
         elapsed >= std::time::Duration::from_millis(750),
         "cooldown must stretch to the tracker's backoff window; surfaced after {elapsed:?}"
+    );
+}
+
+/// A tier deferred on local token capacity must not wait out another tier's
+/// rate-limit window. The sweep re-checks the deferred tier at the base
+/// cooldown while the rate-limited tier remains protected by its own backoff.
+#[tokio::test]
+async fn admission_deferral_ignores_another_tier_retry_after() {
+    if skip_if_localhost_bind_unavailable("admission_deferral_ignores_another_tier_retry_after") {
+        return;
+    }
+    let (slow_url, started, release) = spawn_blocking_upstream().await;
+    let (limited_url, limited_hits) = spawn_rate_limited_upstream("5").await;
+    let config = make_two_tier_config(
+        &slow_url,
+        &limited_url,
+        json!({"enabled": true, "maxSweeps": 1, "sweepCooldownMs": 50}),
+    );
+    let app = build_app(load_config(&config));
+    let content = "The quick brown fox jumps over the lazy dog. ".repeat(400);
+
+    let first = tokio::spawn({
+        let app = app.clone();
+        let content = content.clone();
+        async move { send_message_with_content(app, content).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("the first request should reach the blocking upstream");
+
+    let began = std::time::Instant::now();
+    let (status, body) = send_message_with_content(app, content).await;
+    let elapsed = began.elapsed();
+
+    release.notify_one();
+    let (first_status, _) = first.await.unwrap();
+
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "service_unavailable");
+    assert_eq!(limited_hits.load(Ordering::SeqCst), 1);
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "deferred sweep must not inherit the 5s Retry-After; took {elapsed:?}"
     );
 }
 

@@ -24,8 +24,24 @@ SOURCE_ROOT = ROOT / "src"
 # the DeepSeek thinking placeholder (PR #79). Re-pinned 2026-10-23 for the DeepSeek leading-thinking
 # injection transformer (shared helper in transformer/mod.rs plus the
 # factory-registry path in transform/deepseek.rs) merged alongside the
-# Muse/Holo4 routing work.
-TOTAL_CEILING = 40_969
+# Muse/Holo4 routing work. Raised to 41,024 on 2026-10-23 for the
+# oversized-request solo admission rule and its tests in admission.rs.
+# Raised to 41,372 on 2026-11-23. Two causes, both measured on this tree:
+# the outstanding worker-inspector and admission work already in the dirty
+# checkout accounted for 196 lines above the previous pin, and the
+# provider-level model map added 152. The two hotspot ceilings the map
+# touched were not raised: config/mod.rs fell to 1,368 and
+# router/dispatch.rs to 1,787 after the model-map validation moved into
+# src/config/model_map.rs and both test concerns moved into sibling test
+# modules, so the map cost no hotspot headroom.
+# Raised to 41,572 on 2026-11-24 for served-model and reasoning-token
+# accounting. The 57-line streaming test moved to
+# src/router/streaming_reasoning_tests.rs and the reasoning parsers moved to
+# src/router/usage_metrics.rs, which kept dispatch.rs and router/mod.rs under
+# their ceilings. streaming.rs (+13) and sse.rs (+2) carry the production
+# wiring that cannot leave those files, so only those two ceilings move, by
+# exactly that measured amount.
+TOTAL_CEILING = 41_572
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
 # baseline. They may shrink or be split, but cannot grow while the ratchet is
@@ -35,8 +51,8 @@ HOTSPOT_CEILINGS: dict[str, int] = {
     "router/mod.rs": 1_831,
     "router/dispatch.rs": 1_805,
     "config/mod.rs": 1_414,
-    "router/streaming.rs": 1_373,
-    "sse.rs": 294,
+    "router/streaming.rs": 1_386,
+    "sse.rs": 296,
 }
 
 

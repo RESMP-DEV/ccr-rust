@@ -1,0 +1,3 @@
+- Provider credentials in example configs are expressed as `${ENV_VAR}` placeholders rather than inline secrets, requiring the caller to export the corresponding environment variable before validation/start.
+- Evidence documents are named with a descriptive slug plus an ISO date suffix (e.g. `topic-YYYYMMDD.md`) to anchor each record to a specific development iteration.
+- Docs follow a consistent naming pattern of `<topic>.md` under `docs/`, grouping provider-specific setup guides alongside architectural and operational reference pages.

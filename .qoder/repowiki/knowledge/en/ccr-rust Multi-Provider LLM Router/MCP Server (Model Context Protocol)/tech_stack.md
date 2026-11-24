@@ -1,0 +1,1 @@
+tokio + axum for the HTTP daemon, stdio-based JSON-RPC framing for the proxy, and a shared MCP JSON-RPC schema used by both transports.

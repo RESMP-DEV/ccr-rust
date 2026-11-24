@@ -1,0 +1,1 @@
+Defines the shared Transformer trait and registry that wires per-provider format adapters (Anthropic, OpenAI, DeepSeek, GLM, Kimi, Minimax) and cross-cutting transformers (output compression, tool compression, thinking-block injection) into a unified request/response transformation pipeline.

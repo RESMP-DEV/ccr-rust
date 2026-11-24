@@ -1,0 +1,1 @@
+systemd unit + macOS launchd plist + upstream Kubernetes manifests (apps/v1 Deployment, v1 Service/ConfigMap); metrics via Prometheus scrape on port 3456.

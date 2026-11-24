@@ -1,0 +1,5 @@
+- New frontend variants are added by implementing the `Frontend` trait from `mod.rs` and registering the module via `pub mod` plus a `pub use detection::{..., FrontendType}` re-export.
+- Discriminated unions for wire formats use serde's tagged enum pattern (`#[serde(tag = "type", rename_all = "snake_case")]`) so `ContentBlock` and `ImageSource` round-trip through a single `type` discriminator.
+- Optional fields on `InternalRequest`/`InternalResponse` are represented as `Option<T>` with `#[serde(skip_serializing_if = "Option::is_none")]` to keep serialized output compact.
+- Provider-specific parameters that do not fit the normalized schema are collected into an `extra_params: Option<Value>` map built by iterating the raw object and excluding a known whitelist of standard keys.
+- Detection uses a two-tier strategy: `detect_frontend` in `detection.rs` applies header-based heuristics first (with explicit conflict resolution favoring Codex UA), then falls back to body-shape checks, while each frontend also implements its own stricter `detect` for post-dispatch validation.

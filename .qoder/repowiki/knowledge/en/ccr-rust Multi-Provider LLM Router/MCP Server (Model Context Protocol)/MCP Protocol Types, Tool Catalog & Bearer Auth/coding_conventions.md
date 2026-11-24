@@ -1,0 +1,4 @@
+- Optional JSON-RPC fields are declared as `Option<T>` with `#[serde(default)]` plus `skip_serializing_if = "Option::is_none"` so omitted keys are not emitted on the wire.
+- Default-valued nested objects use a local `default_object()` helper returning an empty `serde_json::Value::Object` rather than inline constructors.
+- Authentication-sensitive strings are hashed once at construction time and compared with `subtle::ConstantTimeEq` instead of direct byte equality.
+- Token configuration rejects empty, non-ASCII, whitespace-containing, or control-character values early via `bail!` during `BearerAuth::new`.

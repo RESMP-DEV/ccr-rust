@@ -17,15 +17,19 @@ providers/models must also exist under `Providers`:
 ```json
 {
   "Presets": {
-    "glm": {"route": "zai,glm-5.3"},
+    "glm": {"route": "zai,glm-5.4"},
     "kimi": {"route": "kimi,k3-256k", "max_tokens": 8192},
-    "short": {"route": "zai,glm-5.3", "max_tokens": 256, "temperature": 0.2}
+    "short": {"route": "zai,glm-5.4", "max_tokens": 256, "temperature": 0.2}
   }
 }
 ```
 
 A complete config is available in
 [`examples/coding-plans.json`](../examples/coding-plans.json).
+
+The `glm` preset targets `zai,glm-5.4`, the current Z.AI coding-plan model and
+the only GLM route that reads images. The superseded `glm-5.3` is text-only, so
+an image request pinned to it returns a refusal instead of image content.
 
 Only `route`, `max_tokens`, and `temperature` are implemented preset fields.
 Arbitrary parameters and `extra_params` are not applied. Do not rely on the
@@ -52,7 +56,7 @@ routing still run afterward.
 
 ```json
 [
-  {"name":"glm","route":"zai,glm-5.3","max_tokens":null,"temperature":null},
+  {"name":"glm","route":"zai,glm-5.4","max_tokens":null,"temperature":null},
   {"name":"kimi","route":"kimi,k3-256k","max_tokens":8192,"temperature":null}
 ]
 ```
@@ -75,7 +79,7 @@ Search tagging is a separate optional routing feature:
 ```json
 {
   "Router": {
-    "default": "zai,glm-5.3",
+    "default": "zai,glm-5.4",
     "webSearch": {
       "enabled": true,
       "search_provider": "search-provider,search-model"

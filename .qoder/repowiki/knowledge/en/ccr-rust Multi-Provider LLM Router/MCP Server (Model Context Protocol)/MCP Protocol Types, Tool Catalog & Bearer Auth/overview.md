@@ -1,0 +1,1 @@
+Defines MCP JSON-RPC message and tool schemas, maintains a per-backend tool registry with compression, and validates HTTP Bearer tokens for MCP daemon authentication.

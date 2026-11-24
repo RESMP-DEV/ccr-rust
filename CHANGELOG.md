@@ -13,6 +13,213 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Recorded the served model and reasoning volume per request. `record_usage`
+  now carries the canonicalized wire model and the provider-reported reasoning
+  token count, and emits one log line per call naming tier, served model, input,
+  cached input, output, and reasoning, so an operator can prove which model
+  answered instead of inferring it from the requested route. Adds
+  `ccr_reasoning_tokens_total{tier}` and
+  `ccr_served_model_requests_total{tier,served_model}`; reasoning is counted as
+  a labeled subset of output and is never subtracted from it. The metrics are
+  in-process Prometheus counters and reset on restart; they are not persisted.
+  The existing `x-ccr-tier` response header and `/v1/usage` are unchanged.
+- Closed the last path that still served GLM-5.3, and forced every governed
+  lane onto GLM-5.4. `Provider.models` turned out to be an advertisement
+  rather than an access control: an explicit client pin such as
+  `zai,glm-5.3` was dispatched to that provider with that model id on the
+  wire, and the retired model answered it. Measured on the live listener,
+  `zai,glm-5.3`, `zai,glm-5.3-flash`, and `zai,glm-5.2` were each answered by
+  the named upstream model, and the OCR review poller was running its
+  `glm-5-3-flashx` profile against `zai,glm-5.3-flash`.
+  `Provider.model_map` is the new mechanism: a per-provider map from a
+  requested model id onto the upstream model id, deserialized from the JSON
+  key `modelMap`, applied in `canonical_model_name` before the built-in
+  MiniMax pinning. That function is the single place the wire model id is
+  chosen for the OpenAI passthrough, the Anthropic-compatible, and the
+  Responses protocol paths. Load-time validation rejects a map target the
+  provider does not list and rejects an entry that maps a model onto itself.
+  The deployed Z.AI provider now carries
+  `{"glm-5.3": "glm-5.4", "glm-5.3-flash": "glm-5.4", "glm-5.3-flashx": "glm-5.4"}`,
+  and every consumer primary moved to `zai,glm-5.4`: the scoped worker drops
+  its MiniMax primary and the OCR lane drops its OpenRouter primary, while
+  MiniMax and OpenRouter stay in the shared chain and as a direct-only seat,
+  so an exhausted Z.AI window degrades a lane instead of ending it. The OCR
+  review poller pin moved to `zai,glm-5.4` to match. Verification: with the
+  installed binary and a mock upstream that records the model field it
+  received, requests for `zai,glm-5.3`, `zai,glm-5.3-flash`,
+  `zai,glm-5.3-flashx`, and `zai,glm-5.4` all arrived as `glm-5.4`; all four
+  listeners report `ok` and advertise `glm-5.4` only. Evidence:
+  `evidence/glm54-cutover-20261123.md`.
+- Made `zai,glm-5.4` the canonical Z.AI coding-plan model in the governed
+  fallback policy, superseding GLM-5.3 and GLM-5.3 Flash. The `config.json`
+  and `config-auth.json` primaries now serve `zai,glm-5.4`, the shared Z.AI
+  chain tier moved from `zai,glm-5.3-flash` to `zai,glm-5.4` for the worker
+  and OCR lanes, and the `zai` provider registers `glm-5.4` next to the
+  superseded ids, which stay registered but unrouted so a dated re-approval
+  restores them without rewiring credentials. Derived aliases follow the
+  tiers: the bare `glm-5.4` id and the stable `ccr-primary` handle point at
+  `zai,glm-5.4`, and a stale `glm-5.3` alias is dropped rather than left
+  pointing at a route the router no longer serves. GLM-5.4 was qualified
+  live on the exact Responses endpoint CCR uses: a two-color PNG probe
+  returned `left=red, right=blue` and `left=green, right=yellow`, while
+  `glm-5.3` answered the same image with a text-only refusal. Evidence:
+  `evidence/glm54-vision-qualification-20261123.md`. The Codex catalog
+  builder now takes its metadata donor from the `glm-5.4` entry and retires
+  the GLM-5.3 slugs; a live catalog without a real `glm-5.4` entry fails the
+  sync with a structured error instead of cloning GLM-5.3's context window
+  and modalities onto a slug nobody measured. The machine policy integrity
+  pin is recomputed to
+  `b90d82e5dcc12ea370fd11551466e0219f04e6ae4582f0f4863a2d5f0b768104`.
+- Cordoned `tetra-vllm` as registered but unrouted for the GLM-5.4 rollout.
+  The provider definition, credential reference, single-flight limits, and
+  prepared tunnel assets remain intact, but no generated consumer route can
+  dispatch to Tetra until live host authorization, the SSH tunnel, credential
+  resolution, and endpoint health are restored together. This avoids making a
+  currently unavailable guest endpoint the final route behind the new primary.
+- Added an objective per-model benchmark harness for the local CCR HTTP API.
+  `python3 scripts/ccr_model_benchmark.py --models zai,glm-5.4` sends a fixed
+  five-scenario suite (exact instruction following, strict JSON conformance, a
+  deterministic Python bug fix whose returned snippet is executed locally, a
+  multi-step arithmetic word problem, and a two-color vision question) to an
+  explicit route, repeats it, and writes one scorecard per route to
+  `build/reports/model-benchmark/<slug>.json`. Each run records pass or fail,
+  TTFT, wall time, output and input tokens, error class, and output text
+  length; each route aggregates accuracy, median TTFT, median wall time,
+  tokens per second, stability, and failure rate, with correctness kept
+  separate from speed. The vision scenario is skipped with an explicit reason
+  for routes that are not declared vision-capable, the code-fix scenario is
+  skipped under `--no-exec` instead of executing returned snippets, and
+  `--dry-run` parses the whole suite without contacting the router. The
+  harness is Python standard library only, changes no Rust, routing, or
+  configuration, and its offline tests run inside the existing Python helper
+  gate. It measures this fixed suite on this machine and network path; it does
+  not measure general model quality and does not prove which route suits a
+  real workflow.
+- Recorded tier provenance in the per-model benchmark harness so a scorecard
+  no longer credits fallback output to the requested model. The transport now
+  captures the `x-ccr-tier` and `x-ccr-rate-limited-tiers` response headers
+  that CCR already emits, every run record and every serialized scorecard run
+  carries them, and each route's scorecard gains a `summary.tier_provenance`
+  block with the requested provider, the counts of runs served by another
+  provider, the counts of runs that observed rate limited tiers, the
+  combined contaminated-run count, the served-tier histogram, and a `clean`
+  flag that is true only when no run was contaminated and every attempted run
+  reported its served tier. A run with no served tier is counted as unknown
+  provenance rather than as a fallback, and the exit code contract and the
+  scorecard schema are unchanged, because the new fields are additive. A
+  clean per-model comparison should use a single-tier listener or inspect
+  the served-tier fields: a multi-tier listener answers the requested model
+  only while that model serves the request, so accuracy measured across a
+  fallback window describes the chain that served it rather than the
+  requested model.
+- Exposed Qoder lane fields in `ccr-rust workers list` and `workers show`.
+  List entries and show detail now carry `engine`, `served_route`,
+  `model_identity`, `qoder_primary_requested`, `qoder_bypass_reason`, and
+  `qoder_attempt_outcome` from the saved launcher receipt; absent fields, or
+  fields with unexpected types, stay `null`, so legacy receipts keep working.
+  Human output adds one compact `Qoder:` line that names served, fallback,
+  bypass, requested, not-requested, recorded, or not-recorded lane state, and
+  list output annotates runs only when Qoder evidence exists. These are
+  recorded receipt values, not live provider verification.
+- Extended `ccr-worker-usage` telemetry for Qoder outcomes and interactive
+  Codex parents. `qoder_lane` counts receipts with a non-empty
+  `qoder_primary_attempt` as `attempted`; `served` counts an attempt whose
+  receipt records `engine` as `qoder` or a `served_route` that is `qoder` or
+  `qoder`-prefixed (begins with `qoder,`), and `fell_back` counts every other
+  attempted receipt, so `attempted` equals `served` plus `fell_back`.
+  `outcome:<value>` counters preserve the recorded attempt outcome, `attempted`
+  remains the total attempt count, and `eligible_not_attempted` covers receipts
+  that requested Qoder without recording an attempt or bypass reason. A Qoder
+  success bypasses the listener, so listener tier counters cannot show it. The
+  opt-in `--parent-sessions --sessions-root` mode scans local Codex JSONL
+  rollouts from `codex-tui` originators and reports per-session cwd, turns,
+  tool and shell calls, `codex-ccr-worker` and `create_thread` launches,
+  ledger-bearing assistant messages, and a `native_child` flag derived from the
+  first `task_started` event: a `user` `turn_attribution.turn_trigger` marks a
+  root parent, while an absent or null trigger marks a native child. Aggregates
+  add `root_parent_sessions`, `native_child_sessions`, and
+  `native_child_tool_calls`; `sessions` still counts every selected `codex-tui`
+  rollout, and `sessions_with_no_worker_launch` counts only root parents, so
+  `create_thread` child rollouts are no longer mistaken for roots. It is
+  metadata-only and never stores or prints user prompt text.
+- Closed the parent-only escape hatches in the worker-delegation contract:
+  path, symbol, and entry-point discovery is a bounded read-only worker brief,
+  source audit, patch authoring, test running, log and evidence collection,
+  and drafting findings are worker work, every actionable user turn starts a
+  fresh `Workers:`/`Parent-only:`/`Terminal budget:` ledger before
+  progress-making tools, and `Parent-only:` is an explicit closed list.
+  `create_thread` and native Codex child tasks are never a delegation
+  mechanism; `Workers:` means `codex-ccr-worker` or the named judgment tier.
+  Qoder ineligibility selects another worker lane instead of parent work:
+  command-requiring verify or repair briefs pass `--no-qoder-primary`, while
+  offline source audits and scoped patch generation use Qoder first. The
+  doc-enforcement tests pin the new wording.
+- Added Qoder bypass-reason reporting to `ccr-worker-usage`: it aggregates each
+  receipt as `qoder_bypass_reasons` in text and JSON output. A Qoder attempt is
+  reported as `attempted`; otherwise the launcher's bypass reason is used, and
+  legacy receipts without attempt or reason evidence are `not_recorded`.
+- Documented the parent decomposition ledger in the worker-delegation guides
+  and shared fallback policy: visible `Workers:`, `Parent-only:`, and
+  `Terminal budget:` lines precede parent work, mixed tasks split into a
+  network fetch, offline Qoder analysis or exact-path scoped writes, and
+  parent acceptance. The Qoder lane is stated uniformly as
+  `DeepSeek-Flash` / `dfmodel`.
+- Updated the documented launcher-level Qoder primary to DeepSeek V4.1 Flash:
+  `DeepSeek-Flash` / `dfmodel`, with maximum reasoning. The launcher owns this
+  identity and strict model-usage validation; it remains outside shared fallback
+  policy.
+- Added Elliot's Tetra vLLM service as the final shared rescue tier behind
+  local27. The OpenAI-compatible endpoint stays loopback-only on Tetra and is
+  reached through a KeepAlive LaunchAgent that owns the named SSH forward
+  `127.0.0.1:18317 -> tetra:127.0.0.1:8317`. The governed provider is
+  single-flight, non-thinking, and injects a missing 32768-token output limit;
+  it never claims ownership of the remote guest engine.
+- Documented the installed launcher-level Qoder primary lane for scoped
+  worker delegation. Fresh offline briefs and offline read-only resumes first
+  request Qoder `Qwen4-Max-Preview` (`qmodel_latest`) with maximum reasoning;
+  clean results bypass CCR while every other path retains the governed
+  MiniMax-first `Router.tiers` chain. Qoder deliberately remains outside shared
+  fallback policy because it is an agent CLI, not an HTTP provider. It has no
+  synthetic attempt-count budget; local concurrency, task deadlines, explicit
+  opt-out, and real provider errors govern execution.
+- Extended the launcher-level Qoder lane to narrowly scoped writes. With
+  `--write-workspace` plus one or more `--owned-path` declarations, the
+  launcher runs Qoder in an isolated git worktree with Read/Glob/Grep/Write/
+  Edit, no Bash or network, and copies only the declared paths back;
+  out-of-scope or deleted paths are rejected and the worker falls back to the
+  MiniMax-first chain. Read-only briefs keep the original Read/Glob/Grep
+  contract, and parent Qoder Agent SDK environment variables are sanitized
+  before the CLI starts.
+- Documented the opt-in judgment tier for delegated sub-agents: Gemini 4 Argon
+  through the Antigravity CLI (`agy`), separate from the bulk
+  `codex-ccr-worker` lane. The tier sits outside `Router.tiers` and the shared
+  fallback policy, is pinned per call by model and effort, and leaves the
+  decision with the parent; it is not a bulk work tier. The code-review bot's
+  Gemini 3.8 Flash (`gemini-3-8-flash`) profile is being retired, and Gemini 4
+  Argon is not a substitute for that review volume. Availability and
+  schema-constrained output were live-qualified on 2026-10-24.
+
+- Fixed long-context turns failing every tier when the primary is rate-limited.
+  A provider's `maxInflightTokens` budget was applied as a hard per-request
+  ceiling, so a request larger than the whole budget (for example a 675K-token
+  Codex turn against MiniMax's 250K collision budget) was refused locally even
+  when the route was idle; with Z.AI's 5-hour window exhausted and the smaller
+  tiers unavailable, every sweep failed and the client got a 503 that ended the
+  turn. Admission now lets an oversized request run alone when nothing is
+  reserved on that route, and the solo reservation blocks concurrent acquires
+  until it completes. Live-qualified on the main listener: a 308,594-token
+  request was admitted on the first MiniMax attempt and returned 200 in 27s.
+
+- Removed MiniMax's static prefill-token budget and stopped cross-tier
+  rate-limit pacing from stalling deferred work. The 250K `maxInflightTokens`
+  budget (briefly 1.2M) assumed deferred large prefills could fall into a
+  healthy chain; while Z.AI's 5-hour window was exhausted, deferral became
+  queueing and 400-560K Codex turns serialized MiniMax behind one request.
+  The governed MiniMax provider now has no token budget: count AIMD bounds
+  request concurrency, and a sweep with any admission-deferred route uses the
+  jittered base cooldown instead of another tier's rate-limit window.
+  Rate-limited tiers keep their own per-route backoff.
+
 - Fixed deterministic DeepSeek 400s on replayed tool-loop history. The DeepSeek
   Anthropic endpoint rejects assistant turns that follow a `tool_result` turn,
   or that contain `tool_use`, yet lack a leading thinking block ("The

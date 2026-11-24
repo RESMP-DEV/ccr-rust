@@ -1,0 +1,1 @@
+Runtime components of the CCR proxy — request admission control, rate-limit backoff, retry budgeting, SSE streaming, client auth, stickiness, schema validation, diagnostics, and a TUI dashboard.

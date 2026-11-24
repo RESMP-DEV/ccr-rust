@@ -1,0 +1,5 @@
+- Long-lived shared state is wrapped in `Arc` and exposed through `new()` constructors that take an `Arc<EwmaTracker>` or similar handle (e.g. `DynamicBackoff`, `AdmissionPermit`).
+- Cross-request mutable state uses `parking_lot::Mutex`/`RwLock` (e.g. `StickySessionTracker.entries`, `RateLimitTracker.tiers`) rather than std mutexes.
+- Counters and small numeric gauges are stored in `AtomicU64` fields accessed with explicit `Ordering::Acquire`/`AcqRel` semantics instead of `Cell`/`UnsafeCell`.
+- Diagnostic/capture modules guard writes with an `AtomicU64` global request counter plus a file-cap policy (max files, max bytes) to bound disk usage.
+- Configuration-driven constants (initial/min/max limits, TTLs, thresholds) are declared at module scope as `const` values with clear defaults, allowing runtime overrides only where explicitly needed.

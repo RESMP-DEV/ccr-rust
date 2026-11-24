@@ -1,0 +1,1 @@
+Tokio runtime with Axum/Tower-HTTP for the HTTP layer, reqwest for upstream calls, tiktoken-rs for token counting, zstd/flate2 for compression, Prometheus + Redis for metrics persistence, OpenTelemetry (optional feature) for tracing, and ratatui+crossterm for the embedded TUI dashboard.

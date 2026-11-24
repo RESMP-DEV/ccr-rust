@@ -1,0 +1,27 @@
+schema_version: 1
+module_path: main_service
+title: CCR Rust CLI Entry Point & Configuration
+scope:
+    - src/main.rs
+    - src/lib.rs
+    - src/config/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: 97c6fded-b651-4189-9326-7afa9bec5e3a
+kk_cards:
+    architecture_design:
+        id: 74ec6082-5058-4af0-aef0-979d511a8ee2
+        title: CCR Rust CLI Entry Point & Configuration
+    coding_conventions:
+        id: 148f38c0-2125-4483-801a-aa9922172f43
+        title: CCR Rust CLI Entry Point & Configuration
+    overview:
+        id: 1b678b79-7cac-4b93-951c-2e4eba8f64d1
+        title: CCR Rust CLI Entry Point & Configuration
+    tech_stack:
+        id: 6c2a8d63-b682-46f8-a0a7-9de43d755956
+        title: CCR Rust CLI Entry Point & Configuration
+    unique_setup_and_commands:
+        id: b6b59bc1-957f-4113-a085-afdf9bb35731
+        title: CCR Rust CLI Entry Point & Configuration

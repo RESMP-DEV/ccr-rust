@@ -6,7 +6,7 @@
       "api_key": "${ZAI_API_KEY}",
       "protocol": "anthropic",
       "auth_header": "authorization",
-      "models": ["glm-5.3"],
+      "models": ["glm-5.4"],
       "honor_ratelimit_headers": false
     },
     {
@@ -21,12 +21,12 @@
     }
   ],
   "Router": {
-    "default": "zai,glm-5.3",
-    "tiers": ["zai,glm-5.3"],
+    "default": "zai,glm-5.4",
+    "tiers": ["zai,glm-5.4"],
     "ignoreDirect": false
   },
   "Presets": {
-    "glm": {"route": "zai,glm-5.3"},
+    "glm": {"route": "zai,glm-5.4"},
     "kimi": {"route": "kimi,k3-256k"}
   },
   "Persistence": {"mode": "none"},

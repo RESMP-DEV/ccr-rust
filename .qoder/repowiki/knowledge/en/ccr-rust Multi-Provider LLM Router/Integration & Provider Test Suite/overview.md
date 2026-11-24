@@ -1,0 +1,1 @@
+Rust integration tests and Python validation scripts exercising the ccr-rust router, provider transformers, streaming, telemetry, and external API compatibility.

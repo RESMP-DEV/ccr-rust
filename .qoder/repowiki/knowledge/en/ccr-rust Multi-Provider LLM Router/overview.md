@@ -1,0 +1,1 @@
+Rust workspace that composes a Claude Code/OpenAI Codex proxy, request router, provider transformers, MCP server, metrics, worker inspector, and deployment tooling into the ccr-rust binary.

@@ -1,0 +1,6 @@
+Three-file leaf module split by responsibility:
+- `mod.rs` declares all process-wide static metrics (`lazy_static!` + `parking_lot::RwLock`) using the `prometheus` crate (CounterVec, Gauge, HistogramVec), plus in-memory ring buffers for pre-request audit entries and token-drift state. It re-exports public accessors and the persistence init/clear functions.
+- `handlers.rs` implements Axum async handlers for `/v1/usage`, `/v1/token-drift`, `/v1/token-audit`, `/v1/frontend-metrics`, `/v1/throughput`, `/metrics`, and `/v1/latencies`. Each handler reads the shared metric state and serializes it as JSON or Prometheus text via `TextEncoder`.
+- `persistence.rs` runs a background worker driven by an `mpsc::Sender<PersistEvent>` that batches counter increments, gauge sets/max, histogram observations, EWMA state, token-drift snapshots and audit-log pushes into Redis keys under a configurable prefix. It loads a snapshot at startup via `init_persistence` and supports `clear_redis_persistence` for cleanup; disabled when `PersistenceMode != Redis`.
+
+Dependency direction is one-way: `handlers` and `persistence` both depend on `mod.rs` for metric state, while `mod.rs` depends only on external crates and `crate::routing::EwmaTracker`; nothing inside this module imports back from handlers or persistence except through re-exports.

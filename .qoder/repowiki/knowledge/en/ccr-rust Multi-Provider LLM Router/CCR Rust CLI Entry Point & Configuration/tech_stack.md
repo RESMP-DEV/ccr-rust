@@ -1,0 +1,1 @@
+Axum HTTP server + tower-http layers, clap for CLI parsing, serde/serde_json for config deserialization, shellexpand for `${VAR}` / `$VAR` substitution in config values, tracing/tracing-subscriber for logging, optional OpenTelemetry tracing behind the `telemetry` feature flag.

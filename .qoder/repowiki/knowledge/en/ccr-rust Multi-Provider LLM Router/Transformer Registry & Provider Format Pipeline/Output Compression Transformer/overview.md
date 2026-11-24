@@ -1,0 +1,1 @@
+Transformer that compresses verbose tool_result text in model responses by stripping ANSI codes, blank lines, progress bars, and applying command-specific pattern rules.

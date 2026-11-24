@@ -1,0 +1,1 @@
+Plain Markdown documentation and JSON configuration files consumed by the CCR-Rust router via `ccr-rust --config <file>`; environment variables are injected at runtime through `${VAR}` placeholders in configs.

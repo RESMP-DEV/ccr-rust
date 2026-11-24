@@ -1,0 +1,5 @@
+- Each transformer is a zero-sized or trivially-clonable struct implementing the `Transformer` trait from `transformer/mod.rs`, overriding only the methods it needs while defaulting the rest.
+- Provider-specific transformers are kept as sibling modules under `src/transform/` and re-exported via `src/transform/mod.rs`, keeping the public surface flat.
+- New transformers are registered in `TransformerRegistry::new()` by calling `registry.register(name, |opts| Box::new(...))`, so the registry is the single source of truth for available transformer names.
+- Transformers that need configuration parse optional `&serde_json::Value` options inside their factory closure and fall back to sensible defaults when options are absent.
+- Cross-cutting request mutations shared between the runtime and factory paths (e.g. leading thinking-block injection for DeepSeek) live in `transformer/builtin.rs` rather than duplicated per provider.

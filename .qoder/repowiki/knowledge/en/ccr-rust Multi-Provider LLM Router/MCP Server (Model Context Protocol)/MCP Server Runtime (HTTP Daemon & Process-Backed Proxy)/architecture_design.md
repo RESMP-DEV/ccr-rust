@@ -1,0 +1,7 @@
+Three cooperating modules form the runtime layer:
+
+- `daemon.rs` — standalone HTTP server. `DaemonArgs` configures the Axum `Router` (`/mcp` POST, `/health` GET) guarded by a `BearerAuth` middleware. `run()` builds a `ToolRegistry` from feature-gated native tools (`ExaTool`, `JinaTool`, `Context7Tool`, `MemoryTool`, `PyrightTool`, optional `SindexerTool`) and an in-process `reqwest::Client`, then serves via `axum::serve` on a bound `TcpListener`. The HTTP handler deserializes raw bodies into `JsonRpcMessage` and delegates tool execution through `ToolRegistry`.
+- `server.rs` — stdio-based MCP gateway. `run()` spawns each backend command via `McpBackend::spawn`, collects their advertised tools into a `ToolCatalog`, optionally filters by include/exclude globs, then loops over `stdin.lines()`, routing `initialize` / `ping` / `tools/list` locally and forwarding `tools/call` to the owning backend process.
+- `backend.rs` — process abstraction. `McpBackend` wraps a `tokio::process::Child` launched through `bash -lc <command>` with piped stdin/stdout; it serializes/deserializes per-line JSON-RPC frames, skips server-to-client notifications and non-matching response ids, and kills the child in `Drop`.
+
+Dependency direction is one-way: `daemon.rs` → `crate::mcp::tools::*` (native tool implementations); `server.rs` → `backend.rs` + `catalog`; `backend.rs` only touches `protocol::JsonRpcMessage` and `McpTool`. Both servers present a uniform JSON-RPC surface despite different transports (HTTP vs stdio).

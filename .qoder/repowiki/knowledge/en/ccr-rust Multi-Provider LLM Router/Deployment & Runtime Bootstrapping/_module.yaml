@@ -1,0 +1,28 @@
+schema_version: 1
+module_path: deploy_infra
+title: Deployment & Runtime Bootstrapping
+scope:
+    - deploy/
+    - k8s/
+    - monitoring/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: f29ee403-9b92-4de6-a332-a31ff881bd8d
+kk_ordinal: 10
+kk_cards:
+    architecture_design:
+        id: 9d0c5dbc-f47f-4af0-8f21-cd19bfdae3e4
+        title: Deployment & Runtime Bootstrapping
+    coding_conventions:
+        id: b3a964e5-f540-4865-a0ac-393221dc74fb
+        title: Deployment & Runtime Bootstrapping
+    overview:
+        id: 8c5a3f8b-6214-49a0-8cd6-c8aa3d4fdda5
+        title: Deployment & Runtime Bootstrapping
+    tech_stack:
+        id: b44f5a39-6600-44c9-833b-1dfdb8ddb5f9
+        title: Deployment & Runtime Bootstrapping
+    unique_setup_and_commands:
+        id: 6991e77d-9dc4-4347-95cf-dec6c8ba3b31
+        title: Deployment & Runtime Bootstrapping

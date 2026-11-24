@@ -1,0 +1,7 @@
+Flat collection of feature modules under `src/`, each exposing a public struct or function consumed by the router/proxy layer (`crate::router` / `crate::proxy`). Internal dependency direction is one-way: these helpers depend on `config`, `router`, `metrics`, and `transformer`; nothing in this scope depends on them except the top-level proxy. Key subsystems:
+- Flow-control primitives: `admission.rs` (AIMD per-tier in-flight limit with token-budget ceiling), `ratelimit.rs` (per-tier 429 backoff + starvation detection), `retry_budget.rs` (process-wide retry amplification budget via packed atomic counter).
+- Transport helpers: `sse.rs` (incremental SSE frame parser, TTFT measurement, stream idle timeout), `client_auth.rs` (SHA-256-digested API-key middleware accepting both Bearer and Anthropic `x-api-key`).
+- Routing aids: `stickiness.rs` (TTL-based conversation-to-provider mapping), `schema_validate.rs` (optional JSON Schema response validator built on `jsonschema`).
+- Diagnostics: `debug_capture.rs` (on-disk raw request/response capture), `turn_capture.rs` (multi-thread turn state machine for streamed turns), `doctor.rs` (offline config + live provider catalog/auth probe), `dashboard.rs` (crossterm/ratatui TUI pulling from `/api/metrics`).
+- Entry point: `src/bin/stress.rs` is a standalone stress-test binary.
+The module is not a crate itself — it is a set of cooperating runtime primitives compiled into the main `ccr-rust` binary.

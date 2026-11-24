@@ -1,0 +1,1 @@
+Serde for JSON-RPC/tool schema serialization, sha2 for SHA-256 token hashing, subtle for constant-time comparison against timing attacks, and axum's `HeaderMap`/`AUTHORIZATION` header constants for bearer parsing.

@@ -108,6 +108,25 @@ lazy_static! {
     )
     .unwrap();
 
+    // Reasoning tokens are a labeled subset of the output tokens: providers
+    // already count them inside `completion_tokens`/`output_tokens`, so they
+    // are recorded on their own counter and never subtracted from output.
+    static ref REASONING_TOKENS_TOTAL: CounterVec = register_counter_vec!(
+        "ccr_reasoning_tokens_total",
+        "Total reasoning tokens per tier (labeled subset of output tokens)",
+        &["tier"]
+    )
+    .unwrap();
+
+    // Cardinality: `served_model` is bounded by the models configured for the
+    // router, so this label set stays small.
+    static ref SERVED_MODEL_REQUESTS_TOTAL: CounterVec = register_counter_vec!(
+        "ccr_served_model_requests_total",
+        "Total requests per tier and the model that actually served them",
+        &["tier", "served_model"]
+    )
+    .unwrap();
+
     static ref TIER_EWMA_LATENCY: GaugeVec = register_gauge_vec!(
         "ccr_tier_ewma_latency_seconds",
         "EWMA latency per tier in seconds (alpha=0.3)",
@@ -829,12 +848,22 @@ pub fn record_pre_request_tokens(
 /// calling, while OpenAI-style `prompt_tokens` already include cached reads.
 /// `cache_read` and `cache_creation` are subsets of `input_tokens`, so cache
 /// hit rate is `cache_read / input_tokens`.
+///
+/// `served_model` is the model that actually answered on the wire. The router
+/// may fall back to another tier, so this is not the client-requested model;
+/// it is `None` only when the caller has no wire model to report.
+///
+/// `reasoning_tokens` is the provider-reported reasoning volume. Providers
+/// already include reasoning inside the completion/output token count, so it
+/// is recorded as a labeled subset and never subtracted from output tokens.
 pub fn record_usage(
     tier: &str,
     input_tokens: u64,
     output_tokens: u64,
     cache_read: u64,
     cache_creation: u64,
+    served_model: Option<&str>,
+    reasoning_tokens: u64,
 ) {
     if input_tokens > 0 {
         INPUT_TOKENS_TOTAL
@@ -880,6 +909,24 @@ pub fn record_usage(
             cache_creation as f64,
         );
     }
+    if reasoning_tokens > 0 {
+        REASONING_TOKENS_TOTAL
+            .with_label_values(&[tier])
+            .inc_by(reasoning_tokens as f64);
+    }
+    let served_model_label = served_model.unwrap_or("unknown");
+    SERVED_MODEL_REQUESTS_TOTAL
+        .with_label_values(&[tier, served_model_label])
+        .inc();
+    info!(
+        tier = tier,
+        served_model = served_model_label,
+        input = input_tokens,
+        cached_input = cache_read,
+        output = output_tokens,
+        reasoning = reasoning_tokens,
+        "request token usage"
+    );
 }
 
 /// Record estimated USD cost for one completed request against its tier.
@@ -984,8 +1031,49 @@ pub fn verify_token_usage(tier: &str, local_estimate: u64, upstream_input: u64) 
 mod tests {
     use super::{
         estimate_request_tokens, key_matches_persistence_prefix, record_pre_request_tokens,
-        AUDIT_LOG,
+        record_usage, AUDIT_LOG, REASONING_TOKENS_TOTAL, SERVED_MODEL_REQUESTS_TOTAL,
     };
+
+    /// The router can fall back to another tier, so the served model is
+    /// recorded separately from the tier label, and the reasoning volume is
+    /// recorded as its own counter.
+    #[test]
+    fn record_usage_tracks_served_model_and_reasoning_tokens() {
+        let tier = "served-model-metrics-tier";
+        let reasoning_before = REASONING_TOKENS_TOTAL.with_label_values(&[tier]).get();
+        let served_before = SERVED_MODEL_REQUESTS_TOTAL
+            .with_label_values(&[tier, "served-model-a"])
+            .get();
+
+        record_usage(tier, 10, 20, 5, 0, Some("served-model-a"), 7);
+
+        assert_eq!(
+            REASONING_TOKENS_TOTAL.with_label_values(&[tier]).get() - reasoning_before,
+            7.0
+        );
+        assert_eq!(
+            SERVED_MODEL_REQUESTS_TOTAL
+                .with_label_values(&[tier, "served-model-a"])
+                .get()
+                - served_before,
+            1.0
+        );
+    }
+
+    /// Reasoning tokens are a labeled subset of the output tokens, so a
+    /// request that reports none must not move the reasoning counter.
+    #[test]
+    fn record_usage_leaves_reasoning_counter_alone_without_reasoning() {
+        let tier = "no-reasoning-metrics-tier";
+        let before = REASONING_TOKENS_TOTAL.with_label_values(&[tier]).get();
+
+        record_usage(tier, 10, 20, 0, 0, None, 0);
+
+        assert_eq!(
+            REASONING_TOKENS_TOTAL.with_label_values(&[tier]).get(),
+            before
+        );
+    }
 
     #[test]
     fn key_prefix_match_accepts_prefix_root_and_namespace() {

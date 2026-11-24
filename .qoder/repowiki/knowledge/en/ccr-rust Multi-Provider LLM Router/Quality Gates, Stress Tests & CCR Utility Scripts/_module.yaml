@@ -1,0 +1,28 @@
+schema_version: 1
+module_path: scripts_and_benchmarks
+title: Quality Gates, Stress Tests & CCR Utility Scripts
+scope:
+    - scripts/
+    - benchmarks/
+    - benches/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: a31dc2f8-9560-4a53-84d2-cf85d9986759
+kk_ordinal: 9
+kk_cards:
+    architecture_design:
+        id: 1d364a72-99c6-472a-9a72-eed5a6c51e8e
+        title: Quality Gates, Stress Tests & CCR Utility Scripts
+    coding_conventions:
+        id: c12d62cc-9af5-4e30-b72f-43b34ccc816f
+        title: Quality Gates, Stress Tests & CCR Utility Scripts
+    overview:
+        id: 1af46d70-c4ed-40f4-b9e3-cdc606973ce8
+        title: Quality Gates, Stress Tests & CCR Utility Scripts
+    tech_stack:
+        id: de0ae859-49ea-428e-9d20-d03b0f00ce2f
+        title: Quality Gates, Stress Tests & CCR Utility Scripts
+    unique_setup_and_commands:
+        id: f1a5d7c8-ccfe-4b1b-857f-aa9673f0c4c7
+        title: Quality Gates, Stress Tests & CCR Utility Scripts

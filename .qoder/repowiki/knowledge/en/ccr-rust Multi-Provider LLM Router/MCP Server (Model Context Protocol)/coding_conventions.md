@@ -1,0 +1,2 @@
+- New tools are implemented as a file under `tools/` and registered via the central registry in `tools/mod.rs` rather than being wired directly into transports.
+- Tool capability information flows through the `ToolInfo` struct defined in `protocol.rs`, which both the catalog and tool implementations share.

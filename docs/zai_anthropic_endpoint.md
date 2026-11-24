@@ -5,6 +5,11 @@ on 2026-09-23 through CCR-Rust, probing with generated PNGs (solid colors and
 a structured red/blue split image). Where official Z.AI documentation and
 observed behavior could differ, this file records observed behavior.
 
+The 2026-09-23 results are kept as dated observations. The model guidance
+changed on 2026-11-23: GLM-5.4 superseded GLM-5.3 and GLM-5.3-Flash as the
+Z.AI coding-plan model and the Z.AI vision head. See
+[Model behavior observed](#model-behavior-observed).
+
 ## Endpoint and authentication
 
 - Base URL: `https://api.z.ai/api/anthropic/v1`, messages route
@@ -25,7 +30,7 @@ Provider block used locally (`~/.claude-code-router/config.json`):
   "api_key": "${CCR_ZAI_API_KEY}",
   "protocol": "anthropic",
   "auth_header": "authorization",
-  "models": ["glm-5.3"],
+  "models": ["glm-5.4"],
   "honor_ratelimit_headers": false
 }
 ```
@@ -54,13 +59,20 @@ still receive the final text.
 
 ## Model behavior observed
 
-- **Vision policy: use glm-5.3 flash (flashx) for image workloads, never
-  glm-5.3 standard.** Flash has native (offloaded) vision and read structured
-  probes correctly through the OpenAI-compatible endpoint. glm-5.3 standard
-  segments image layout reliably (it answers with the correct left/right
-  structure) but misreads colors: solid blue read as "green"/"purple", red as
-  "blue", across both zai endpoint styles. Treat standard's image answers as
-  unreliable regardless of transport.
+- **Vision policy: use glm-5.4 for image workloads, never glm-5.3.** The
+  2026-11-23 qualification probed the Responses endpoint CCR dispatches to for
+  the `zai` provider (`https://api.z.ai/api/v1`, `POST /responses`) and read a
+  two-color PNG correctly (`left=red, right=blue`, then `left=green,
+  right=yellow` on a second pair), so glm-5.4 is the Z.AI vision head as well
+  as the coding-plan primary. The identical probe sent to glm-5.3 returned
+  "I can't see any image content here": glm-5.3 is text-only, so an image
+  request pinned to it is refused instead of answered.
+- Dated 2026-09-23 observation, superseded for routing: glm-5.3 flash (flashx)
+  had native (offloaded) vision and read structured probes correctly, while
+  glm-5.3 standard segmented image layout reliably (it answered with the
+  correct left/right structure) but misread colors, solid blue as
+  "green"/"purple" and red as "blue", across both zai endpoint styles. Both
+  models are registered but unrouted.
 - Solid single-color tiny images (1x1) are misclassified even by otherwise
   accurate models; use structured probes when verifying image transport.
 
@@ -79,7 +91,7 @@ w, h = 256, 128
 raw = b''.join(b'\x00' + (bytes((255,0,0))* (w//2) + bytes((0,0,255))*(w//2)) for _ in range(h))
 png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) \
     + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
-body = {"model":"glm-5.3","max_tokens":1024,"stream":False,"messages":[{"role":"user","content":[
+body = {"model":"glm-5.4","max_tokens":1024,"stream":False,"messages":[{"role":"user","content":[
     {"type":"text","text":"Two colored halves. Reply exactly as left=<color>, right=<color>"},
     {"type":"image","source":{"type":"base64","media_type":"image/png","data":base64.b64encode(png).decode()}}]}]}
 open('/tmp/image-probe.json','w').write(json.dumps(body))
@@ -90,7 +102,8 @@ curl -s http://127.0.0.1:3456/v1/messages -H 'content-type: application/json' \
 
 Input-token inflation (roughly +150 tokens versus the text-only prompt)
 confirms the image was processed; a model claiming "no image attached" means
-transport dropped it.
+transport dropped it, while a plain text-only refusal means the model cannot
+see images at all.
 
 ## Operations: restart with credentials (do not bypass)
 

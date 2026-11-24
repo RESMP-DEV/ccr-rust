@@ -327,6 +327,8 @@ pub async fn stream_response_translated(
                     usage.output_tokens,
                     cache_read,
                     0,
+                    Some(ctx.served_model.as_str()),
+                    usage.reasoning_tokens.unwrap_or(0),
                 );
                 verify_token_usage(&ctx.tier_name, ctx.local_estimate, input_tokens);
                 if let Some(cost) = ctx.pricing.and_then(|p| {
@@ -409,6 +411,7 @@ pub async fn stream_anthropic_response_with_tracking(
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(buffer_size);
     let tier_name = verify_ctx.tier_name.clone();
+    let served_model = verify_ctx.served_model.clone();
     let local_estimate = verify_ctx.local_estimate;
     let pricing = verify_ctx.pricing;
 
@@ -420,6 +423,7 @@ pub async fn stream_anthropic_response_with_tracking(
         let mut output_tokens: u64 = 0;
         let mut cache_read_tokens: u64 = 0;
         let mut cache_creation_tokens: u64 = 0;
+        let mut reasoning_tokens: u64 = 0;
         let mut accumulated_content_len: usize = 0;
         // TTFT/throughput timing
         let stream_start = verify_ctx.stream_start;
@@ -504,6 +508,9 @@ pub async fn stream_anthropic_response_with_tracking(
                                                 cache_creation_tokens = creation;
                                             }
                                         }
+                                        let reported =
+                                            crate::router::usage_metrics::anthropic_reasoning_tokens(usage);
+                                        reasoning_tokens = reasoning_tokens.max(reported);
                                     }
 
                                     // Also track content length for estimation fallback
@@ -628,6 +635,8 @@ pub async fn stream_anthropic_response_with_tracking(
             final_output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
+            Some(served_model.as_str()),
+            reasoning_tokens,
         );
         verify_token_usage(&tier_name, local_estimate, raw_prompt_tokens);
         if let Some(cost) = pricing.and_then(|p| {
@@ -1021,7 +1030,7 @@ mod tests {
         assert_eq!(usage["reasoning_tokens"], 3);
     }
 
-    fn tracked_context(
+    pub(super) fn tracked_context(
         tracker: &std::sync::Arc<crate::ratelimit::RateLimitTracker>,
     ) -> (
         crate::sse::StreamVerifyCtx,
@@ -1033,6 +1042,7 @@ mod tests {
             .expect("admission fixture");
         let context = crate::sse::StreamVerifyCtx {
             tier_name: "provider".to_string(),
+            served_model: "model-v1".to_string(),
             ratelimit_key: "provider,model".to_string(),
             ratelimit_generation: tracker.generation("provider,model"),
             local_estimate: 1,
@@ -1476,3 +1486,7 @@ data: [DONE]
         );
     }
 }
+
+#[cfg(test)]
+#[path = "streaming_reasoning_tests.rs"]
+mod streaming_reasoning_tests;

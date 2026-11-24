@@ -1,0 +1,2 @@
+- Each runtime target ships as a self-contained manifest file (systemd `.service`, macOS `.plist`, Kubernetes `.yaml`) referencing the same binary path `/usr/local/bin/ccr-rust` and default config location `/etc/ccr/config.json`.
+- The process health contract is expressed uniformly via an HTTP endpoint on port 3456 — used as the service listen port, the Kubernetes probe target, and the Prometheus scrape target.

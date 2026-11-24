@@ -1,0 +1,1 @@
+clap for subcommand parsing, serde + serde_json for typed JSON I/O against the worker's event trace format, chrono for validating run-directory timestamps.

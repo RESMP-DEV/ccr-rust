@@ -15,13 +15,14 @@ class CodexCatalogTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.path = self.root / "catalog.json"
         self.source: dict[str, object] = {
-            "slug": "glm-5.3",
-            "id": "glm-5.3",
-            "model": "glm-5.3",
-            "displayName": "GLM 5.3",
-            "display_name": "GLM 5.3",
+            "slug": "glm-5.4",
+            "id": "glm-5.4",
+            "model": "glm-5.4",
+            "displayName": "GLM 5.4",
+            "display_name": "GLM 5.4",
             "description": "source",
             "context_window": 1048576,
+            "input_modalities": ["text", "image"],
             "supports_parallel_tool_calls": True,
         }
         self.write_catalog([self.source])
@@ -43,11 +44,19 @@ class CodexCatalogTests(unittest.TestCase):
         document = json.loads(self.path.read_text())
         slugs = [entry["slug"] for entry in document["models"]]
         self.assertIn("ccr-primary", slugs)
+        self.assertIn("glm-5.4", slugs)
+        self.assertIn("zai,glm-5.4", slugs)
         self.assertIn("minimax,MiniMax-M3.1-Flash", slugs)
         self.assertIn("qwen,qwen3.8-flash", slugs)
         self.assertIn("qwen,qwen3.8-max", slugs)
         self.assertIn("qwen,deepseek-v4.1-flash-1017", slugs)
         self.assertIn("qwen,deepseek-v4.1-flash", slugs)
+        # 2026-11-23: GLM-5.4 supersedes GLM-5.3 and GLM-5.3 Flash, so their
+        # slugs are retired rather than advertised as routes.
+        self.assertNotIn("glm-5.3", slugs)
+        self.assertNotIn("zai,glm-5.3", slugs)
+        self.assertNotIn("glm-5.3-flash", slugs)
+        self.assertNotIn("zai,glm-5.3-flash", slugs)
         self.assertNotIn("glm-5.3-flashx", slugs)
         self.assertNotIn("MiniMax-M3.1-Flash-Preview", slugs)
         self.assertNotIn("minimax,MiniMax-M3.1-Flash-Preview", slugs)
@@ -119,6 +128,30 @@ class CodexCatalogTests(unittest.TestCase):
         result = catalog.catalog_sync(self.path, apply=True, take_snapshot=False)
         self.assertFalse(result["ok"])
         self.assertIn("source model metadata is absent", result["errors"][0])
+
+    def test_missing_glm54_metadata_is_not_replaced_by_another_profile(
+        self,
+    ) -> None:
+        # 2026-11-23: the donor is glm-5.4. A live catalog without a real
+        # glm-5.4 entry fails the sync instead of cloning GLM-5.3's context
+        # window and modalities onto a slug nobody measured.
+        legacy = {
+            **self.source,
+            "slug": "glm-5.3",
+            "id": "glm-5.3",
+            "model": "glm-5.3",
+            "input_modalities": ["text"],
+        }
+        self.write_catalog([legacy])
+        result = catalog.catalog_sync(self.path, apply=True, take_snapshot=False)
+        self.assertFalse(result["ok"])
+        self.assertIn("source model metadata is absent", result["errors"][0])
+        document = json.loads(self.path.read_text())
+        slugs = [entry["slug"] for entry in document["models"]]
+        self.assertNotIn("glm-5.4", slugs)
+        self.assertNotIn("zai,glm-5.4", slugs)
+        self.assertNotIn("ccr-primary", slugs)
+        self.assertIn("glm-5.3", slugs)
 
     def test_duplicate_slug_is_rejected(self) -> None:
         duplicate = copy.deepcopy(self.source)

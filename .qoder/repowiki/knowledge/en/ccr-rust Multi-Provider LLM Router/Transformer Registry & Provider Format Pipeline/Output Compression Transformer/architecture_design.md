@@ -1,0 +1,5 @@
+Two-layer design inside the module:
+- `mod.rs` implements `OutputCompressTransformer` as a `Transformer`, walking the response JSON tree for `tool_result` blocks (handling both nested `content` arrays and direct `text` fields) and delegating to `patterns::compress`. It enforces two global guards: skip inputs shorter than `MIN_INPUT_LEN` (200 chars) and discard compression when `compressed/original > MAX_RATIO` (0.85).
+- `patterns/mod.rs` is the compression engine: it applies three universal cleanups (ANSI stripping, collapsing runs of 3+ blank lines, removing carriage-return progress-bar lines) via static `regex::Regex` patterns, then tries each command-specific submodule (`git`, `cargo`, `test_runner`, `npm`, `grep`) in fixed order, returning on the first `try_compress` match.
+- Each command submodule exports an identical `try_compress(&str) -> Option<String>` interface so new commands can be added by dropping a file under `patterns/` and registering it in `compress()`.
+- Dependency direction is strictly one-way: transformer → patterns → individual command modules; there are no cross-dependencies among command modules.

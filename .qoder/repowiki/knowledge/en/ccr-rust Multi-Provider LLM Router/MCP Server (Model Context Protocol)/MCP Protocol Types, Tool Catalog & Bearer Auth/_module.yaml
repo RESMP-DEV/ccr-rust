@@ -1,0 +1,25 @@
+schema_version: 1
+module_path: mcp_server/protocol_catalog_auth
+title: MCP Protocol Types, Tool Catalog & Bearer Auth
+scope:
+    - src/mcp/protocol.rs
+    - src/mcp/catalog.rs
+    - src/mcp/auth.rs
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: dc0bcc70-ff5e-42d9-b09b-20b11f6dc519
+kk_ordinal: 2
+kk_cards:
+    architecture_design:
+        id: 2c881d15-2544-4ab8-9e63-922e24e22e4f
+        title: MCP Protocol Types, Tool Catalog & Bearer Auth
+    coding_conventions:
+        id: aef1a67d-a509-4238-8c60-cf828a022fb2
+        title: MCP Protocol Types, Tool Catalog & Bearer Auth
+    overview:
+        id: 4c3da890-e18b-4ad1-b29d-b8f7e5ca5858
+        title: MCP Protocol Types, Tool Catalog & Bearer Auth
+    tech_stack:
+        id: 3aa3f948-ecd3-422f-b411-db4ab073dfb3
+        title: MCP Protocol Types, Tool Catalog & Bearer Auth

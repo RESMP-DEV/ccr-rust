@@ -1,0 +1,1 @@
+The Python validator at `tests/provider_validation/validate_apis.py` requires `ZAI_API_KEY` (and optionally `MINIMAX_API_KEY`) environment variables and the optional `openai` package; without them it prints SKIP/warning messages and falls back to raw requests.

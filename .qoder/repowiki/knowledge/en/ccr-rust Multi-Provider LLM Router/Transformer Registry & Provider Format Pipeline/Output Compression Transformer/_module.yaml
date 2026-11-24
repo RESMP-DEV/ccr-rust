@@ -1,0 +1,23 @@
+schema_version: 1
+module_path: transformers/output_compression
+title: Output Compression Transformer
+scope:
+    - src/transform/output_compress/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: 5b18b371-3c5c-4b4f-a689-146db1bc7657
+kk_ordinal: 1
+kk_cards:
+    architecture_design:
+        id: 8040eb30-f2d6-4216-aa13-1d849c1d2b13
+        title: Output Compression Transformer
+    coding_conventions:
+        id: 732af87f-20b5-4b2c-aef6-830dd4a7df9d
+        title: Output Compression Transformer
+    overview:
+        id: 3ef8d7ac-0eeb-4220-b55f-066021ea1158
+        title: Output Compression Transformer
+    tech_stack:
+        id: 7efb8dda-c652-4381-ab49-1e85a88fc57f
+        title: Output Compression Transformer

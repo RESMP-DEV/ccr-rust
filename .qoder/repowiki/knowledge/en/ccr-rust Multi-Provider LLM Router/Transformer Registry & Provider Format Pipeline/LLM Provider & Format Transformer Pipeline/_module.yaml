@@ -1,0 +1,25 @@
+schema_version: 1
+module_path: transformers/provider_adapters
+title: LLM Provider & Format Transformer Pipeline
+scope:
+    - src/transform/
+    - src/transformer/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend_adapters
+      reason: Frontend adapters detect OpenAI Codex/Anthropic Claude Code requests and delegate protocol translation to provider adapter transformers.
+kk_module_id: 60da1e51-176a-4cd3-9d76-38b40b28a008
+kk_cards:
+    architecture_design:
+        id: 8d970421-46e5-48dd-9d0b-3712609bab84
+        title: LLM Provider & Format Transformer Pipeline
+    coding_conventions:
+        id: 4714f0cc-de0a-4789-9a8a-53e534f57233
+        title: LLM Provider & Format Transformer Pipeline
+    overview:
+        id: 83418798-59d1-4829-a0e7-728c0012c7c9
+        title: LLM Provider & Format Transformer Pipeline
+    tech_stack:
+        id: 3e44b21b-deec-4424-a541-80ca384356b5
+        title: LLM Provider & Format Transformer Pipeline

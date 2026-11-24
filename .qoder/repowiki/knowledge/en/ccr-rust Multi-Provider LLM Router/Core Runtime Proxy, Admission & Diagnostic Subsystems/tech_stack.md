@@ -1,0 +1,1 @@
+Tokio async runtime; `parking_lot` for fast locks; `lazy_static` + `prometheus` for metrics counters; `sha2` for API-key digests; `jsonschema` for optional response-body schema validation; `crossterm` + `ratatui` for the interactive dashboard.

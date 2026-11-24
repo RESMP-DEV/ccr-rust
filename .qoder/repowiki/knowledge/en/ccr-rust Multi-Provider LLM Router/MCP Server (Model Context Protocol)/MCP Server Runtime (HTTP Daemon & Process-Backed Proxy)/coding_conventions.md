@@ -1,0 +1,4 @@
+- JSON-RPC errors are built via a local `rpc_error(id, code, message)` helper returning a `JsonRpcMessage` with standard error-shaped fields rather than ad-hoc serialization.
+- Optional features gate tool registration behind `#[cfg(feature = "...")]` blocks that also log the tool's activation via `tracing::info!` before pushing into the `Vec<Box<dyn NativeTool>>`.
+- External process I/O uses per-frame line delimiters: requests are flushed after writing the serialized JSON plus a trailing `\n`, and responses are read with `BufReader::lines()` until a matching id arrives.
+- Process lifetime is handled in `impl Drop` for spawned backends, which calls `child.start_kill()` so child processes are cleaned up when the parent drops them.

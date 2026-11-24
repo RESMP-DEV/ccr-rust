@@ -1,0 +1,1 @@
+Rust with Axum for HTTP, `parking_lot` for locks, `rand` for weighted/EWMA sampling, `chrono` for time-of-day features, `anyhow` for error wrapping, and the external `gp_routing` crate (Thompson sampling + KPLS Gaussian process surrogate) behind the `gp` Cargo feature.

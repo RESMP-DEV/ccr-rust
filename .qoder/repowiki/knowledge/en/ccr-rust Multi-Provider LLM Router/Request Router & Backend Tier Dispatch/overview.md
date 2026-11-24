@@ -1,0 +1,1 @@
+Orchestrates Anthropic/OpenAI/Responses API requests through backend model tiers, combining EWMA/GP latency-based routing with hedging, retries, streaming, and protocol translation.

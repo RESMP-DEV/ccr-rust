@@ -1,0 +1,38 @@
+schema_version: 1
+module_path: core_runtime
+title: "Core Runtime: Proxy, Admission & Diagnostic Subsystems"
+scope:
+    - src/admission.rs
+    - src/client_auth.rs
+    - src/proxy.rs
+    - src/ratelimit.rs
+    - src/retry_budget.rs
+    - src/sse.rs
+    - src/stickiness.rs
+    - src/schema_validate.rs
+    - src/debug_capture.rs
+    - src/turn_capture.rs
+    - src/dashboard.rs
+    - src/doctor.rs
+    - src/bin/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: baf334d8-2b72-4b5e-a47d-ed531cab815b
+kk_ordinal: 7
+kk_cards:
+    architecture_design:
+        id: 0da7ef54-678e-477a-af42-8d41c40727d1
+        title: "Core Runtime: Proxy, Admission & Diagnostic Subsystems"
+    coding_conventions:
+        id: 335db0dd-daa2-48d1-a654-9e75b2282046
+        title: "Core Runtime: Proxy, Admission & Diagnostic Subsystems"
+    overview:
+        id: 94b90577-b276-497a-8370-bf671bf60b7e
+        title: "Core Runtime: Proxy, Admission & Diagnostic Subsystems"
+    tech_stack:
+        id: a9cf44f4-f7a5-43be-b0a6-494963bdec39
+        title: "Core Runtime: Proxy, Admission & Diagnostic Subsystems"
+    unique_setup_and_commands:
+        id: 4db58cd2-5703-405a-be12-081b038a3176
+        title: "Core Runtime: Proxy, Admission & Diagnostic Subsystems"

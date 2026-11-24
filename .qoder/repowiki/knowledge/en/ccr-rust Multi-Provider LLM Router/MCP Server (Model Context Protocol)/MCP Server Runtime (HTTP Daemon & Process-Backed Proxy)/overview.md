@@ -1,0 +1,1 @@
+Implements two MCP server entry points: a tokio/axum HTTP daemon exposing native tools and a stdio proxy that multiplexes JSON-RPC over line-delimited frames to one or more external MCP backend processes.

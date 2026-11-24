@@ -1,0 +1,1 @@
+Concrete MCP tool implementations (memory graph, Exa web search/fetch, Jina embeddings, Context7, Pyright diagnostics, optional SIndexer) registered through a central registry.

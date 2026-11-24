@@ -1,0 +1,1 @@
+All transformers share the `serde_json::Value` payload type and the `anyhow::Result<Value>` error convention; regex-based patterns are reused across output-compression sub-patterns (cargo, git, grep, npm).

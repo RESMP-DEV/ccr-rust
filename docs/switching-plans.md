@@ -52,6 +52,9 @@ route outside that list becomes a single candidate. This gives intentional
 provider selection for this example, but is not access control. For accounts
 that must never mix, keep their provider sets in different router instances.
 
+The GLM route in this example is `zai,glm-5.4`, which reads images as well as
+text. The superseded `zai,glm-5.3` is text-only and refuses image content.
+
 ## Claude Code: select a plan for a new session
 
 This shell function is a recipe, not a built-in CCR command. It sets the main,
@@ -74,9 +77,9 @@ claude_route() {
 
 claude_route kimi,k3-256k
 claude_route kimi,kimi-for-coding
-claude_route zai,glm-5.3
+claude_route zai,glm-5.4
 # Another account suite, if that instance has this route:
-CCR_BASE_URL=http://127.0.0.1:3459 claude_route zai,glm-5.3
+CCR_BASE_URL=http://127.0.0.1:3459 claude_route zai,glm-5.4
 ```
 
 Where `claude-ccr` is still in use, it fixes its default model variables to
@@ -98,11 +101,11 @@ After creating the CCR profile from [Codex setup](codex_setup.md):
 
 ```bash
 codex --profile ccr --model kimi,k3-256k
-codex --profile ccr --model zai,glm-5.3
+codex --profile ccr --model zai,glm-5.4
 codex --profile ccr --model ccr-primary
 # On the workstation, these also start the managed service if stopped:
 codex-ccr --model kimi,k3-256k
-codex-ccr --model zai,glm-5.3
+codex-ccr --model zai,glm-5.4
 codex-ccr --model ccr-primary
 ```
 
@@ -111,7 +114,7 @@ another file is not enough. Custom route names may produce missing model
 metadata warnings; those warnings are separate from upstream authentication or
 tool compatibility errors.
 On the workstation, `ccr-primary` is included in
-`~/.codex/ccr-live-model-catalog.json` and mirrors the current GLM 5.3 primary
+`~/.codex/ccr-live-model-catalog.json` and mirrors the current GLM 5.4 primary
 metadata. If the primary tier changes, regenerate that catalog entry in the
 same change or pin the explicit `provider,model` slug instead. Run
 `ccr-catalog-sync --check` before a planned change; it reports required and
@@ -123,7 +126,7 @@ change immediately; existing threads need a TUI model switch or
 For the local fork that loads `<name>.config.toml`, copy the working
 `~/.codex/ccr.config.toml` to a **new** `ccr-kimi.config.toml` and set its top-level
 `model = "kimi,k3-256k"`. Make another profile named `ccr-glm.config.toml` with
-`model = "zai,glm-5.3"`. Keep the provider URL and HTTP/SSE settings. Then:
+`model = "zai,glm-5.4"`. Keep the provider URL and HTTP/SSE settings. Then:
 
 ```bash
 codex --profile ccr-kimi

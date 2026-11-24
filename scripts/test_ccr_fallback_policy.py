@@ -379,9 +379,10 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(minimax["auth_header"], "authorization")
         self.assertEqual(minimax["models"], ["MiniMax-M3.1-Flash"])
         self.assertEqual(minimax["transformer"], {"use": ["minimax"]})
-        # Live state landed 2026-10-22 after token-volume collision
-        # measurement; keep the repository source from erasing it.
-        self.assertEqual(minimax["maxInflightTokens"], 250_000)
+        # The 2026-10-22 token-collision budget was removed 2026-10-25 by
+        # user direction: during Z.AI window walls, deferral became
+        # queueing. Count AIMD now bounds request concurrency.
+        self.assertNotIn("maxInflightTokens", minimax)
 
     def test_meta_muse_fallback_tier_is_pinned(self) -> None:
         # 2026-10-23: Meta Model API (Muse Spark) is the last cloud fallback
@@ -420,12 +421,13 @@ class PolicyTests(unittest.TestCase):
         # 2026-10-11: gmi (unreliable) and deepseek (balance exhausted) left
         # the chain but stay registered so re-adding a chain entry restores
         # them without rewiring credentials. Qwen joined that group on
-        # 2026-10-19 when its monthly window ran out.
+        # 2026-10-19 when its monthly window ran out; Tetra joined it on
+        # 2026-11-23 pending authorization, tunnel, credential, and health.
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
             (
                 "minimax,MiniMax-M3.1-Flash",
-                "zai,glm-5.3-flash",
+                "zai,glm-5.4",
                 "deepseek,deepseek-flash",
                 "meta,muse-spark-1.3",
                 "strata-b550,qwen3.8-flash-next-coder",
@@ -439,6 +441,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("gmi", policy.MACHINE_SHARED_PROVIDERS)
         self.assertIn("deepseek", policy.MACHINE_SHARED_PROVIDERS)
         self.assertIn("qwen", policy.MACHINE_SHARED_PROVIDERS)
+        self.assertIn("tetra-vllm", policy.MACHINE_SHARED_PROVIDERS)
         self.assertEqual(
             policy.MACHINE_SHARED_PROVIDERS["gmi"]["api_base_url"],
             "https://api.gmi-serving.com/v1",
@@ -486,7 +489,13 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             policy.MACHINE_CONSUMERS["ocr-reviewers.json"],
+            "zai,glm-5.4",
+        )
+        # 2026-11-23 user direction: the former OCR primary keeps a
+        # direct-only seat so an explicit OpenRouter pin still resolves.
+        self.assertIn(
             "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
+            policy.MACHINE_CONSUMER_DIRECT_ROUTES["ocr-reviewers.json"],
         )
 
     def test_holo4_is_a_direct_computer_use_route(self) -> None:
@@ -508,34 +517,36 @@ class PolicyTests(unittest.TestCase):
     ) -> None:
         # 2026-10-21: GLM Flash moved to the final shared fallback so the
         # exhausted GLM utilization window is only spent after MiniMax. Strata
-        # B550 is the stronger local coding tier, while local27 remains final.
+        # B550 is the stronger local coding tier, while local27 remains final
+        # after the 2026-11-23 Tetra cordon.
         self.assertNotIn("zai,glm-5.3-flashx", policy.MACHINE_ROUTE_CHAIN)
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN[-5],
-            "zai,glm-5.3-flash",
+            "zai,glm-5.4",
         )
-        # 2026-10-21: the resident local MLX model is the last crawl-back tier.
+        self.assertNotIn("tetra-vllm,", str(policy.MACHINE_ROUTE_CHAIN))
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN[-1],
             "local27,qwen3.8-27b-mxfp4",
         )
         self.assertEqual(
             policy.MACHINE_CONSUMERS["glm-workers.json"],
-            "minimax,MiniMax-M3.1-Flash",
+            "zai,glm-5.4",
         )
-        self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
+        self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.4")
 
-    def test_worker_chain_leads_with_minimax_and_keeps_glm_flash_fallback(
+    def test_worker_chain_leads_with_minimax_and_keeps_glm54_fallback(
         self,
     ) -> None:
-        # 2026-10-21: the scoped-worker primary moved to MiniMax because the
-        # Z.AI GLM plan keeps exhausting its monthly utilization window; GLM
-        # Flash remains behind MiniMax; both local tiers follow the cloud lane.
+        # 2026-10-21: MiniMax leads the shared chain because the Z.AI GLM plan
+        # keeps exhausting its monthly utilization window, so it is the first
+        # fallback for a lane whose primary is GLM-5.4; both local tiers follow
+        # the cloud lane.
         self.assertEqual(
             policy.MACHINE_ROUTE_CHAIN,
             (
                 "minimax,MiniMax-M3.1-Flash",
-                "zai,glm-5.3-flash",
+                "zai,glm-5.4",
                 "deepseek,deepseek-flash",
                 "meta,muse-spark-1.3",
                 "strata-b550,qwen3.8-flash-next-coder",
@@ -543,10 +554,10 @@ class PolicyTests(unittest.TestCase):
             ),
         )
         self.assertNotIn("zai,glm-5.3", policy.MACHINE_ROUTE_CHAIN)
-        self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.3")
+        self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.4")
         self.assertEqual(
             policy.MACHINE_CONSUMERS["glm-workers.json"],
-            "minimax,MiniMax-M3.1-Flash",
+            "zai,glm-5.4",
         )
 
     def test_main_and_auth_share_the_chain_after_the_qwen_removal(self) -> None:
@@ -575,13 +586,14 @@ class PolicyTests(unittest.TestCase):
         }
         derived = policy.derive(config, machine_policy, "config.json")
         # The private Qwen Max seat left with the rest of the lane, so main and
-        # auth now run the plain shared chain behind their GLM-5.3 primary.
+        # auth now run the plain shared chain behind their GLM-5.4 primary.
+        # The chain's own Z.AI tier is the same route, so the duplicate
+        # collapses and the lane holds one Z.AI model.
         self.assertEqual(
             derived["Router"]["tiers"],
             [
-                "zai,glm-5.3",
+                "zai,glm-5.4",
                 "minimax,MiniMax-M3.1-Flash",
-                "zai,glm-5.3-flash",
                 "deepseek,deepseek-flash",
                 "meta,muse-spark-1.3",
                 "strata-b550,qwen3.8-flash-next-coder",
@@ -609,6 +621,22 @@ class PolicyTests(unittest.TestCase):
             {"use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]},
         )
 
+    def test_tetra_vllm_is_registered_but_unrouted(self) -> None:
+        provider = policy.MACHINE_SHARED_PROVIDERS["tetra-vllm"]
+        self.assertEqual(provider["api_base_url"], "http://127.0.0.1:18317/v1")
+        self.assertEqual(provider["api_key"], "${CCR_TETRA_VLLM_API_KEY}")
+        self.assertEqual(provider["protocol"], "openai")
+        self.assertEqual(provider["models"], ["deepseek-ai/DeepSeek-V4.1-Flash"])
+        self.assertEqual(provider["maxInflight"], 1)
+        self.assertEqual(provider["force_reasoning_effort"], "none")
+        self.assertEqual(
+            provider["transformer"],
+            {"use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]},
+        )
+        self.assertNotIn(
+            "tetra-vllm,deepseek-ai/DeepSeek-V4.1-Flash", policy.MACHINE_ROUTE_CHAIN
+        )
+
     def test_strata_tunnel_agent_owns_zeroTier_first_forward(self) -> None:
         root = Path(__file__).resolve().parents[1]
         path = root / "deploy" / "com.kearm.strata-b550-tunnel.plist"
@@ -623,6 +651,28 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("127.0.0.1:18081:127.0.0.1:18080", script)
         for option in (
             "ExitOnForwardFailure=yes",
+            "ControlMaster=no",
+            "ControlPersist=no",
+        ):
+            self.assertIn(option, script)
+
+    def test_tetra_tunnel_agent_owns_named_ssh_forward(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        path = root / "deploy" / "com.kearm.tetra-vllm-tunnel.plist"
+        agent = plistlib.loads(path.read_bytes())
+        self.assertEqual(agent["Label"], "com.kearm.tetra-vllm-tunnel")
+        self.assertEqual(
+            agent["ProgramArguments"],
+            ["/Users/kearm/.local/share/ccr-routing/tetra_vllm_tunnel.sh"],
+        )
+        self.assertTrue(agent["RunAtLoad"])
+        self.assertTrue(agent["KeepAlive"])
+        script = (root / "scripts" / "tetra_vllm_tunnel.sh").read_text()
+        self.assertIn("hosts=(tetra)", script)
+        self.assertIn("127.0.0.1:18317:127.0.0.1:8317", script)
+        for option in (
+            "ExitOnForwardFailure=yes",
+            "ServerAliveInterval=10",
             "ControlMaster=no",
             "ControlPersist=no",
         ):
@@ -663,8 +713,89 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(zai["api_base_url"], "https://api.z.ai/api/v1")
         self.assertEqual(zai["api_key"], "${CCR_ZAI_API_KEY}")
         self.assertEqual(zai["protocol"], "responses")
+        # 2026-11-23: glm-5.4 is the canonical model; the superseded ids stay
+        # registered but unrouted so a dated re-approval restores them without
+        # rewiring credentials.
+        self.assertIn("glm-5.4", zai["models"])
         self.assertIn("glm-5.3", zai["models"])
         self.assertIn("glm-5.3-flash", zai["models"])
+
+    def test_glm54_supersedes_glm53_as_primary_and_vision_head(self) -> None:
+        # 2026-11-23 user direction: GLM-5.4 is the canonical coding-plan
+        # primary and the Z.AI vision head, superseding GLM-5.3 and GLM-5.3
+        # Flash. The live qualification is the two-color PNG probe recorded in
+        # evidence/glm54-vision-qualification-20261123.md.
+        self.assertEqual(policy.MACHINE_CONSUMERS["config.json"], "zai,glm-5.4")
+        self.assertEqual(policy.MACHINE_CONSUMERS["config-auth.json"], "zai,glm-5.4")
+        self.assertIn("zai,glm-5.4", policy.MACHINE_ROUTE_CHAIN)
+        self.assertNotIn("zai,glm-5.3", policy.MACHINE_ROUTE_CHAIN)
+        self.assertNotIn("zai,glm-5.3-flash", policy.MACHINE_ROUTE_CHAIN)
+        self.assertEqual(
+            policy.MACHINE_CONSUMERS["glm-workers.json"],
+            "zai,glm-5.4",
+        )
+
+    def test_glm53_is_aliased_onto_glm54_and_never_routed(self) -> None:
+        # 2026-11-23 user direction: GLM-5.3 must never be served. Provider
+        # models are advertised, not enforced, so an explicit "zai,glm-5.3"
+        # pin was answered by the retired model upstream. The provider model
+        # map rewrites every retired Z.AI id onto glm-5.4 at dispatch time.
+        zai = policy.MACHINE_SHARED_PROVIDERS["zai"]
+        self.assertEqual(
+            zai["modelMap"],
+            {
+                "glm-5.3": "glm-5.4",
+                "glm-5.3-flash": "glm-5.4",
+                "glm-5.3-flashx": "glm-5.4",
+            },
+        )
+        self.assertIn("glm-5.4", zai["models"])
+        for retired in ("glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"):
+            self.assertNotIn(f"zai,{retired}", policy.MACHINE_ROUTE_CHAIN)
+            self.assertNotIn(f"zai,{retired}", str(policy.MACHINE_CONSUMERS))
+            self.assertNotIn(
+                f"zai,{retired}", str(policy.MACHINE_CONSUMER_DIRECT_ROUTES)
+            )
+        for consumer in policy.MACHINE_CONSUMERS:
+            self.assertEqual(policy.MACHINE_CONSUMERS[consumer], "zai,glm-5.4")
+
+    def test_glm54_aliases_replace_the_glm53_aliases(self) -> None:
+        # The derived alias surface follows the tiers: the bare model id and
+        # the stable client handle now point at the GLM-5.4 route, and the
+        # superseded ids are no longer advertised.
+        machine_policy = {
+            "version": 1,
+            "routes": list(policy.MACHINE_ROUTE_CHAIN),
+            "providers": copy.deepcopy(list(policy.MACHINE_SHARED_PROVIDERS.values())),
+            "consumers": {
+                name: {
+                    "primary": primary,
+                    "additional_routes": list(
+                        policy.MACHINE_CONSUMER_ADDITIONAL_ROUTES.get(name, ())
+                    ),
+                    "direct_routes": list(
+                        policy.MACHINE_CONSUMER_DIRECT_ROUTES.get(name, ())
+                    ),
+                }
+                for name, primary in policy.MACHINE_CONSUMERS.items()
+            },
+        }
+        config: dict[str, Any] = {
+            "Providers": [],
+            "Router": {
+                "default": policy.MACHINE_CONSUMERS["config.json"],
+                "retrySweeps": {"enabled": True, "maxHoldMs": 60_000},
+                "modelAliases": {"glm-5.3": "zai,glm-5.3"},
+            },
+        }
+        derived = policy.derive(config, machine_policy, "config.json")
+        aliases = derived["Router"]["modelAliases"]
+        self.assertEqual(aliases["glm-5.4"], "zai,glm-5.4")
+        self.assertEqual(aliases["ccr-primary"], "zai,glm-5.4")
+        # The stale operator alias for a route no tier serves is dropped
+        # instead of pointing at a model CCR cannot dispatch.
+        self.assertNotIn("glm-5.3", aliases)
+        self.assertNotIn("glm-5.3-flash", aliases)
 
     def test_governed_consumers_cannot_preserve_an_infinite_hold(self) -> None:
         config = copy.deepcopy(self.config)

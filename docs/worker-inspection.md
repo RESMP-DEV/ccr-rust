@@ -10,11 +10,22 @@ local helper; this feature does not install or modify it.
 Decide delegation by decomposing before exploring. Enumerate the task's
 pieces, reading only what the briefs need, then send every piece that can be a
 bounded work order with its own scope, ownership, acceptance check, and finish
-line. A one-piece task is still delegated. Keep only live conversation,
-cross-piece judgment, credentials or other irreversible actions, live-service
-coordination, tools the worker infrastructure cannot reach, and final
-integration in the parent turn. Do not use size, file count, elapsed time, or
-effort already spent as the trigger.
+line. A one-piece task is still delegated. Path, symbol, and entry-point
+discovery is a bounded read-only worker brief, not parent exploration: a
+parent grep, a file read for orientation, or broad shell discovery is a
+delegated piece that was not delegated. Source audit, patch authoring, test
+running, log and evidence collection, and drafting findings are worker work
+even when the parent could do them faster. Route judgment-heavy pieces to the
+judgment tier below; send the remaining bounded pieces to a worker.
+Parent-only work is a closed list: live conversation, credentials or other
+irreversible action, live-service coordination, parent-harness-only
+capability, final accept/reject/commit/merge, and cross-piece conflict
+resolution. Do not use size, file count, elapsed time, or effort already
+spent as the trigger.
+
+`create_thread` and native Codex child tasks are never a delegation
+mechanism; `Workers:` means a `codex-ccr-worker` run or the named judgment
+tier.
 
 State the split before launching: which pieces are workers, which stay with
 the parent and under which parent-only condition, and why. Launch the workers
@@ -22,6 +33,91 @@ before doing parent work, and send independent pieces concurrently. Do not
 collapse several delegable pieces into one broader interactive pass because
 they share a theme, and do not ask permission to launch a worker the user's
 task already authorizes.
+
+Write a fresh visible decomposition ledger with three lines at the start of
+every actionable user turn, before any progress-making tool: `Workers:`
+every bounded brief, owned surface, acceptance evidence, and finish line;
+`Parent-only:` the closed list of live conversation, credentials or other
+irreversible action, live-service coordination, parent-harness-only
+capability, final accept/reject/commit/merge, and cross-piece conflict
+resolution; and `Terminal budget:` the parent terminal actions reserved for
+constructing briefs, launching workers, inspecting their receipts, and
+performing the named parent-only work. The ledger is a work contract, not
+narration.
+
+Every parent terminal action maps to `Parent-only` or to launching and
+accepting a worker. An action that maps to neither is delegated, not
+justified. While workers run, the parent may prepare independent briefs or
+wait; it may not silently take over a delegated piece. At synthesis, cite
+each worker run beside the parent's independent verification and record the
+consolidated result in the project receipt.
+
+On the maintainer's Mac, fresh offline worker briefs and offline read-only
+resumes first use the launcher-level Qoder lane: Qoder CLI `DeepSeek-Flash`
+(`dfmodel`, DeepSeek V4.1 Flash) with maximum reasoning. Read-only briefs
+expose only Read/Glob/Grep. Briefs launched with `--write-workspace` and one
+or more `--owned-path` declarations run in an isolated git worktree with
+Read/Glob/Grep/Write/Edit, no Bash or network, and only the declared paths
+are applied back; out-of-scope changes are rejected and the worker falls back
+to the MiniMax-first CCR chain. A clean Qoder result bypasses the Responses
+listener; network, write-workspace without `--owned-path`, disabled, and
+unclean tasks use that chain directly as a worker brief, never parent
+execution. Qoder ineligibility changes the selected worker lane, never the
+decision to delegate: command-requiring verify or repair briefs pass
+`--no-qoder-primary` and run on the MiniMax-first chain, while offline source
+audits and scoped patch generation use Qoder first. Qoder has no synthetic
+attempt-count budget; local concurrency, task deadlines, explicit opt-out,
+and real provider errors govern execution. Qoder never enters `Router.tiers`
+or the shared fallback policy.
+
+## Judgment-tier sub-agents
+
+Gemini 4 Argon through the Antigravity CLI (`agy`) is the opt-in judgment
+tier for delegated sub-agents; it is a judgment tier, not a bulk work tier.
+Use it for bounded review, architecture and tradeoff analysis, adjudicating
+ambiguous or conflicting evidence, and independent verification. Keep
+implementation volume, mechanical edits, and broad searches on the bulk
+worker lane. It is a delegation tier, not a CCR route: it never enters
+`Router.tiers` or the shared fallback policy, so it cannot silently become a
+fallback or consume worker capacity. Pin the model and effort per call
+(`gemini-4-argon-high` for hard judgment, `-medium` for routine second
+opinions), set an explicit print timeout, and treat the structured report as
+evidence; the parent keeps the decision and final integration.
+
+The code-review bot's Gemini 3.8 Flash (`gemini-3-8-flash`) profile is being
+retired; Gemini 4 Argon is not a substitute for that bulk review volume.
+
+`agy` is a local Antigravity CLI, not a CCR helper. On the maintainer's Mac it
+is `~/.local/bin/agy`. Check availability and the current model catalog before
+use:
+
+```bash
+command -v agy
+agy models | grep '^gemini-4-argon'
+```
+
+Select the model and effort explicitly; the interactive default is not a
+policy. `gemini-4-argon-high` is for hard judgment, `-medium` for routine
+second opinions, and `-low` only for cheap classification. `--print-timeout=0`
+waits indefinitely, so pass an explicit timeout. Do not use this tier as a
+parallel bulk fleet; keep judgment calls bounded and sequential unless the
+parent explicitly authorizes a small fan-out. A bounded judgment call uses the
+same brief contract and a schema for the report:
+
+```bash
+agy --model gemini-4-argon-high --effort high \
+  --output-format json --json-schema /path/to/schema.json \
+  --print-timeout=600s --prompt "$brief"
+```
+
+Run the call in a disposable worktree when the judgment must not write; do not
+add `--dangerously-skip-permissions` for parent-driven judgment calls. That
+flag belongs to the review bot's disposable automated worktrees. The
+schema-validated `structured_output` is the report; the CLI envelope's prose is
+not a decision. On 2026-10-24, `agy models` listed
+`gemini-4-argon-{low,medium,high}` and a schema-constrained print call returned
+`SUCCESS` with the expected object in about 9 seconds. This qualifies
+availability and structured output, not judgment quality.
 
 ## Brief contract
 
@@ -91,6 +187,22 @@ BRIEF
 codex-ccr-worker --cwd "$PWD" --read-only --output "$run/result.txt" \
   "$brief" \
   >"$run/relay.jsonl" 2>"$run/launcher.stderr"
+```
+
+For a narrowly scoped write, declare every writable path; the Qoder lane runs
+in an isolated worktree and copies back only those paths:
+
+```bash
+write_brief=$(cat <<'BRIEF'
+<task>Repair the two owned files and run the named check.</task>
+<instructions>Edit only src/module.rs and src/module_test.rs; stop after the check.</instructions>
+<report>Return the diff summary, check exit code, and non-claims.</report>
+BRIEF
+)
+codex-ccr-worker --cwd "$PWD" --write-workspace \
+  --owned-path src/module.rs --owned-path src/module_test.rs \
+  --output "$run/result.txt" "$write_brief" \
+  >"$run/relay.jsonl" 2>"$run/launcher.stderr"
 
 ccr-rust workers list --limit 5
 ccr-rust workers show RUN
@@ -133,6 +245,49 @@ profiles, permission choices, requested routes, and elapsed-time totals.
 receipt directories are unavailable. Listener counters are in-memory and reset
 on restart, while receipt history remains local and private. A requested route
 is still not proof of the served upstream route.
+
+Qoder work is visible only in launcher receipts when Qoder serves a brief,
+because a Qoder success bypasses the CCR listener and never increments its
+per-tier request counters. `qoder_lane` counts every receipt with a non-empty
+`qoder_primary_attempt` as `attempted`, then classifies the attempt rather than
+the top-level receipt outcome: `served` counts an attempt whose receipt records
+`engine` as `qoder` or a `served_route` that is `qoder` or `qoder`-prefixed
+(begins with `qoder,`), and `fell_back` counts every other attempted receipt,
+so `attempted` equals `served` plus `fell_back`.
+`outcome:<value>` counters preserve the attempt's recorded outcome, and
+`attempted` remains the total attempt count for compatibility. A receipt that
+requested Qoder (`qoder_primary_requested`, or a requested route beginning with
+`qoder`) with no attempt and no bypass reason on a receipt whose outcome is not
+`running` counts as `eligible_not_attempted`; bypass reasons keep their own
+counters, and legacy receipts with no Qoder evidence remain `not_recorded`.
+Listener tier counters and receipt-derived Qoder counts answer different
+questions: only the receipt can show Qoder work.
+
+`--parent-sessions` is a separate opt-in mode. It scans Codex JSONL rollouts
+under `--sessions-root` (default `~/.codex/sessions`), selects sessions whose
+`session_meta` originator is `codex-tui`, and keeps those whose recorded start
+(or `YYYY/MM/DD` path fallback) falls in the same `--days` window. Each
+selected session is classified from its first `event_msg` payload of type
+`task_started`: it is a root parent when `turn_attribution.turn_trigger`
+equals `user`, and a native child when that trigger is absent or null, so
+`create_thread`-launched child rollouts are not mistaken for roots. It
+reports per-session cwd, turn count, tool calls, shell calls,
+`codex-ccr-worker` launches, `create_thread` launches, ledger-bearing assistant
+messages, and a `native_child` boolean, plus aggregates for
+`root_parent_sessions`, `native_child_sessions`, `native_child_tool_calls`
+(tool calls in native-child sessions), sessions with native child delegation,
+and sessions with no worker launch; `--json` exposes the same data under
+`parent_sessions`. `sessions` still counts every selected `codex-tui` rollout,
+while `sessions_with_no_worker_launch` counts only root parents. The mode is
+local metadata-only: it does not contact the listener or a provider, and it
+never stores or prints user prompt text. A turn is a `turn_context` record, a
+shell call is a `shell`, `exec_command`, `container.exec`, or `local_shell`
+tool call (including a `local_shell_call` item), a worker launch is a shell
+command containing `codex-ccr-worker`, a native child launch is a
+`create_thread` tool call, and an assistant message is ledger-bearing only when
+it contains `Workers:`, `Parent-only:`, and `Terminal budget:`. Mirrored
+`agent_message` events are not counted twice, and `malformed_lines` counts
+unreadable JSONL records in the selected sessions.
 
 ## Commands and output budgets
 
@@ -211,9 +366,27 @@ receipt selectors, and inspect their selected `run_dir` when necessary.
 - `model_requested` comes from the launcher receipt. `provider_verified` is
   always false: configured model names and worker claims are not live upstream
   proof. Confirm routing separately from actual router/runtime evidence.
+- `engine`, `served_route`, `model_identity`, `qoder_primary_requested`,
+  `qoder_bypass_reason`, and `qoder_attempt_outcome` are copied from the
+  launcher receipt into both `list` entries and `show` detail. Absent fields,
+  or fields whose value has an unexpected type, stay `null`, so legacy
+  receipts remain inspectable. These are recorded launcher values, not live
+  upstream proof. `engine: qoder` or a `served_route` of `qoder` or `qoder,...`
+  marks a Qoder-served attempt; a recorded attempt outcome without that
+  evidence marks a fallback to the governed CCR chain; a bypass reason records
+  a structural bypass (for example `disabled` or `network`) that never
+  attempted Qoder. A Qoder success bypasses the listener, so these receipt
+  fields are the only local evidence that Qoder served a brief. Human output
+  adds one compact `Qoder:` line: `list` annotates only runs with recorded
+  Qoder evidence, `show` prints `Qoder: lane=not_recorded` for legacy
+  receipts, and an explicit `qoder_primary_requested: false` with no attempt,
+  bypass, or served-route evidence renders `Qoder: lane=not_requested`.
 - `retry_not_before` preserves a rate-limit receipt's epoch timestamp. Inspection
   does not spend quota or override cooldowns. Inspection exits 0 even for a
   failed worker; use JSON fields and the launcher's exit code for automation.
+- Parent-session counts are local metadata, not proof of delegation quality or
+  served routing. `create_thread` and `codex-ccr-worker` are detected from
+  local tool-call records, and user prompt text is never retained or rendered.
 
 Fixtures exercise the CLI without API access. Live saved artifacts are useful
 compatibility checks, but neither fixture success nor readable receipts certify

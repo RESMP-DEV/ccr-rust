@@ -1,0 +1,1 @@
+Python 3 tooling using `aiohttp` + `starlette` + `uvicorn` for the SSE stress harness; `ruff` formatting checks invoked via `quality.py`; Rust `criterion` for the native benchmark; orchestration via a POSIX shell script.

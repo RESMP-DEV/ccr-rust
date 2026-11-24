@@ -1,0 +1,1 @@
+`src/bin/stress.rs` is a separate Cargo binary target invoked as `cargo run --bin stress` to exercise the proxy under load; the other modules are library-only and build as part of the main `ccr-rust` binary.

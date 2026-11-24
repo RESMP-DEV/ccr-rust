@@ -1,0 +1,3 @@
+- Each transformer exposes a `name()` returning a stable string identifier used for logging and debug output.
+- Transformers implement `is_passthrough` to short-circuit when no mutation is needed (e.g., Anthropic requests already in canonical format).
+- Provider adapters translate to and from the canonical Anthropic message/content schema rather than talking directly between provider formats.

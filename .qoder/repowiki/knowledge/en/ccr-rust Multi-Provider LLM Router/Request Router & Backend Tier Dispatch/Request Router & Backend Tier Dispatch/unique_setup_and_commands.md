@@ -1,0 +1,1 @@
+The GP-based reranker is opt-in via the `gp` Cargo feature; when disabled, `AppState.gp_router` becomes `Option<()>` and the surrogate is never built.

@@ -1,0 +1,2 @@
+- Tier selection is expressed as ordered `(tier_route, tier_name)` pairs, passed uniformly between EWMA sorting, GP reranking, and the dispatch loop.
+- Per-attempt timing and failure recording go through `AttemptTimer` and `EwmaTracker::record_success`/`record_failure_with_limit`, never raw wall-clock measurements.

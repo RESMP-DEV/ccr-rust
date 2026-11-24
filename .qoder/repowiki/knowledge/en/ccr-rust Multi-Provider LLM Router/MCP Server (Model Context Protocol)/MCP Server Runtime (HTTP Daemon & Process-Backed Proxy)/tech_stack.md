@@ -1,0 +1,1 @@
+Axum 0.x for the HTTP daemon, tokio async runtime with `tokio::process::Child` for backend orchestration, `serde_json` for line-delimited JSON-RPC framing, and a shared `reqwest::Client` for outbound calls from native tools.

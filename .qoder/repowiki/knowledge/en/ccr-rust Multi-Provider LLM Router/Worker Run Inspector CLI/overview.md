@@ -1,0 +1,1 @@
+CLI subcommand that inspects, lists, and renders saved worker run artifacts (status.json, events.jsonl, final.txt, stderr.txt) as human-readable or JSON output.

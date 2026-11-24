@@ -1,0 +1,1 @@
+Stress tests require building ccr-rust first (`cargo build --release`), then either running `./benchmarks/run_stress_test.sh` or manually starting the three processes described in `benchmarks/README.md`. Quality gates are executed through `scripts/quality.py` which emits a receipt under `build/reports/quality/receipt.json`.

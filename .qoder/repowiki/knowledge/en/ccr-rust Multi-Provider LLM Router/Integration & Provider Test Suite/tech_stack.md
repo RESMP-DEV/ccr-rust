@@ -1,0 +1,1 @@
+Rust test harness using `axum` + `tower::ServiceExt` for in-process HTTP routing, `wiremock` for mocking upstream providers, `serde_json` for fixture payloads; optional Python validation script using the `openai` SDK or `requests`.

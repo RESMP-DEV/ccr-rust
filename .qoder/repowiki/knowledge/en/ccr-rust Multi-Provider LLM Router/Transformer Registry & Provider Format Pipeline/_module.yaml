@@ -1,0 +1,24 @@
+schema_version: 1
+module_path: transformers
+title: Transformer Registry & Provider Format Pipeline
+scope:
+    - src/transform/
+    - src/transformer/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: 8c372389-c01e-4be0-9a06-e6e859ffa5c5
+kk_ordinal: 2
+kk_cards:
+    architecture_design:
+        id: 01488271-6ecc-45d8-b49e-0ba8662a0a1c
+        title: Transformer Registry & Provider Format Pipeline
+    coding_conventions:
+        id: b56024e1-4cc6-4234-9a63-ad67eba38052
+        title: Transformer Registry & Provider Format Pipeline
+    overview:
+        id: 324fca8e-7334-413b-925f-398d0f01c1c4
+        title: Transformer Registry & Provider Format Pipeline
+    tech_stack:
+        id: daad07d3-a8f0-4ae6-bf25-111759908972
+        title: Transformer Registry & Provider Format Pipeline

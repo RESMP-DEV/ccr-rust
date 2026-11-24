@@ -1,0 +1,5 @@
+Three cooperating sub-trees with no shared library:
+- `scripts/`: standalone CLI tools (one file per concern — SLOC ratchet, quality matrix, provider smoke test, fallback-policy validation, recovery, wait-idle, worker usage) plus a parallel `test_*.py` suite driven by the standard `pytest` runner. Each tool resolves `ROOT = Path(__file__).resolve().parents[1]` to reach the workspace root.
+- `benchmarks/`: orchestrated SSE stress-test harness. `run_stress_test.sh` composes three processes: `mock_sse_backend.py` (Starlette/uvicorn mock SSE server), `ccr-rust` built in release mode, and `stress_sse_streams.py` (aiohttp client launching N concurrent streams). A JSON config (`config_mock.json`) points ccr-rust at the mock backend so tests are self-contained.
+- `benches/concurrent_streams.rs`: a Rust criterion benchmark exercising the same streaming path from within Rust.
+Dependency direction is one-way: scripts/benchmarks depend on the built `ccr-rust` binary or its public API surface; nothing in the Rust core depends back on this module.

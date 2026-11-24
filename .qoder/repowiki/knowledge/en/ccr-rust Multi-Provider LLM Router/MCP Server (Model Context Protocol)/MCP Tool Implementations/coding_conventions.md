@@ -1,0 +1,5 @@
+- Each tool is implemented as a struct that `impl NativeTool`, declaring its `McpTool` descriptors in `tools()` and routing `call()` by matching against `tool.name`.
+- Tool input schemas are built inline with `serde_json::json!` using `"type": "object"` with explicit `properties` and `required` arrays rather than deriving from Rust structs.
+- Return values go through `ToolResult::text(...)` or `ToolResult::error(...)` helpers instead of constructing `ToolResult` directly, ensuring consistent `content`/`isError` layout.
+- I/O-heavy operations log at `debug!` on entry and `info!` on completion via tracing, with `warn!` reserved for unexpected conditions such as unknown tool names.
+- External dependencies (HTTP client, API keys, project roots, persistence paths) are injected through constructor parameters rather than global state.

@@ -1,0 +1,28 @@
+schema_version: 1
+module_path: router/core_router
+title: Request Router & Backend Tier Dispatch
+scope:
+    - src/router/
+    - src/routing.rs
+    - src/gp_router.rs
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: ca89f350-e401-4086-9efe-bc7940a039a1
+kk_ordinal: 1
+kk_cards:
+    architecture_design:
+        id: 9dee3058-0b66-497e-af0a-f72f4d3dcb17
+        title: Request Router & Backend Tier Dispatch
+    coding_conventions:
+        id: b5da4e82-9bc3-499f-86b7-13bee6a79872
+        title: Request Router & Backend Tier Dispatch
+    overview:
+        id: f0d0d595-6bf4-4c7e-82a1-bfdf690aa40a
+        title: Request Router & Backend Tier Dispatch
+    tech_stack:
+        id: 707523d9-2eb8-42d3-bc57-91954aa50614
+        title: Request Router & Backend Tier Dispatch
+    unique_setup_and_commands:
+        id: 9bdbbe50-0dc7-4f41-93f7-96b86217edc3
+        title: Request Router & Backend Tier Dispatch

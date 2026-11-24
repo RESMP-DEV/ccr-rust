@@ -1,0 +1,28 @@
+schema_version: 1
+module_path: tests
+title: Integration & Provider Test Suite
+scope:
+    - tests/
+source_files: []
+depends_on: []
+related_to:
+    - path: scripts_and_benchmarks
+      reason: scripts/smoke.py, recovery.py, worker-usage.py and tests/*.py are parallel external harnesses that start ccr-rust and assert the same router behavior.
+kk_module_id: 6f5c2511-3f61-459a-acb8-ad6b590f977a
+kk_ordinal: 8
+kk_cards:
+    architecture_design:
+        id: f1c4f486-a088-4943-aa6d-e12cc3cb7305
+        title: Integration & Provider Test Suite
+    coding_conventions:
+        id: 2cb6b7f7-7db0-4a78-995c-93c0551ee7e4
+        title: Integration & Provider Test Suite
+    overview:
+        id: 371c2745-bb89-4914-8f13-ddd8b48a6ad1
+        title: Integration & Provider Test Suite
+    tech_stack:
+        id: 02dfd8cc-c06a-494f-a51e-07d8011d61c5
+        title: Integration & Provider Test Suite
+    unique_setup_and_commands:
+        id: 229e69f1-a764-4600-a100-b3e60a9bd020
+        title: Integration & Provider Test Suite

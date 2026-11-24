@@ -1,0 +1,2 @@
+- Optional capabilities are gated through Cargo features declared in the root `Cargo.toml` rather than runtime configuration, and each child module checks those same feature flags to include its code paths.
+- Cross-cutting concerns (logging via tracing/env_logger, error propagation via anyhow, JSON serialization via serde_json) are imported from the root crate's dependencies instead of redefined per child.

@@ -1,0 +1,1 @@
+Rust with `serde_json` for JSON traversal, `regex` + `lazy_static` for compiled regex pipelines, and `tracing` for debug-level logging of compression decisions.

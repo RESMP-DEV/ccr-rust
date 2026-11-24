@@ -1,0 +1,1 @@
+Kubernetes manifests are applied directly against a cluster; config lives in the `ccr-rust-config` ConfigMap under `k8s/configmap.yaml`. On macOS the plist installs into `~/Library/LaunchAgents` or `/Library/LaunchAgents` and requires `/usr/local/bin/ccr-rust` and `/Users/Shared/.claude-code-router/config.json`.

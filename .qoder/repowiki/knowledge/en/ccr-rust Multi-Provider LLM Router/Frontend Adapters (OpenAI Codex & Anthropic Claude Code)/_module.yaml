@@ -1,0 +1,23 @@
+schema_version: 1
+module_path: frontend_adapters
+title: Frontend Adapters (OpenAI Codex & Anthropic Claude Code)
+scope:
+    - src/frontend/
+source_files: []
+depends_on: []
+related_to: []
+kk_module_id: 79d106c2-035b-4da8-9447-2e77b4633c8f
+kk_ordinal: 5
+kk_cards:
+    architecture_design:
+        id: 1110e662-1c7b-4d7e-957f-6663ff250144
+        title: Frontend Adapters (OpenAI Codex & Anthropic Claude Code)
+    coding_conventions:
+        id: a99fd291-e71f-4187-9079-3fd7862e928b
+        title: Frontend Adapters (OpenAI Codex & Anthropic Claude Code)
+    overview:
+        id: 875fb01d-5a69-4452-9f07-d6b21d764687
+        title: Frontend Adapters (OpenAI Codex & Anthropic Claude Code)
+    tech_stack:
+        id: 7598aba0-133d-4289-90c8-90b2a3aad5a6
+        title: Frontend Adapters (OpenAI Codex & Anthropic Claude Code)

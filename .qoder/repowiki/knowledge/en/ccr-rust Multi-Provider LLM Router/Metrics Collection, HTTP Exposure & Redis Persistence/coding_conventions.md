@@ -1,0 +1,4 @@
+- Global Prometheus metrics are declared as `static ref` inside a `lazy_static!` block using `register_counter_vec!` / `register_gauge!` / `register_histogram_vec!` macros, each wrapped in `.unwrap()`.
+- HTTP handler functions are async and return `impl IntoResponse`, typically wrapping collected data in `axum::Json` or encoding via `prometheus::Encoder::encode_text`.
+- Persisted mutations go through the `PersistEvent` enum sent over an `mpsc::channel` to a single background worker rather than writing directly to Redis from hot paths.
+- All Redis keys are scoped under a configurable `redis_prefix` and filtered via `key_matches_persistence_prefix` so SCAN/DEL operations only touch CCR-owned data.

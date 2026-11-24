@@ -1,0 +1,1 @@
+Translates OpenAI's Responses API HTTP requests and SSE streams into the router's internal OpenAI chat-completions pipeline and back to Responses-shaped output.

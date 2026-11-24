@@ -1,0 +1,1 @@
+Redis persistence is opt-in via `PersistenceConfig.mode = Redis` and requires `Persistence.redis_url` or the `CCR_REDIS_URL` environment variable; `init_persistence` must be called during startup to load the previous snapshot before the worker starts, and `clear_redis_persistence(redis_url, prefix)` can be used to purge all CCR-prefixed keys.

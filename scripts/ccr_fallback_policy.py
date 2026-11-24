@@ -39,10 +39,9 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # prompt window and concurrency caps.
     # Worker order (2026-10-21 user authorization): MiniMax M3.1 Flash is the
     # scoped-worker primary because the Z.AI GLM plan keeps exhausting its
-    # monthly utilization window, while MiniMax absorbs that volume. GLM-5.3
-    # remains the main/auth primary; GLM-5.3 Flash becomes the final shared
-    # fallback instead of the first worker tier. The MiniMax ID below is the
-    # reviewed one in this source tree and is what the live listeners
+    # monthly utilization window, while MiniMax absorbs that volume. The
+    # MiniMax ID below is the reviewed one in this source tree and is what the
+    # live listeners
     # already serve; legacy `-Preview` aliases are canonicalized on
     # dispatch rather than pinned here.
     # Qwen was removed 2026-10-19 by user direction: the token plan's monthly
@@ -52,7 +51,15 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
     # without rewiring keys. Live utilization at removal is not re-checked here
     # on purpose: an exhausted window cannot be optimized around, only skipped.
     "minimax,MiniMax-M3.1-Flash",
-    "zai,glm-5.3-flash",
+    # 2026-11-23 user direction: GLM-5.4 supersedes GLM-5.3 and GLM-5.3
+    # Flash as the Z.AI coding-plan model, so the shared Z.AI tier below moves
+    # from `zai,glm-5.3-flash` to `zai,glm-5.4`. The tier keeps its role (the
+    # Z.AI lane's own fallback) and becomes the Z.AI vision head: a live
+    # two-color PNG probe through the exact Responses endpoint CCR uses
+    # returned `left=red, right=blue` and `left=green, right=yellow`, while
+    # `glm-5.3` answered that it could not see any image content. Evidence:
+    # evidence/glm54-vision-qualification-20261123.md.
+    "zai,glm-5.4",
     # 2026-10-21 user direction: native DeepSeek returns as the last cloud
     # tier, ahead of the local model. A live probe the same day authenticated
     # and completed a real request, so the earlier PAYG-balance cordon is lifted.
@@ -81,15 +88,28 @@ MACHINE_ROUTE_CHAIN: tuple[str, ...] = (
 MACHINE_CONSUMERS: dict[str, str] = {
     # Primaries returned to their pre-cordon tiers with the 2026-10-18
     # user-directed GLM restore.
-    "config.json": "zai,glm-5.3",
-    "config-auth.json": "zai,glm-5.3",
-    # 2026-10-21: the worker primary moved to MiniMax so GLM Flash is no
-    # longer the first tier a scoped worker burns its window on.
-    "glm-workers.json": "minimax,MiniMax-M3.1-Flash",
-    # OCR keeps its distinct code-review primary. SenseNova is not inserted:
-    # that consumer is review traffic, not image OCR, and the user explicitly
-    # excluded SenseNova from review work.
-    "ocr-reviewers.json": "openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",
+    # 2026-11-23 user direction: GLM-5.4 is the canonical coding-plan
+    # primary for the main and auth lanes, superseding GLM-5.3. The scoped
+    # worker keeps its MiniMax primary and the OCR lane keeps its code-review
+    # primary.
+    # 2026-11-23 user direction (later the same day): every governed consumer
+    # now defaults to GLM-5.4, because GLM-5.3 must never be served again.
+    # The scoped worker drops its MiniMax primary and the OCR lane drops its
+    # code-review primary for zai,glm-5.4; MiniMax and OpenRouter stay in the
+    # shared chain and keep working as fallbacks, so a Z.AI window exhaustion
+    # degrades the lane instead of ending it.
+    "config.json": "zai,glm-5.4",
+    "config-auth.json": "zai,glm-5.4",
+    # 2026-11-23 user direction: the worker primary moves to GLM-5.4 so no
+    # lane defaults to a non-GLM-5.4 model. MiniMax remains the first shared
+    # chain entry and therefore the first fallback.
+    "glm-workers.json": "zai,glm-5.4",
+    # OCR keeps its distinct code-review route, but that route is no longer the
+    # default: the lane now defaults to GLM-5.4 and the OpenRouter pin moves
+    # to a direct-only seat below. SenseNova is not inserted: that consumer is
+    # review traffic, not image OCR, and the user explicitly excluded
+    # SenseNova from review work.
+    "ocr-reviewers.json": "zai,glm-5.4",
 }
 # No consumer holds a private route seat. The 2026-10-19 Qwen removal took
 # the main/auth `qwen,qwen3.8-max` seat out with it; every consumer now uses the
@@ -109,6 +129,10 @@ MACHINE_CONSUMER_DIRECT_ROUTES: dict[str, tuple[str, ...]] = {
         "sensenova-vision,sensenova-6.8-flash-lite",
         "holo4,holo4-35b-a3b",
     ),
+    # 2026-11-23 user direction: the OCR lane's former primary keeps a
+    # direct-only seat so an explicit OpenRouter pin still resolves as a
+    # one-tier request after the lane default moved to GLM-5.4.
+    "ocr-reviewers.json": ("openrouter,nvidia/nemotron-3-ultra-550b-a55b:free",),
 }
 MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
     "zai": {
@@ -117,10 +141,28 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         "api_key": "${CCR_ZAI_API_KEY}",
         "protocol": "responses",
         "auth_header": "authorization",
+        # 2026-11-23 user direction: glm-5.4 is the canonical coding-plan
+        # model and the Z.AI vision head. glm-5.3 and glm-5.3-flash stay
+        # registered but unrouted, like gmi, qwen, and deepseek, so a dated
+        # re-approval restores them without rewiring credentials; derive()
+        # filters every model that no route references out of the generated
+        # consumer configs.
         # glm-5.3-flashx stays a registered capability only: its coding-plan
         # trial expired 2026-10-09 and no chain entry routes to it, so
         # derive() filters it out of generated consumer configs.
-        "models": ["glm-5.3", "glm-5.3-flashx", "glm-5.3-flash"],
+        # 2026-11-23 user direction: GLM-5.3 must never be served again.
+        # Provider.models is an advertisement, not an access control: a
+        # client that names "zai,glm-5.3" or "zai,glm-5.3-flash" explicitly
+        # was still forwarded upstream verbatim and answered by the retired
+        # model. The model map below rewrites every retired Z.AI id onto
+        # glm-5.4 at dispatch time, so a stale client pin is served the
+        # successor instead of the retired model.
+        "modelMap": {
+            "glm-5.3": "glm-5.4",
+            "glm-5.3-flash": "glm-5.4",
+            "glm-5.3-flashx": "glm-5.4",
+        },
+        "models": ["glm-5.4", "glm-5.3", "glm-5.3-flashx", "glm-5.3-flash"],
         "honor_ratelimit_headers": False,
     },
     # OpenRouter remains the code-review primary. Keep the definition here so
@@ -283,6 +325,24 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
             "use": [["maxtoken", {"max_tokens": 4096, "only_if_missing": True}]]
         },
     },
+    # Elliot's Tetra vLLM service, kept registered but unrouted on 2026-11-23
+    # until live host authorization, the SSH tunnel, its credential reference,
+    # and endpoint health are restored together. The prepared endpoint is
+    # Tetra loopback :8317 forwarded to this machine's :18317. Forcing
+    # reasoning off prevents the server's high-effort default from spending a
+    # rescue request's output budget.
+    "tetra-vllm": {
+        "name": "tetra-vllm",
+        "api_base_url": "http://127.0.0.1:18317/v1",
+        "api_key": "${CCR_TETRA_VLLM_API_KEY}",
+        "protocol": "openai",
+        "models": ["deepseek-ai/DeepSeek-V4.1-Flash"],
+        "maxInflight": 1,
+        "force_reasoning_effort": "none",
+        "transformer": {
+            "use": [["maxtoken", {"max_tokens": 32768, "only_if_missing": True}]]
+        },
+    },
     "minimax": {
         "name": "minimax",
         "api_base_url": "https://api.minimax.io/anthropic/v1",
@@ -294,16 +354,13 @@ MACHINE_SHARED_PROVIDERS: dict[str, dict[str, Any]] = {
         # injection and malformed-output sanitization live in the transformer.
         # Without this the registry builds an empty chain and neither runs.
         "transformer": {"use": ["minimax"]},
-        # 2026-10-22 user-directed delegation tuning: MiniMax 429s are
-        # token-volume collisions, not request-count limits (measured
-        # 2026-10-22: identical dispatch rates in minutes with and without
-        # 429s; ten concurrent small requests served cleanly; three ~150K
-        # token prefills collided), so the count-only AIMD cannot prevent
-        # them. A 250K in-flight prefill budget admits one large worker
-        # context plus a medium one and defers the next large preflight to
-        # the chain (GLM-5.3-Flash) instead of paying an upstream 429 and
-        # the AIMD cut cascade that follows it.
-        "maxInflightTokens": 250000,
+        # 2026-10-25 user direction: no static prefill-token budget. The
+        # 250K budget added 2026-10-22 assumed deferred large prefills could
+        # fall into a healthy chain; while Z.AI's 5-hour window was
+        # exhausted, deferral became queueing and 400-560K Codex turns
+        # serialized MiniMax. Count AIMD (8 initial, 64 max) now bounds
+        # request concurrency; token-volume 429s, if they return, cut that
+        # limit reactively instead of queueing work locally.
     },
 }
 # os.umask is process-global and not atomic, so a set/restore dance inside each
@@ -317,7 +374,10 @@ os.umask(UMASK)
 # editor could still change an unconstrained field. Any change to the approved
 # policy body must update this pin in the same reviewed source change.
 MACHINE_POLICY_INTEGRITY_SHA256 = (
-    "d7fa0faaa87cd5b78291eeca7ef5bdded88e4070caa121dddd68fd051ce35ca8"
+    # 2026-11-23 user direction: every consumer primary moved to
+    # zai,glm-5.4, the OCR lane gained an OpenRouter direct-only seat, and
+    # the zai provider gained the model map that keeps GLM-5.3 off the wire.
+    "7dd4d9ad8d646f7aa9f5a4cd39858f702741d6c5efddd42b902f13a94b9852b3"
 )
 
 

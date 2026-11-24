@@ -686,7 +686,7 @@ pub async fn handle_messages(
             !ordered.is_empty() && admission_deferred.len() == ordered.len();
         let pass_order: Vec<&(String, String)> = admission_ready
             .into_iter()
-            .chain(admission_deferred)
+            .chain(admission_deferred.iter().copied())
             .collect();
 
         // Try each tier with retries.
@@ -1038,12 +1038,12 @@ pub async fn handle_messages(
         // sleep itself cannot overshoot maxHoldMs; the loop-top check then
         // catches the expired deadline before another sweep starts.
         let cooldown = std::time::Duration::from_millis(sweeps.sweep_cooldown_ms);
+        // Deferred routes re-check at the jittered base cadence, not another tier's window.
         let cooldown = retry_after_hint
+            .filter(|_| admission_deferred.is_empty())
             .map(|hint| cooldown.max(hint.min(std::time::Duration::from_secs(60))))
             .unwrap_or(cooldown);
         let cooldown = if all_admission_deferred {
-            // Full jitter avoids synchronizing all deferred requests onto the
-            // next admission window (AWS full-jitter pattern).
             cooldown.mul_f64(rand::random::<f64>().clamp(0.0, 1.0))
         } else {
             cooldown

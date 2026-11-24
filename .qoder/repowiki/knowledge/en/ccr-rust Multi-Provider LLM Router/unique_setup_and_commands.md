@@ -1,0 +1,1 @@
+Feature flags control compile-time inclusion of optional subsystems: `--features dashboard` enables the TUI, `--features gp` adds GP-based routing, `--features sindexer` adds the sindexer dependency, and `--features telemetry` enables OpenTelemetry export. The release profile builds with LTO and a single codegen unit.

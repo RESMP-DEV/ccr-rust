@@ -1,0 +1,5 @@
+Three sibling directories with no code dependencies on the rest of the repo:
+- `docs/` — Markdown guides covering configuration, per-provider setup (Claude Code, Codex, Gemini, Kimi, Z.AI/MiniMax, OpenRouter, SenseNova), architecture notes (failover, streaming incremental design, shared fallback policy, idle restart), and operational topics (telemetry, observability, troubleshooting).
+- `examples/` — JSON config snippets (`meta.json`, `openrouter-free.json`, `sensenova.json`, `coding-plans.json`) that use `${ENV_VAR}` placeholders and a `smoke-test.sh` script to validate health, model list, and Anthropic/OpenAI-style requests against a running router.
+- `evidence/` — Dated markdown audit/assessment records (e.g. `idle-restart-20261013.md`, `qwen-token-plan-20261019.md`, `sensenova-provider-20261023.md`) documenting feature decisions, benchmarks, and provider integrations.
+The examples reference back into `docs/configuration.md` and `docs/index.md` for schema and index; there is no build step or cross-reference mechanism beyond plain links.

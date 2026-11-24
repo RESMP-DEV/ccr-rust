@@ -74,6 +74,7 @@ See [Gemini Integration](gemini-integration.md) for detailed security guidance.
       "api_base_url": "https://api.example.com/v1/chat/completions",
       "api_key": "sk-...",
       "models": ["model-a", "model-b"],
+      "modelMap": {"model-a": "model-b"},
       "pricing": {
         "input_per_million_tokens": 1.0,
         "output_per_million_tokens": 4.0
@@ -132,6 +133,7 @@ Each provider entry configures an upstream API endpoint.
 | `api_base_url` | string | Yes | - | Full URL to the API endpoint. |
 | `api_key` | string | Yes | - | API key for authentication. |
 | `models` | array | Yes | - | List of model names available from this provider. |
+| `modelMap` | object | No | `{}` | Provider-level model alias map: maps a requested model id onto the upstream model id this provider serves. Applied at dispatch time, and it takes precedence over the built-in model canonicalization rules. Every target must be listed in the provider `models` list, and an entry must not map a model onto itself. |
 | `pricing` | object | No | - | Provider-default input/output prices in USD per million tokens, with optional cached-input rates. |
 | `model_pricing` | object | No | - | Model-keyed price overrides using the same rate fields. |
 | `transformer` | object | No | - | Request/response transformation configuration. |
@@ -145,6 +147,28 @@ protocol. Configuration validation rejects unsupported values and other
 protocols before the router starts. `force_adaptive_thinking` applies on the
 same OpenAI-protocol path and is intended for providers that require the
 adaptive marker together with `reasoning_effort: "none"` to disable reasoning.
+
+`modelMap` is a provider-level model alias map. It maps a requested model id
+onto the upstream model id that the provider actually serves, so a retired
+model name can be aliased onto its successor without changing client pins.
+The mapping is applied at dispatch time and takes precedence over the built-in
+model canonicalization rules. Load-time validation rejects a map target the
+provider does not list in its `models` list, and rejects an entry that maps a
+model onto itself.
+
+```json
+{
+  "name": "zai",
+  "api_base_url": "https://api.z.ai/api/v1",
+  "api_key": "${ZAI_API_KEY}",
+  "models": ["glm-5.4"],
+  "modelMap": {
+    "glm-5.3": "glm-5.4",
+    "glm-5.3-flash": "glm-5.4",
+    "glm-5.3-flashx": "glm-5.4"
+  }
+}
+```
 
 ### Reasoning controls across protocols
 

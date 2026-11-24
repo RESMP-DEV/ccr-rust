@@ -300,6 +300,16 @@ pub struct Provider {
     #[serde(default, alias = "modelPricing")]
     pub model_pricing: HashMap<String, ModelPricing>,
 
+    /// Provider-level model alias map.
+    ///
+    /// Maps a requested model id to the upstream model id this provider
+    /// actually serves, so a retired model name can be aliased onto its
+    /// successor without changing client pins. The lookup happens at
+    /// dispatch time and takes precedence over the built-in canonicalization
+    /// rules. Every target must be listed in this provider's `models` list.
+    #[serde(default, rename = "modelMap", alias = "model_map")]
+    pub model_map: HashMap<String, String>,
+
     /// Upstream API protocol for this provider.
     ///
     /// - `openai` (default): send OpenAI-compatible `/chat/completions` requests.
