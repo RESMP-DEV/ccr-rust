@@ -2,15 +2,16 @@ ndarray-npy 0.9.1
 Copyright Jim Turner and ndarray-npy contributors
 License: MIT OR Apache-2.0 (see LICENSE-MIT and LICENSE-APACHE)
 
-Vendored from crates.io ndarray-npy 0.9.1, source checksum
-fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50 in the
-workspace Cargo.lock before this change.
+Vendored from crates.io ndarray-npy 0.9.1, registry checksum
+7b313788c468c49141a9d9b6131fc15f403e6ef4e8446a0b2e18f664ddb278a9 as recorded in
+the workspace Cargo.lock before this change.
 
 Upstream: https://github.com/jturner314/ndarray-npy
 
 Modified by CCR-Rust:
 - removed the `zip` dependency and the `npz` / `compressed_npz` features, and
-  deleted the `src/npz.rs` module they gated;
+  deleted the `src/npz.rs` module they gated, its `mod` / `pub use` lines, and
+  the now-dangling `.npz` intra-doc links;
 - removed the `simple_npz` example declaration, which required the removed
   feature;
 - left every remaining source file byte-identical to the published crate.

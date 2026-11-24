@@ -1,5 +1,5 @@
 //! This crate provides methods to read/write [`ndarray`]'s
-//! [`ArrayBase`](ndarray::ArrayBase) type from/to [`.npy`] and [`.npz`] files.
+//! [`ArrayBase`](ndarray::ArrayBase) type from/to [`.npy`] files.
 //!
 //! See the [repository] for information about the default features and how to
 //! use this crate with Cargo.
@@ -7,7 +7,6 @@
 //! [repository]: https://github.com/jturner314/ndarray-npy
 //! [`ndarray`]: https://github.com/bluss/ndarray
 //! [`.npy`]: https://docs.scipy.org/doc/numpy/reference/generated/numpy.lib.format.html
-//! [`.npz`]: https://docs.scipy.org/doc/numpy/reference/generated/numpy.savez.html
 //!
 //! # .npy Files
 //!
@@ -26,11 +25,6 @@
 //! It's possible to create `.npy` files larger than the available memory with
 //! [`write_zeroed_npy`] and then modify them by memory-mapping and using
 //! [`ViewMutNpyExt`].
-//!
-//! # .npz Files
-//!
-//! - Reading: [`NpzReader`]
-//! - Writing: [`NpzWriter`]
 //!
 //! # Limitations
 //!
