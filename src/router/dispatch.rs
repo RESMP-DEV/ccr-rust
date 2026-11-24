@@ -1145,7 +1145,7 @@ pub(super) async fn try_request_via_openai_protocol(
             }
 
             // Apply response transformers if chain is not empty.
-            let fail_mode = chain.fail_mode();
+            let fail_mode_plugin = chain.fail_mode_plugin();
             let final_resp = if chain.is_empty() {
                 anthropic_resp
             } else {
@@ -1155,15 +1155,18 @@ pub(super) async fn try_request_via_openai_protocol(
                 match serde_json::from_value::<AnthropicResponse>(transformed) {
                     Ok(response) => response,
                     Err(error) => {
-                        if fail_mode {
+                        if let Some(plugin) = fail_mode_plugin {
                             // A fail-mode transform produced output that is not
                             // a valid Anthropic response. Returning the
                             // original would send the untransformed payload,
                             // which is exactly what fail mode forbids.
                             return Err(TryRequestError::PluginRejected(
-                                anyhow::anyhow!(
-                                    "fail-mode transformer produced a response that is not a valid Anthropic response: {error}"
-                                ),
+                                anyhow::Error::new(crate::transformer::PluginStageError {
+                                    plugin,
+                                    message: format!(
+                                        "fail-mode transformer produced a response that is not a valid Anthropic response: {error}"
+                                    ),
+                                }),
                             ));
                         }
                         warn!(
@@ -1477,7 +1480,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
             }
         }
 
-        let fail_mode = chain.fail_mode();
+        let fail_mode_plugin = chain.fail_mode_plugin();
         let transformed_response_value = match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(response_value) if !chain.is_empty() => {
                 Some(apply_response_offloaded(chain, response_value).await?)
@@ -1490,13 +1493,18 @@ pub(super) async fn try_request_via_anthropic_protocol(
             let anthropic_resp = match serde_json::from_value::<AnthropicResponse>(response_value) {
                 Ok(response) => response,
                 Err(error) => {
-                    if fail_mode {
+                    if let Some(plugin) = fail_mode_plugin {
                         // A fail-mode transform produced output that is not a
                         // valid Anthropic response. Returning the original
                         // body would send the untransformed payload.
-                        return Err(TryRequestError::PluginRejected(anyhow::anyhow!(
-                            "fail-mode transformer produced a response that is not a valid Anthropic response: {error}"
-                        )));
+                        return Err(TryRequestError::PluginRejected(
+                            anyhow::Error::new(crate::transformer::PluginStageError {
+                                plugin,
+                                message: format!(
+                                    "fail-mode transformer produced a response that is not a valid Anthropic response: {error}"
+                                ),
+                            }),
+                        ));
                     }
                     warn!(
                         %error,

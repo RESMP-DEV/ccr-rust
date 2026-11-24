@@ -322,6 +322,15 @@ impl TransformerChain {
             .any(|transformer| transformer.fail_mode())
     }
 
+    /// Name of the first transformer that rejects the whole request on
+    /// failure, so a rejected response can name the plugin responsible.
+    pub fn fail_mode_plugin(&self) -> Option<String> {
+        self.transformers
+            .iter()
+            .find(|transformer| transformer.fail_mode())
+            .map(|transformer| transformer.name().to_string())
+    }
+
     /// Check if the entire chain is a passthrough (all transformers are identity).
     #[allow(dead_code)]
     pub fn is_passthrough(&self, request: &Value) -> bool {
@@ -583,6 +592,36 @@ mod tests {
             .unwrap();
         assert_eq!(external_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(builtin_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    struct FailModeTransformer {
+        fail: bool,
+    }
+
+    impl Transformer for FailModeTransformer {
+        fn name(&self) -> &str {
+            if self.fail {
+                "redact-pii"
+            } else {
+                "identity"
+            }
+        }
+
+        fn fail_mode(&self) -> bool {
+            self.fail
+        }
+    }
+
+    #[test]
+    fn fail_mode_plugin_names_the_first_fail_mode_transformer() {
+        let chain = TransformerChain::new()
+            .with_transformer(Arc::new(FailModeTransformer { fail: false }))
+            .with_transformer(Arc::new(FailModeTransformer { fail: true }));
+        assert_eq!(chain.fail_mode_plugin().as_deref(), Some("redact-pii"));
+
+        let passthrough =
+            TransformerChain::new().with_transformer(Arc::new(FailModeTransformer { fail: false }));
+        assert_eq!(passthrough.fail_mode_plugin(), None);
     }
 
     #[test]
