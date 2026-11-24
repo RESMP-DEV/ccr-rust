@@ -362,7 +362,11 @@ impl TransformerRegistry {
     /// files) into this registry. Built-in transformer names always win over
     /// a plugin of the same name. Returns the registered plugin names.
     pub fn register_plugins(&mut self, plugins: &PluginsConfig) -> Vec<String> {
-        let builtins: Vec<String> = self.transformers.keys().cloned().collect();
+        let mut builtins: Vec<String> = self.transformers.keys().cloned().collect();
+        // `maxtoken` is registered only by `create_with_options`, so it is not
+        // in `self.transformers`; reserve it as well so a plugin cannot shadow
+        // the option-only built-in.
+        builtins.push("maxtoken".to_string());
         let builtin_names: Vec<&str> = builtins.iter().map(String::as_str).collect();
         let resolved = plugin_catalog::resolve_plugins(plugins, &builtin_names);
         let mut registered = Vec::new();

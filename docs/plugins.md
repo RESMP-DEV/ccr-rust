@@ -41,13 +41,16 @@ The plugin runs with the same timeout budget regardless of stage. When the
 budget expires the router kills the plugin's entire process group, so shell
 plugins that fork children cannot outlive their budget.
 
-Minimal example plugin (`uppercase-demo.sh`):
+Minimal example plugin (`identity-demo.sh`), which preserves the JSON shape:
 
 ```sh
 #!/bin/sh
 # Read JSON on stdin, write transformed JSON on stdout.
-tr 'a-z' 'A-Z'
+jq -c '.'
 ```
+
+The `jq -c '.'` round trip is deliberate: a byte-level tool such as `tr`
+mangles JSON string values and keys, so a plugin must parse and re-emit JSON.
 
 Ready-to-use examples live in [examples/plugins](../examples/plugins/).
 

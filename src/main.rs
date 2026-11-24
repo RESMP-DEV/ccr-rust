@@ -861,10 +861,12 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "telemetry"))]
     let telemetry_enabled = false;
     let subscriber = tracing_subscriber::registry().with(
-        tracing_subscriber::fmt::layer().with_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ccr_rust=info,tower_http=info".into()),
-        ),
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "ccr_rust=info,tower_http=info".into()),
+            ),
     );
     #[cfg(feature = "telemetry")]
     let subscriber = subscriber.with(telemetry_layer);

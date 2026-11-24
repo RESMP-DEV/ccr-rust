@@ -26,6 +26,59 @@ use tracing::{debug, warn};
 /// normally empty; a chatty plugin cannot balloon a log line past this cap.
 const STDERR_TAIL_BYTES: usize = 4096;
 
+/// Maximum plugin stdout retained. A plugin that streams past this is
+/// terminated instead of growing the router's memory without bound.
+const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Maximum plugin stderr retained. The pipe is drained in full, but only the
+/// tail is kept so a diagnostic flood cannot accumulate.
+const MAX_STDERR_BYTES: usize = 64 * 1024;
+
+/// Captured plugin stdout, or the fact that it exceeded the retention limit.
+enum StdoutCapture {
+    Bytes(Vec<u8>),
+    TooLarge,
+}
+
+/// Read at most `limit` bytes, reporting an overflow instead of buffering the
+/// whole stream. Reading stops on overflow, which leaves the plugin blocked on
+/// a full pipe until the invocation is torn down.
+fn read_limited(reader: &mut impl Read, limit: usize) -> StdoutCapture {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                if buffer.len() + read > limit {
+                    return StdoutCapture::TooLarge;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
+        }
+    }
+    StdoutCapture::Bytes(buffer)
+}
+
+/// Drain the whole pipe while retaining only its final `limit` bytes.
+fn read_tail(reader: &mut impl Read, limit: usize) -> Vec<u8> {
+    let mut tail: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                tail.extend_from_slice(&chunk[..read]);
+                if tail.len() > limit {
+                    let excess = tail.len() - limit;
+                    tail.drain(..excess);
+                }
+            }
+        }
+    }
+    tail
+}
+
 /// Wait for a worker thread's result over its channel until `deadline`. On
 /// expiry the worker is left detached and the caller gets `None`. Every pipe
 /// wait shares one deadline, so a stalled plugin costs at most its own timeout.
@@ -122,7 +175,7 @@ impl ExternalTransformer {
         // Results come back over channels so the post-exit drain can be
         // bounded instead of joining unconditionally.
         let (stdin_done_tx, stdin_done_rx) = std::sync::mpsc::channel::<()>();
-        let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<StdoutCapture>();
         let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
         let mut stdin = child.stdin.take().expect("stdin piped");
@@ -136,14 +189,10 @@ impl ExternalTransformer {
         });
 
         let out_reader = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stdout.read_to_end(&mut buf);
-            let _ = stdout_tx.send(buf);
+            let _ = stdout_tx.send(read_limited(&mut stdout, MAX_STDOUT_BYTES));
         });
         let err_reader = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stderr.read_to_end(&mut buf);
-            let _ = stderr_tx.send(buf);
+            let _ = stderr_tx.send(read_tail(&mut stderr, MAX_STDERR_BYTES));
         });
 
         // Drain the pipes first and only then decide whether to signal. The
@@ -151,15 +200,21 @@ impl ExternalTransformer {
         // resolve to a recycled process group, and a grandchild holding a pipe
         // open is torn down before its reader threads can be left blocked.
         let deadline = Instant::now() + Duration::from_millis(self.spec.timeout_ms);
-        let output = wait_until(&stdout_rx, deadline);
+        let stdout_capture = wait_until(&stdout_rx, deadline);
         let stderr_bytes = wait_until(&stderr_rx, deadline);
         let _ = wait_until(&stdin_done_rx, deadline);
+
+        let stdout_too_large = matches!(stdout_capture, Some(StdoutCapture::TooLarge));
+        let output = match stdout_capture {
+            Some(StdoutCapture::Bytes(bytes)) => Some(bytes),
+            Some(StdoutCapture::TooLarge) | None => None,
+        };
 
         // Decide before reaping. A stalled pipe means the plugin tree is
         // still alive, so the whole group is torn down while the leader is
         // still an unreaped zombie: its pid cannot be recycled, and `-{pid}`
         // therefore cannot resolve to an unrelated process group.
-        if output.is_none() || stderr_bytes.is_none() {
+        if stdout_too_large || output.is_none() || stderr_bytes.is_none() {
             kill_plugin_group(&mut child);
         }
         let mut status = match child.try_wait() {
@@ -178,6 +233,14 @@ impl ExternalTransformer {
             // The pipes closed but the plugin itself is still running.
             kill_plugin_group(&mut child);
             status = child.try_wait().ok().flatten();
+        }
+
+        if stdout_too_large {
+            return Err(self.invocation_error(
+                stage,
+                format!("stdout exceeded the {MAX_STDOUT_BYTES} byte limit"),
+                stderr_tail(stderr_bytes.unwrap_or_default()),
+            ));
         }
 
         let Some(status) = status else {
@@ -448,23 +511,31 @@ mod tests {
     #[test]
     fn timeout_kills_plugin_and_passthrough_by_default() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut spec, _) = script_spec(dir.path(), "slow.sh", "sleep 30");
+        let pid_file = dir.path().join("sleep.pid");
+        let (mut spec, _) = script_spec(dir.path(), "slow.sh", &slow_script_body(&pid_file));
         Arc::get_mut(&mut spec).unwrap().timeout_ms = 100;
         let transformer = transformer(spec);
         let request = serde_json::json!({"model": "test"});
         let started = Instant::now();
         let result = transformer.transform_request(request.clone()).unwrap();
+        let elapsed = started.elapsed();
         assert_eq!(result, request);
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "timeout must not wait for the sleep"
+            elapsed < Duration::from_secs(5),
+            "timeout must not wait for the sleep, took {elapsed:?}"
+        );
+        let pid = recorded_pid(&pid_file);
+        assert!(
+            wait_for_exit(pid),
+            "descendant {pid} outlived the timed-out plugin"
         );
     }
 
     #[test]
     fn timeout_with_on_error_fail_reports_timeout() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut spec, _) = script_spec(dir.path(), "slow.sh", "sleep 30");
+        let pid_file = dir.path().join("sleep.pid");
+        let (mut spec, _) = script_spec(dir.path(), "slow.sh", &slow_script_body(&pid_file));
         Arc::get_mut(&mut spec).unwrap().timeout_ms = 100;
         Arc::get_mut(&mut spec).unwrap().on_error = PluginOnError::Fail;
         let transformer = transformer(spec);
@@ -474,6 +545,11 @@ mod tests {
         assert!(
             error.to_string().contains("timed out"),
             "unexpected error: {error}"
+        );
+        let pid = recorded_pid(&pid_file);
+        assert!(
+            wait_for_exit(pid),
+            "descendant {pid} outlived the timed-out plugin"
         );
     }
 
@@ -489,6 +565,21 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         false
+    }
+
+    /// Body for a plugin that blocks on a `sleep` descendant and records its
+    /// pid, so a test can assert the descendant dies with the plugin group.
+    fn slow_script_body(pid_file: &std::path::Path) -> String {
+        format!("sleep 30 & echo $! > '{}'; wait $!", pid_file.display())
+    }
+
+    /// Read the pid a test script recorded for its `sleep` descendant.
+    fn recorded_pid(path: &std::path::Path) -> i32 {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .trim()
+            .parse()
+            .expect("recorded descendant pid")
     }
 
     /// A plugin that exits while a backgrounded grandchild keeps its stdout
@@ -522,6 +613,29 @@ mod tests {
         assert!(
             wait_for_exit(pid),
             "grandchild {pid} outlived the plugin process group"
+        );
+    }
+
+    #[test]
+    fn oversized_stdout_terminates_the_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut spec, _) = script_spec(
+            dir.path(),
+            "flood.sh",
+            &format!(
+                "yes '{{\"k\":\"v\"}}' | head -c {}",
+                MAX_STDOUT_BYTES + 4096
+            ),
+        );
+        Arc::get_mut(&mut spec).unwrap().timeout_ms = 2_000;
+        Arc::get_mut(&mut spec).unwrap().on_error = PluginOnError::Fail;
+        let transformer = transformer(spec);
+        let error = transformer
+            .transform_request(serde_json::json!({"x": 1}))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("exceeded"),
+            "unexpected error: {error}"
         );
     }
 

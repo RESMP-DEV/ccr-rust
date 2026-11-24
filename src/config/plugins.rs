@@ -123,13 +123,35 @@ impl PluginSpec {
         if self.timeout_ms == 0 {
             anyhow::bail!("Plugins.plugins.{name}.timeout_ms must be greater than 0");
         }
-        check_command_available(name, &self.command)
+        check_command_available(name, &self.command, &self.env)
+    }
+}
+
+/// Whether `path` is a regular file that invocation could actually start.
+/// A bare command is only accepted when the candidate is executable, matching
+/// the explicit-path branch instead of trusting `is_file()` alone.
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
 /// Verify a plugin command resolves. Absolute and relative paths must exist
-/// and be executable; bare names must be found on `PATH`.
-fn check_command_available(name: &str, command: &str) -> Result<()> {
+/// and be executable; bare names must resolve to an executable file on the
+/// same `PATH` the spawned plugin uses.
+fn check_command_available(name: &str, command: &str, env: &HashMap<String, String>) -> Result<()> {
     if command.contains(std::path::MAIN_SEPARATOR) || command.contains('/') {
         let path = PathBuf::from(command);
         let meta = std::fs::metadata(&path).with_context(|| {
@@ -156,11 +178,14 @@ fn check_command_available(name: &str, command: &str) -> Result<()> {
         }
         return Ok(());
     }
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    let found = std::env::split_paths(&path_var).any(|dir| {
-        let candidate = dir.join(command);
-        candidate.is_file()
-    });
+    // Invocation resolves a bare command against the declared `env.PATH` when
+    // the plugin sets one, so validation must use the same search path or it
+    // rejects declarations that would in fact start.
+    let path_var = match env.get("PATH") {
+        Some(declared) => declared.clone(),
+        None => std::env::var("PATH").unwrap_or_default(),
+    };
+    let found = std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(command)));
     if !found {
         anyhow::bail!(
             "Plugins.plugins.{name}: command '{}' was not found on PATH",
@@ -229,6 +254,44 @@ mod tests {
         assert_eq!(parsed.on_error, PluginOnError::Passthrough);
         assert!(parsed.args.is_empty());
         assert!(parsed.env.is_empty());
+    }
+
+    #[test]
+    fn bare_command_resolves_against_the_declared_env_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("declared-only");
+        std::fs::write(&bin, "#!/bin/sh\ncat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut parsed = spec("declared-only");
+        parsed.env.insert(
+            "PATH".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        );
+        // Validation must search the declared PATH, not the inherited one.
+        assert!(parsed.validate("p").is_ok());
+    }
+
+    #[test]
+    fn bare_command_rejects_a_non_executable_file_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("not-executable");
+        std::fs::write(&bin, "#!/bin/sh\ncat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let mut parsed = spec("not-executable");
+        parsed.env.insert(
+            "PATH".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        );
+        let error = parsed.validate("p").unwrap_err().to_string();
+        assert!(error.contains("PATH"), "unexpected error: {error}");
     }
 
     #[test]
