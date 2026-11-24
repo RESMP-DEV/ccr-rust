@@ -88,3 +88,12 @@ telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-ot
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# ndarray-npy 0.9.1 is vendored with its npz/zip feature removed. Every
+# published egobox-gp release through 0.38.0 pins ndarray-npy ^0.9, whose
+# default compressed_npz feature drags in zip 2.4.2 with three open advisories
+# (GHSA critical/high/medium, patched in zip 9.0.5). No npz I/O exists in this
+# workspace or in egobox-gp, so the feature is dead weight; removing it drops
+# zip from the graph entirely. See vendor/ndarray-npy/NOTICE.
+[patch.crates-io]
+ndarray-npy = { path = "vendor/ndarray-npy" }

@@ -27,3 +27,6 @@ approx = "0.5"
 [[bench]]
 name = "fit_predict"
 harness = false
+
+[patch.crates-io]
+ndarray-npy = { path = "../ndarray-npy" }
