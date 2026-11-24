@@ -26,18 +26,15 @@ use tracing::{debug, warn};
 /// normally empty; a chatty plugin cannot balloon a log line past this cap.
 const STDERR_TAIL_BYTES: usize = 4096;
 
-/// Poll interval while waiting for a plugin process to finish.
-const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
-
-/// Grace period for draining plugin pipes after the process exits. A
-/// well-behaved plugin's pipes close the moment it exits; the grace only
-/// bounds misbehaving plugins that background pipe-holding children.
-const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
-
-/// Wait for a worker thread's result over its channel, bounded by `grace`.
-/// On expiry the worker is left detached and the caller gets `None`.
-fn wait_for<T>(receiver: &std::sync::mpsc::Receiver<T>, grace: Duration) -> Option<T> {
-    receiver.recv_timeout(grace).ok()
+/// Wait for a worker thread's result over its channel until `deadline`. On
+/// expiry the worker is left detached and the caller gets `None`. Every pipe
+/// wait shares one deadline, so a stalled plugin costs at most its own timeout.
+fn wait_until<T>(receiver: &std::sync::mpsc::Receiver<T>, deadline: Instant) -> Option<T> {
+    let now = Instant::now();
+    if now >= deadline {
+        return None;
+    }
+    receiver.recv_timeout(deadline - now).ok()
 }
 
 /// Kill the plugin's whole process group, then reap it.
@@ -59,6 +56,20 @@ fn kill_plugin_group(child: &mut std::process::Child) {
 fn kill_plugin_group(child: &mut std::process::Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Whether a plugin exited because the group kill signalled it. A plugin that
+/// was still running at the deadline dies by `SIGKILL`; a plugin that had
+/// already exited keeps its own exit status.
+#[cfg(unix)]
+fn terminated_by_group_kill(status: &std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal() == Some(libc::SIGKILL)
+}
+
+#[cfg(not(unix))]
+fn terminated_by_group_kill(_status: &std::process::ExitStatus) -> bool {
+    false
 }
 
 /// A transformer backed by an external executable declared in `Plugins`.
@@ -135,29 +146,42 @@ impl ExternalTransformer {
             let _ = stderr_tx.send(buf);
         });
 
-        let deadline = Duration::from_millis(self.spec.timeout_ms);
-        let started = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if started.elapsed() >= deadline => break None,
-                Ok(None) => std::thread::sleep(WAIT_POLL_INTERVAL),
-                Err(error) => {
-                    kill_plugin_group(&mut child);
-                    let _ = out_reader.join();
-                    let _ = err_reader.join();
-                    return Err(anyhow!(
-                        "plugin '{}': wait failed during {stage} stage: {error}",
-                        self.name
-                    ));
-                }
+        // Drain the pipes first and only then decide whether to signal. The
+        // group leader is still unreaped at that point, so `-{pid}` cannot
+        // resolve to a recycled process group, and a grandchild holding a pipe
+        // open is torn down before its reader threads can be left blocked.
+        let deadline = Instant::now() + Duration::from_millis(self.spec.timeout_ms);
+        let output = wait_until(&stdout_rx, deadline);
+        let stderr_bytes = wait_until(&stderr_rx, deadline);
+        let _ = wait_until(&stdin_done_rx, deadline);
+
+        // Decide before reaping. A stalled pipe means the plugin tree is
+        // still alive, so the whole group is torn down while the leader is
+        // still an unreaped zombie: its pid cannot be recycled, and `-{pid}`
+        // therefore cannot resolve to an unrelated process group.
+        if output.is_none() || stderr_bytes.is_none() {
+            kill_plugin_group(&mut child);
+        }
+        let mut status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                kill_plugin_group(&mut child);
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                return Err(anyhow!(
+                    "plugin '{}': wait failed during {stage} stage: {error}",
+                    self.name
+                ));
             }
         };
+        if status.is_none() {
+            // The pipes closed but the plugin itself is still running.
+            kill_plugin_group(&mut child);
+            status = child.try_wait().ok().flatten();
+        }
 
         let Some(status) = status else {
-            kill_plugin_group(&mut child);
-            let stderr_text =
-                stderr_tail(wait_for(&stderr_rx, PIPE_DRAIN_GRACE).unwrap_or_default());
+            let stderr_text = stderr_tail(stderr_bytes.unwrap_or_default());
             return Err(self.invocation_error(
                 stage,
                 format!("timed out after {}ms", self.spec.timeout_ms),
@@ -165,18 +189,25 @@ impl ExternalTransformer {
             ));
         };
 
-        // The plugin exited and its pipes close as its process tree drains.
-        // Bound the drain so a plugin that backgrounded a pipe-holding child
-        // cannot stall the request for the child's whole lifetime.
-        let _ = wait_for(&stdin_done_rx, PIPE_DRAIN_GRACE);
-        let output = wait_for(&stdout_rx, PIPE_DRAIN_GRACE).ok_or_else(|| {
-            self.invocation_error(
-                stage,
-                "left processes running that hold its stdout open".into(),
-                String::new(),
-            )
-        })?;
-        let stderr_text = stderr_tail(wait_for(&stderr_rx, PIPE_DRAIN_GRACE).unwrap_or_default());
+        let output = match output {
+            Some(output) => output,
+            None => {
+                // The pipe never closed. If the group kill is what stopped the
+                // plugin, it was still running at the deadline; otherwise the
+                // plugin had already exited and a grandchild held the pipe.
+                let detail = if terminated_by_group_kill(&status) {
+                    format!("timed out after {}ms", self.spec.timeout_ms)
+                } else {
+                    "left processes running that hold its stdout open".to_string()
+                };
+                return Err(self.invocation_error(
+                    stage,
+                    detail,
+                    stderr_tail(stderr_bytes.unwrap_or_default()),
+                ));
+            }
+        };
+        let stderr_text = stderr_tail(stderr_bytes.unwrap_or_default());
 
         if !status.success() {
             let detail = match status.code() {
@@ -443,6 +474,54 @@ mod tests {
         assert!(
             error.to_string().contains("timed out"),
             "unexpected error: {error}"
+        );
+    }
+
+    /// Wait for a pid to disappear. A zombie still answers `kill -0`, so this
+    /// polls until the process is reaped by its new parent.
+    fn wait_for_exit(pid: i32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    /// A plugin that exits while a backgrounded grandchild keeps its stdout
+    /// open must not leak that grandchild, and the call must stay bounded by
+    /// the plugin timeout instead of the grandchild's lifetime.
+    #[test]
+    fn backgrounded_grandchild_is_torn_down_with_the_plugin_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        let body = format!(
+            "sleep 30 & echo $! > '{}'; echo '{{\"ok\":true}}'",
+            pid_file.display()
+        );
+        let (mut spec, _) = script_spec(dir.path(), "leaky.sh", &body);
+        Arc::get_mut(&mut spec).unwrap().timeout_ms = 300;
+        let transformer = transformer(spec);
+        let request = serde_json::json!({"model": "test"});
+        let started = Instant::now();
+        let result = transformer.transform_request(request.clone()).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(result, request);
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "call must be bounded by the plugin timeout, took {elapsed:?}"
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .expect("grandchild pid");
+        assert!(
+            wait_for_exit(pid),
+            "grandchild {pid} outlived the plugin process group"
         );
     }
 
