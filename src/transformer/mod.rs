@@ -8,7 +8,7 @@ mod builtin;
 pub use builtin::*;
 
 mod external;
-pub use external::ExternalTransformer;
+pub use external::{ExternalTransformer, PluginStageError};
 
 mod plugin_catalog;
 pub use plugin_catalog::{resolve_plugins, PluginSource, ResolvedPlugin};
@@ -58,6 +58,15 @@ pub trait Transformer: Send + Sync {
     #[allow(dead_code)]
     fn is_passthrough(&self, request: &Value) -> bool {
         let _ = request;
+        false
+    }
+
+    /// Whether this transformer runs an external process.
+    ///
+    /// Streaming frame paths skip external transformers: a frame is an
+    /// individual event rather than the aggregated response document, and
+    /// spawning a process per frame would multiply latency by the frame count.
+    fn is_external(&self) -> bool {
         false
     }
 
@@ -283,6 +292,22 @@ impl TransformerChain {
         Ok(response)
     }
 
+    /// Apply only in-process response transformers to one streaming frame.
+    ///
+    /// External plugins are skipped because a frame is an individual event, not
+    /// the aggregated response document the plugin contract promises.
+    pub fn apply_response_frame(&self, mut response: Value) -> Result<Value> {
+        for transformer in self.transformers.iter().rev() {
+            if transformer.is_external() {
+                debug!(name = %transformer.name(), "skipping external plugin on a streaming frame");
+                continue;
+            }
+            debug!(name = %transformer.name(), "applying response transformer to a frame");
+            response = transformer.transform_response(response)?;
+        }
+        Ok(response)
+    }
+
     /// Check if the entire chain is a passthrough (all transformers are identity).
     #[allow(dead_code)]
     pub fn is_passthrough(&self, request: &Value) -> bool {
@@ -487,6 +512,53 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 1000
         })
+    }
+
+    struct CountingTransformer {
+        external: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Transformer for CountingTransformer {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn transform_response(&self, response: Value) -> Result<Value> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(response)
+        }
+
+        fn is_external(&self) -> bool {
+            self.external
+        }
+    }
+
+    #[test]
+    fn streaming_frames_skip_external_plugins() {
+        let external_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let builtin_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = TransformerChain::new()
+            .with_transformer(Arc::new(CountingTransformer {
+                external: true,
+                calls: external_calls.clone(),
+            }))
+            .with_transformer(Arc::new(CountingTransformer {
+                external: false,
+                calls: builtin_calls.clone(),
+            }));
+
+        chain
+            .apply_response_frame(serde_json::json!({"content": []}))
+            .unwrap();
+        assert_eq!(external_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(builtin_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        chain
+            .apply_response(serde_json::json!({"content": []}))
+            .unwrap();
+        assert_eq!(external_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(builtin_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

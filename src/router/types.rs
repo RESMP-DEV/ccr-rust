@@ -27,6 +27,10 @@ pub enum TryRequestError {
     /// request cannot succeed, and the retry load can trip rate limits that
     /// providers enforce across every model on the same account.
     Rejected(u16, anyhow::Error),
+    /// A `on_error: "fail"` transformer rejected the payload. The request is
+    /// rejected as a whole: it must not be retried on the same tier, and it
+    /// must not cascade to another tier whose chain may omit the plugin.
+    PluginRejected(anyhow::Error),
     /// Other errors
     Other(anyhow::Error),
 }
@@ -42,6 +46,9 @@ impl std::fmt::Display for TryRequestError {
                 Ok(())
             }
             TryRequestError::Rejected(code, e) => write!(f, "HTTP {code}: {e}"),
+            TryRequestError::PluginRejected(e) => {
+                write!(f, "transform rejected the request: {e}")
+            }
             TryRequestError::Other(e) => write!(f, "{}", e),
         }
     }

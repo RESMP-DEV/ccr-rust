@@ -133,16 +133,17 @@ Two call paths apply transformer errors differently, matching built-in
 transformer behavior:
 
 - The non-streaming request path propagates a `fail` transformer error as a
-  failed request attempt.
+  request-fatal rejection (HTTP 500, `transform_rejected`): the attempt is not
+  retried and the request does not cascade to another tier, so a tier whose
+  chain omits the plugin can never receive the untransformed payload.
 - The streaming response path drops a failed response transform silently
   (`if let Ok(transformed)`), so a `fail` plugin cannot tear down a stream
   mid-flight; the warning is still logged.
 
-A `fail` error is per attempt, not per request: the router treats it as a
-retryable attempt error and may fall through to another tier whose own
-`transformer.use` list does not include the plugin. For a correctness-critical
-plugin such as PII redaction, declare it on every tier that can receive the
-request. A non-cascading, request-level rejection is tracked as follow-up work.
+The request-fatal behavior only applies to the request stage. Response-stage
+plugins do not run on streaming paths (see Limitations), and a non-streaming
+response-stage failure rejects the response with the same `transform_rejected`
+error rather than returning untransformed content.
 
 ## Validation and inspection
 
@@ -161,10 +162,10 @@ ccr-rust --config other.json plugins
 - Plugins run per invocation; a shell startup or interpreter boot costs
   10-50 ms per stage on typical payloads. Hot paths with strict latency
   budgets should stay on built-in transformers.
-- Response-stage plugins currently run once per SSE frame on the Anthropic
-  streaming path, and the aggregated transform on the OpenAI translation path
-  is not used. Plugins therefore see individual events while streaming, not
-  the aggregated document; honouring the aggregated-document contract is
-  follow-up work.
+- Response-stage plugins are skipped on streaming paths. A frame is an
+  individual event rather than the aggregated response document, and spawning
+  a process per frame would multiply latency by the frame count. Built-in
+  transformers still run per frame. Request-stage plugins run before the
+  stream starts, so streaming requests still get request transformation.
 - Plugins are trusted operator configuration. They run with the router's
   user and environment; do not point them at untrusted executables.

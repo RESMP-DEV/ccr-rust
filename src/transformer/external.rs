@@ -34,6 +34,25 @@ const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
 /// tail is kept so a diagnostic flood cannot accumulate.
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 
+/// A fail-mode plugin stage failure.
+///
+/// The router downcasts this marker so `on_error: "fail"` rejects the whole
+/// request instead of retrying the attempt or cascading to another tier whose
+/// chain may not carry the plugin.
+#[derive(Debug)]
+pub struct PluginStageError {
+    pub plugin: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for PluginStageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for PluginStageError {}
+
 /// Captured plugin stdout, or the fact that it exceeded the retention limit.
 enum StdoutCapture {
     Bytes(Vec<u8>),
@@ -294,14 +313,18 @@ impl ExternalTransformer {
     }
 
     fn invocation_error(&self, stage: &str, detail: String, stderr: String) -> anyhow::Error {
-        if stderr.is_empty() {
-            anyhow!("plugin '{}': {stage} stage {detail}", self.name)
+        let message = if stderr.is_empty() {
+            format!("plugin '{}': {stage} stage {detail}", self.name)
         } else {
-            anyhow!(
+            format!(
                 "plugin '{}': {stage} stage {detail}; stderr: {stderr}",
                 self.name
             )
-        }
+        };
+        anyhow::Error::new(PluginStageError {
+            plugin: self.name.clone(),
+            message,
+        })
     }
 }
 
@@ -321,6 +344,10 @@ fn stderr_tail(bytes: Vec<u8>) -> String {
 }
 
 impl Transformer for ExternalTransformer {
+    fn is_external(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -546,6 +573,10 @@ mod tests {
             error.to_string().contains("timed out"),
             "unexpected error: {error}"
         );
+        let stage_error = error
+            .downcast_ref::<PluginStageError>()
+            .expect("fail-mode plugin errors must carry the request-fatal marker");
+        assert_eq!(stage_error.plugin, transformer.name().to_string());
         let pid = recorded_pid(&pid_file);
         assert!(
             wait_for_exit(pid),
