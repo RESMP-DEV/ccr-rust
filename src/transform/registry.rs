@@ -224,7 +224,9 @@ mod tests {
 
     #[test]
     fn registry_registers_dynamic_plugin_names() {
+        let dir = tempfile::tempdir().unwrap();
         let plugins: PluginsConfig = serde_json::from_value(serde_json::json!({
+            "dir": dir.path().to_string_lossy(),
             "plugins": { "my-plugin": { "command": "/bin/cat" } }
         }))
         .unwrap();
@@ -243,7 +245,9 @@ mod tests {
 
     #[test]
     fn registry_plugins_skip_builtin_names() {
+        let dir = tempfile::tempdir().unwrap();
         let plugins: PluginsConfig = serde_json::from_value(serde_json::json!({
+            "dir": dir.path().to_string_lossy(),
             "plugins": { "minimax": { "command": "/bin/cat" } }
         }))
         .unwrap();
