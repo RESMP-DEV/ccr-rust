@@ -70,7 +70,8 @@ use crate::config::ModelAliasTarget;
 use crate::frontend::{detect_frontend, FrontendType};
 use crate::metrics::record_deterministic_rejection;
 use crate::metrics::{
-    estimate_request_tokens, increment_active_requests, record_failure, record_hedge_launched,
+    estimate_request_tokens, increment_active_requests, record_anthropic_request_tools,
+    record_anthropic_response_tools_from_response, record_failure, record_hedge_launched,
     record_hedge_win, record_hold_wait, record_pre_request_tokens, record_primary_hedge_win,
     record_request_duration_with_frontend, record_request_with_frontend, record_retry_sweep,
     sync_ewma_gauge,
@@ -463,6 +464,24 @@ pub async fn handle_messages(
     headers: HeaderMap,
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
+    handle_messages_inner(state, headers, request, None).await
+}
+
+pub(super) async fn handle_messages_with_frontend(
+    state: AppState,
+    headers: HeaderMap,
+    request: AnthropicRequest,
+    frontend: FrontendType,
+) -> Response {
+    handle_messages_inner(state, headers, request, Some(frontend)).await
+}
+
+async fn handle_messages_inner(
+    state: AppState,
+    headers: HeaderMap,
+    request: AnthropicRequest,
+    frontend_override: Option<FrontendType>,
+) -> Response {
     let _guard = ActiveRequestGuard::new(&state.retry_budget);
     let start = std::time::Instant::now();
     let config = &state.config;
@@ -580,9 +599,21 @@ pub async fn handle_messages(
             .stable_partition(key, &mut ordered, pinned_prefix_len);
     }
 
-    // Detect frontend type from headers and request
-    let body_json = serde_json::to_value(&request).unwrap_or_default();
+    // Detect frontend type from headers and request. OpenAI-compatible callers
+    // pass the type detected from their original body so attribution does not
+    // depend on the Anthropic intermediate representation.
+    let body_json = serde_json::to_value(&request).unwrap_or_else(|error| {
+        warn!(error = %error, "Failed to serialize request for tool telemetry");
+        serde_json::Value::Object(serde_json::Map::new())
+    });
+    // Telemetry attribution uses the frontend detected from the caller's original
+    // body; behavior flags below must use the frontend of the normalized request,
+    // since normalization (e.g. a role-less message becoming role user) can change
+    // the classification.
+    let telemetry_frontend =
+        frontend_override.unwrap_or_else(|| detect_frontend(&headers, &body_json));
     let frontend = detect_frontend(&headers, &body_json);
+    record_anthropic_request_tools(&body_json, telemetry_frontend);
     info!(
         "Incoming request for model: {} (frontend: {:?})",
         request.model, frontend
@@ -900,13 +931,23 @@ pub async fn handle_messages(
                                 state.sticky_sessions.remember(key, &provider);
                             }
                         }
-                        record_request_with_frontend(tier_name, frontend);
-                        record_request_duration_with_frontend(tier_name, total_duration, frontend);
+                        record_request_with_frontend(tier_name, telemetry_frontend);
+                        record_request_duration_with_frontend(
+                            tier_name,
+                            total_duration,
+                            telemetry_frontend,
+                        );
                         sync_ewma_gauge(&state.ewma_tracker);
                         info!(
                             "Success on {} after {:.2}s (attempt {:.3}s)",
                             tier_name, total_duration, attempt_duration
                         );
+
+                        let response = record_anthropic_response_tools_from_response(
+                            response,
+                            telemetry_frontend,
+                        )
+                        .await;
 
                         // If client wanted streaming but we forced non-streaming for this provider,
                         // wrap the JSON response as pseudo-SSE so Claude CLI can parse it.

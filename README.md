@@ -336,7 +336,12 @@ cargo build --release
 cargo install --path . --force   # keep the installed CLI in sync with your build
 ```
 
-Default build features: `dashboard`, `gp` (GP routing), `sindexer`. The repo layout and contribution workflow are described in [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+Default build features: `dashboard`, `gp` (GP routing), `sindexer`. Add
+`--features memory-graph` to build the `open_related_nodes` MCP memory tool,
+which returns the named entities plus everything reachable within a bounded
+number of relation hops (see [docs/cli.md](docs/cli.md#mcp-daemon)). The repo
+layout and contribution workflow are described in [AGENTS.md](AGENTS.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Troubleshooting / FAQ
 

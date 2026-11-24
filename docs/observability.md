@@ -37,6 +37,7 @@ curl -sS http://127.0.0.1:3456/health
 curl -sS http://127.0.0.1:3456/v1/usage | jq .
 curl -sS http://127.0.0.1:3456/v1/token-drift | jq .
 curl -sS http://127.0.0.1:3456/v1/frontend-metrics | jq .
+curl -sS http://127.0.0.1:3456/v1/tool-metrics | jq .
 
 # Prometheus endpoint
 curl -sS http://127.0.0.1:3456/metrics | grep '^ccr_'
@@ -79,7 +80,29 @@ ccr_input_tokens_total{tier="tier-0"}
 ccr_output_tokens_total{tier="tier-0"}
 ccr_pre_request_tokens_total{tier,component}  # Estimated before dispatch
 ccr_token_drift_pct{tier="tier-0"}            # Local vs upstream accuracy
+
+# Agent tool efficiency (metadata only; bytes are bucketed, never stored)
+ccr_tool_calls_total{frontend,tool,direction}
+ccr_tool_definition_bytes{frontend,tool}
+ccr_tool_argument_bytes{frontend,tool}
+ccr_tool_result_bytes{frontend,tool}
 ```
+
+Tool labels are sanitized, bounded to 128 distinct names per process (including
+restored names), and new names beyond the cap are reported as `other`;
+`ccr_tool_label_overflow_total` counts every fold so the cap is observable.
+Definition and argument buckets run 128 B to 64 KiB and result buckets 1 KiB to
+512 KiB; larger observations land in the `+Inf` bucket, which keeps the tail
+visible without unbounded buckets. Request-history tool events are deduplicated
+by call id in a 8192-entry process-wide FIFO, so a normal resent conversation
+does not replay old counts, but a history whose distinct call ids exceed that
+window (or a deliberately reused id) can be counted again; ids absent from a
+block are recorded once per event. Tool names resolve only from tool_use blocks
+in the same request, so a result whose matching call is no longer present (for
+example after history truncation) records under `unknown`. Streamed and
+non-streamed generated tool
+calls are both observed. Redis restores the counters, histogram offsets,
+buckets, and parsed averages after restart.
 
 ## API Endpoints
 
@@ -89,6 +112,7 @@ ccr_token_drift_pct{tier="tier-0"}            # Local vs upstream accuracy
 | `GET /v1/latencies`   | Real-time EWMA latency stats (JSON)   |
 | `GET /v1/token-drift` | Token estimation accuracy per tier    |
 | `GET /v1/token-audit` | Recent pre-request token breakdowns   |
+| `GET /v1/tool-metrics` | Per-frontend/tool call and byte summaries (metadata only) |
 | `GET /metrics`        | Prometheus scrape endpoint            |
 | `GET /health`         | Health check                          |
 

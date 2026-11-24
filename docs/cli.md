@@ -173,6 +173,24 @@ ccr-rust mcp-daemon [OPTIONS] --auth-token <TOKEN>
 | `--pyright-root` | - | `PYRIGHT_PROJECT_ROOT` | - | Project root for Pyright type-checking |
 | `--pyright-workspace-dir` | - | `CCR_MCP_PYRIGHT_WORKSPACE_DIR` | - | Private directory for ephemeral Pyright workspaces |
 
+The daemon's memory tools persist a JSON knowledge graph under `--memory-dir`.
+An opt-in `memory-graph` build feature adds the `open_related_nodes` tool,
+which opens the named entities plus every entity reachable within `depth` hops
+(default 1) along relation direction (`from` -> `to`). The traversal is a
+bounded breadth-first search inside the memory tool over the same entities and
+relations the other memory tools read and write: unknown start names are
+ignored, repeated names add nothing, and `depth: 0` returns exactly the
+`open_nodes` payload. Relations incident to any returned entity are included,
+including relations whose other endpoint is not a stored entity; cycles and
+self-loops terminate at any depth.
+
+```bash
+cargo build --release --features memory-graph
+cargo install --path . --force --features memory-graph
+```
+
+Without the feature the daemon exposes the existing memory tools only.
+
 ### `clear-stats`
 Delete persisted CCR observability stats from Redis for one prefix.
 

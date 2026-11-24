@@ -252,3 +252,79 @@ for a future reviewed change; not implemented in this diagnosis.
 - Pricing/burn rate of the $6.35 balance was not projected.
 - The crawl-back tier outage (strata-b550/local27) was observed but not
   investigated further here.
+
+
+---
+
+# DeepSeek Thinking-400 Fix — Implementation Record — 2026-10-23/24
+
+Operator directed the fix proposed above. Two merged PRs and one operational
+collision later, the deterministic 400 is eliminated; the tier now fails only
+on PAYG balance.
+
+## Root cause chain (each step empirically isolated)
+
+1. Trigger (from DebugCapture + prefix bisection + direct-API matrix): the
+   DeepSeek Anthropic endpoint rejects an assistant turn that directly follows
+   a `tool_result` user turn, or carries `tool_use`, without a leading
+   `thinking` block ("The `content[].thinking` in the thinking mode must be
+   passed back"). Stripping, signature normalization, and output_config
+   removal all tested and did NOT help; injecting a placeholder did
+   (231-message captured body: 400 -> 200 after 20 injections).
+2. Cross-provider spills hit it because GLM-served sessions replay bare tool
+   turns (clients preserve only recent reasoning).
+3. Second-order bug (the first deploy still failed ~30% of naturals):
+   Codex-frontend requests reach anthropic tiers with `role="tool"`
+   histories, which take the `needs_normalization` OpenAI round-trip in
+   `try_request_via_anthropic_protocol`; both translation directions drop
+   empty-text thinking blocks, silently erasing an injected `""` placeholder.
+   Placeholder changed to a single space (survives both directions; DeepSeek
+   accepts it, probes S1/S2).
+
+## Changes (merged)
+
+- PR #78: `inject_leading_thinking_blocks` shared helper in
+  `src/transformer/mod.rs`, wired into both registry construction paths
+  (dispatch registry + factory registry in `src/transform/deepseek.rs`);
+  governed policy `transformer: {"use": ["deepseek"]}` on the shared deepseek
+  provider; SLOC ratchet re-pin; pre-existing ruff drift fixed. Rust
+  implementation drafted by `codex-ccr-worker` run `20261023-152557-9onuezkv`
+  under a fixed design contract; parent refactored, wired the second path,
+  and re-ran every gate.
+- PR #79: the single-space placeholder (round-trip survival).
+- PR #80: ratchet re-pin for #79's comment lines.
+
+## Verification
+
+- Gates per PR: fmt/clippy/`cargo test --locked` (840 passed; one
+  timing-flaky hedge assertion re-verified green in isolation), quality.py
+  12/12 after #80.
+- Instrumented debug listener (spare port, RUST_LOG): transformer application
+  logged for chat ingress; natural-equivalent role=tool body 400 -> 200 on
+  deepseek-flash after the space fix.
+- Production 3456: `/v1/messages` and `/v1/chat/completions` replays of
+  captured failing bodies served 200 on deepseek-flash; post-final-deploy
+  logs contain zero thinking-400s — all remaining deepseek failures are
+  `402 Insufficient Balance` (PAYG exhausted ~2026-10-24 00:40Z; the fixed
+  tier drained the remaining ~$6.35 absorbing Z.AI-wall traffic).
+
+## Incidents during rollout (recorded for coordination)
+
+- A concurrent agent session installed its own binary from main (pre-fix) and
+  restarted listeners mid-validation, temporarily regressing the fleet; also
+  caused a PR conflict (their Meta/Muse + Holo4 work) resolved by merge, and
+  two cwd-reset `cargo install` mishaps on my side built from the wrong
+  checkout. Final binary built from clean origin/main (259b452) via explicit
+  absolute worktree path.
+- A wedged Codex app-server daemon (`serverShuttingDown` on every new
+  session, unrelated to this work) was cleared by killing pid 18144; codex
+  bootstrap verified with a real round trip.
+
+## Non-claims
+
+- DeepSeek now serves zero traffic until the PAYG balance is topped up
+  (operator decision; not taken autonomously).
+- The 3458 OCR listener restart remained pending behind persistent traffic;
+  its idle-restart daemon owns activation (binary and config are in place).
+- No load test of concurrent multi-lane token admission interaction with the
+  injection path was performed beyond live traffic observation.

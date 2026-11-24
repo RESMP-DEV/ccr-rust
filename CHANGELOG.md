@@ -24,6 +24,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inspectable through the new `ccr-rust plugins [--json]` command. The
   default `on_error` is passthrough with a warn log; timed-out plugins are
   torn down by process group. See docs/plugins.md and examples/plugins/.
+- Exposed Qoder lane fields in `ccr-rust workers list` and `workers show`.
+  JSON output now carries `engine`, `served_route`, `model_identity`,
+  `qoder_primary_requested`, `qoder_bypass_reason`, and
+  `qoder_attempt_outcome`, with absent or wrong-typed legacy values serialized
+  as `null`. Human output adds a compact `Qoder:` lane line that distinguishes
+  served, fallback, bypass, requested, not-requested, recorded, and
+  not-recorded receipts. These are saved launcher values, not live provider
+  verification.
+- Closed the parent-only escape hatches in the worker-delegation contract:
+  path, symbol, and entry-point discovery is a bounded read-only worker brief;
+  source audit, patch authoring, test running, log/evidence collection, and
+  drafting findings are worker work; every actionable user turn starts a fresh
+  `Workers:`/`Parent-only:`/`Terminal budget:` ledger; and `Parent-only:` is a
+  closed list. `create_thread` and native Codex child tasks are never
+  delegation mechanisms. Qoder ineligibility selects another worker lane rather
+  than parent execution: command-bearing verification or repair briefs pass
+  `--no-qoder-primary`, while offline audits and scoped patch generation use
+  Qoder first.
+- Extended `ccr-worker-usage` with real Qoder outcome classification and an
+  opt-in Codex parent-session audit. Receipt telemetry now reports `served`,
+  `fell_back`, `outcome:<value>`, and `eligible_not_attempted`, with
+  `attempted = served + fell_back` while `qoder_bypass_reason` values keep
+  their own counters; `--parent-sessions` scans local rollout
+  metadata only to count launcher delegation, native `create_thread` child
+  delegation, ledgers, tool calls, and root parents without storing or printing
+  prompt text.
+- Added a visible parent decomposition ledger (`Workers:`, `Parent-only:`,
+  `Terminal budget:`) to the repository and worker guides, and pinned the
+  launcher-level Qoder lane identity as DeepSeek V4.1 Flash
+  (`DeepSeek-Flash`, internal key `dfmodel`). Mixed tasks keep live web or
+  account access with the parent or a network-authorized worker, then send
+  offline digestion and scoped patches to Qoder while the parent runs
+  acceptance.
+- Extended `ccr-worker-usage` to report Qoder-lane adoption in text and JSON:
+  a recorded `qoder_primary_attempt` counts as attempted, otherwise a recorded
+  `qoder_bypass_reason` is counted by reason, and receipts with neither field
+  count as `not_recorded`.
+- Added an opt-in `memory-graph` cargo feature that exposes an
+  `open_related_nodes` memory tool: it opens the named entities plus everything
+  reachable from them within `depth` hops (default 1) along relation
+  direction, using a bounded breadth-first traversal inside the memory tool
+  over the same entities and relations as the other memory tools. With
+  `depth: 0` it returns exactly what `open_nodes` returns; cycles, self-loops,
+  repeated names, unknown names, and dangling relations never loop. Default
+  builds, the existing memory tools, and the persisted `memory.json` format are
+  unchanged. Build it with `cargo build --release --features memory-graph` or
+  `cargo install --path . --force --features memory-graph`.
+
 - Fixed deterministic DeepSeek 400s on replayed tool-loop history. The DeepSeek
   Anthropic endpoint rejects assistant turns that follow a `tool_result` turn,
   or that contain `tool_use`, yet lack a leading thinking block ("The
@@ -47,6 +95,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to OpenAI-surface clients; the blocks are now kept faithful for
   Anthropic-surface clients and dropped from OpenAI-surface serializations,
   matching the streaming path.
+
+- Added metadata-only agent-tool telemetry. CCR counts each observed tool call
+  and result once per process, buckets serialized definition, argument, and
+  result sizes for native Anthropic and OpenAI-compatible traffic, and caps the
+  tool-label set at 128 names before folding new series into `other`. The new
+  `/v1/tool-metrics` endpoint and Prometheus series never retain or return tool
+  payloads, and Redis persistence restores counters, histogram buckets, and
+  averages across restarts.
 - Specialized SenseNova support for image understanding instead of generic code
   review. The shared worker chain no longer contains SenseNova, and the
   code-review listener remains on its existing primary. A distinct
