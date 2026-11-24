@@ -1,0 +1,36 @@
+ndarray-npy 0.9.1
+Copyright Jim Turner and ndarray-npy contributors
+License: MIT OR Apache-2.0 (see LICENSE-MIT and LICENSE-APACHE)
+
+Vendored from crates.io ndarray-npy 0.9.1, source checksum
+fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50 in the
+workspace Cargo.lock before this change.
+
+Upstream: https://github.com/jturner314/ndarray-npy
+
+Modified by CCR-Rust:
+- removed the `zip` dependency and the `npz` / `compressed_npz` features, and
+  deleted the `src/npz.rs` module they gated;
+- removed the `simple_npz` example declaration, which required the removed
+  feature;
+- left every remaining source file byte-identical to the published crate.
+
+Why: every published egobox-gp release through 0.38.0 pins `ndarray-npy ^0.9`,
+whose default `compressed_npz` feature pulls in `zip 2.4.2`. That version has
+three open Dependabot advisories, all patched only in `zip 9.0.5`, and no
+`cargo update` path exists because `ndarray-npy 0.11.0` is the first release
+accepting `zip ^9`. Neither this workspace nor egobox-gp performs any `.npz`
+I/O, so the feature is dead weight. Dropping it removes `zip`, `zopfli`, and
+`arbitrary` from the graph and closes the advisories without touching the
+`.npy` read and write paths that egobox-gp actually uses.
+
+Reopen condition: replace this vendored crate with the registry release once
+egobox-gp publishes a version requiring `ndarray-npy >= 0.11`, and then delete
+the `[patch.crates-io]` entry in the workspace root Cargo.toml.
+
+`vendor/gp-routing/Cargo.toml` carries the same `[patch.crates-io]` entry so the
+standalone `cargo test --manifest-path vendor/gp-routing/Cargo.toml --locked`
+quality check resolves to this crate too, and its Cargo.lock drops `zip`,
+`zopfli`, `flate2`, `miniz_oxide`, `simd-adler32`, `derive_arbitrary`, and
+`displaydoc` with no other version movement. Without that entry the standalone
+build would still compile the vulnerable `zip` release from its own lock.
