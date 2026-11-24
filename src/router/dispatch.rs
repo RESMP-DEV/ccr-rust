@@ -1145,13 +1145,34 @@ pub(super) async fn try_request_via_openai_protocol(
             }
 
             // Apply response transformers if chain is not empty.
+            let fail_mode = chain.fail_mode();
             let final_resp = if chain.is_empty() {
                 anthropic_resp
             } else {
                 let resp_value = serde_json::to_value(&anthropic_resp)
                     .map_err(|e| TryRequestError::Other(e.into()))?;
                 let transformed = apply_response_offloaded(chain, resp_value).await?;
-                serde_json::from_value::<AnthropicResponse>(transformed).unwrap_or(anthropic_resp)
+                match serde_json::from_value::<AnthropicResponse>(transformed) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if fail_mode {
+                            // A fail-mode transform produced output that is not
+                            // a valid Anthropic response. Returning the
+                            // original would send the untransformed payload,
+                            // which is exactly what fail mode forbids.
+                            return Err(TryRequestError::PluginRejected(
+                                anyhow::anyhow!(
+                                    "fail-mode transformer produced a response that is not a valid Anthropic response: {error}"
+                                ),
+                            ));
+                        }
+                        warn!(
+                            %error,
+                            "transformed response is not a valid Anthropic response; returning the original"
+                        );
+                        anthropic_resp
+                    }
+                }
             };
 
             let response_body =
@@ -1456,6 +1477,7 @@ pub(super) async fn try_request_via_anthropic_protocol(
             }
         }
 
+        let fail_mode = chain.fail_mode();
         let transformed_response_value = match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(response_value) if !chain.is_empty() => {
                 Some(apply_response_offloaded(chain, response_value).await?)
@@ -1467,7 +1489,19 @@ pub(super) async fn try_request_via_anthropic_protocol(
         if let Some(response_value) = transformed_response_value {
             let anthropic_resp = match serde_json::from_value::<AnthropicResponse>(response_value) {
                 Ok(response) => response,
-                Err(_) => {
+                Err(error) => {
+                    if fail_mode {
+                        // A fail-mode transform produced output that is not a
+                        // valid Anthropic response. Returning the original
+                        // body would send the untransformed payload.
+                        return Err(TryRequestError::PluginRejected(anyhow::anyhow!(
+                            "fail-mode transformer produced a response that is not a valid Anthropic response: {error}"
+                        )));
+                    }
+                    warn!(
+                        %error,
+                        "transformed response is not a valid Anthropic response; returning the original"
+                    );
                     let mut response = (
                         status,
                         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -1625,6 +1659,7 @@ mod tests {
     struct SlowTransformer {
         running: Arc<std::sync::atomic::AtomicBool>,
         started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     }
 
     impl Transformer for SlowTransformer {
@@ -1643,7 +1678,13 @@ mod tests {
                     let _ = sender.send(());
                 }
             }
-            std::thread::sleep(Duration::from_millis(200));
+            // Block until the test releases the stage, so the assertion below
+            // cannot race a fixed sleep on a loaded runner.
+            if let Ok(mut guard) = self.release.lock() {
+                if let Some(receiver) = guard.take() {
+                    let _ = receiver.recv();
+                }
+            }
             self.running
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             Ok(request)
@@ -1654,9 +1695,11 @@ mod tests {
     async fn plugin_stage_runs_off_the_async_worker() {
         let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let chain = TransformerChain::new().with_transformer(Arc::new(SlowTransformer {
             running: running.clone(),
             started: std::sync::Mutex::new(Some(started_tx)),
+            release: std::sync::Mutex::new(Some(release_rx)),
         }));
 
         let task = tokio::spawn(apply_request_offloaded(
@@ -1670,6 +1713,7 @@ mod tests {
             running.load(std::sync::atomic::Ordering::SeqCst),
             "the async worker must be free while the plugin stage blocks"
         );
+        release_tx.send(()).unwrap();
         task.await.unwrap().unwrap();
         assert!(!running.load(std::sync::atomic::Ordering::SeqCst));
     }

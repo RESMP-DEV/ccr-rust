@@ -70,6 +70,11 @@ pub trait Transformer: Send + Sync {
         false
     }
 
+    /// Whether a failure rejects the whole request (`on_error: "fail"`).
+    fn fail_mode(&self) -> bool {
+        false
+    }
+
     /// Get the transformer's name for logging and debugging.
     fn name(&self) -> &str {
         "unknown"
@@ -306,6 +311,15 @@ impl TransformerChain {
             response = transformer.transform_response(response)?;
         }
         Ok(response)
+    }
+
+    /// Whether any transformer in the chain rejects the whole request on
+    /// failure. Callers use this to refuse fallbacks that would return
+    /// untransformed content.
+    pub fn fail_mode(&self) -> bool {
+        self.transformers
+            .iter()
+            .any(|transformer| transformer.fail_mode())
     }
 
     /// Check if the entire chain is a passthrough (all transformers are identity).

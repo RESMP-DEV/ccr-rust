@@ -417,11 +417,12 @@ fn plugin_rejected_response(error: anyhow::Error) -> Response {
     let plugin = error
         .downcast_ref::<crate::transformer::PluginStageError>()
         .map(|failure| failure.plugin.as_str());
+    // The client response names the plugin but never includes the plugin's
+    // stderr, which can carry the rejected payload or a secret from the
+    // plugin's environment. The server log keeps the full detail.
     let message = match plugin {
-        Some(plugin) => {
-            format!("request rejected by fail-mode plugin '{plugin}': {error}")
-        }
-        None => format!("request rejected by a fail-mode transformer: {error}"),
+        Some(plugin) => format!("request rejected by fail-mode plugin '{plugin}'"),
+        None => "request rejected by a fail-mode transformer".to_string(),
     };
     let error_resp = serde_json::json!({
         "error": {

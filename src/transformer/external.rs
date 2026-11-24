@@ -249,9 +249,15 @@ impl ExternalTransformer {
             }
         };
         if status.is_none() {
-            // The pipes closed but the plugin itself is still running.
-            kill_plugin_group(&mut child);
-            status = child.try_wait().ok().flatten();
+            // The pipes closed but the plugin may still be finishing work.
+            // Give it the rest of the timeout before signalling the group.
+            status = wait_for_exit(&mut child, deadline);
+            if status.is_none() {
+                // The leader is still unreaped, so its pid cannot have been
+                // recycled and `-{pid}` still names this plugin's group.
+                kill_plugin_group(&mut child);
+                status = child.try_wait().ok().flatten();
+            }
         }
 
         if stdout_too_large {
@@ -343,9 +349,34 @@ fn stderr_tail(bytes: Vec<u8>) -> String {
     }
 }
 
+/// Poll an unreaped child for exit until `deadline`.
+fn wait_for_exit(
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> Option<std::process::ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(status) => {
+                if status.is_some() {
+                    return status;
+                }
+            }
+            Err(_) => return None,
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 impl Transformer for ExternalTransformer {
     fn is_external(&self) -> bool {
         true
+    }
+
+    fn fail_mode(&self) -> bool {
+        matches!(self.spec.on_error, PluginOnError::Fail)
     }
 
     fn name(&self) -> &str {
@@ -602,6 +633,35 @@ mod tests {
     /// pid, so a test can assert the descendant dies with the plugin group.
     fn slow_script_body(pid_file: &std::path::Path) -> String {
         format!("sleep 30 & echo $! > '{}'; wait $!", pid_file.display())
+    }
+
+    /// A plugin that closes its pipes and then finishes its own cleanup must
+    /// not be killed: the invocation waits for the exit within the timeout.
+    #[test]
+    fn plugin_that_closes_pipes_before_exit_is_not_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spec, _) = script_spec(
+            dir.path(),
+            "closing.sh",
+            "cat >/dev/null; printf '{\"ok\":true}\\n'; exec 1>&-; exec 2>&-; sleep 0.2; exit 0",
+        );
+        let transformer = transformer(spec);
+        let result = transformer
+            .transform_request(serde_json::json!({"model": "test"}))
+            .expect("a plugin that closes its pipes before exiting must not be killed");
+        assert_eq!(result, serde_json::json!({"ok": true}));
+    }
+
+    /// Fail-mode plugins are reported as request-fatal to the router.
+    #[test]
+    fn fail_mode_plugins_are_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spec, _) = script_spec(dir.path(), "flag.sh", "cat");
+        assert!(!transformer(spec.clone()).fail_mode());
+
+        let mut fail_spec = (*spec).clone();
+        fail_spec.on_error = PluginOnError::Fail;
+        assert!(transformer(Arc::new(fail_spec)).fail_mode());
     }
 
     /// Read the pid a test script recorded for its `sleep` descendant.

@@ -145,6 +145,13 @@ plugins do not run on streaming paths (see Limitations), and a non-streaming
 response-stage failure rejects the response with the same `transform_rejected`
 error rather than returning untransformed content.
 
+`fail` also refuses a fallback that would leak the original payload: a
+transformed response that does not deserialize into a valid Anthropic response
+rejects the request instead of returning the untransformed upstream body. The
+client response names the plugin but never includes its stderr, which can
+carry the rejected payload or a secret from the plugin's environment; the
+server log keeps the detail.
+
 ## Validation and inspection
 
 `Config::from_file` validates every declared plugin (name, command
@@ -169,3 +176,7 @@ ccr-rust --config other.json plugins
   stream starts, so streaming requests still get request transformation.
 - Plugins are trusted operator configuration. They run with the router's
   user and environment; do not point them at untrusted executables.
+- Hedging cannot be combined with a fail-mode request plugin. A hedge is
+  built from the request before the primary's request stage finishes and runs
+  its own tier chain, so the hedge tier could send the untransformed payload.
+  Configuration that combines them is rejected at startup.

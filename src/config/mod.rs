@@ -368,7 +368,7 @@ impl Config {
         validate_model_aliases(&file.router, &file.providers)?;
         validate_retry_sweeps(&file.router)?;
         validate_retry_budget(&file.router)?;
-        validate_hedging(&file.router)?;
+        validate_hedging(&file.router, &file.plugins)?;
         validate_tier_order_conflicts(&file.router)?;
         file.plugins.validate()?;
 

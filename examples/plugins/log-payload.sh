@@ -22,7 +22,18 @@ if [ -L "$log_file" ]; then
     exit 1
 fi
 if [ -e "$log_file" ]; then
-    log_owner=$(stat -f '%u' "$log_file" 2>/dev/null || stat -c '%u' "$log_file" 2>/dev/null || echo "")
+    # Probe each stat dialect separately: GNU `stat -f` treats '%u' as a
+    # filename and prints filesystem information before failing, so a
+    # combined fallback would compare against that output instead of the
+    # file owner.
+    log_owner=""
+    if log_owner=$(stat -f '%u' "$log_file" 2>/dev/null); then
+        :
+    elif log_owner=$(stat -c '%u' "$log_file" 2>/dev/null); then
+        :
+    else
+        log_owner=""
+    fi
     if [ -n "$log_owner" ] && [ "$log_owner" != "$(id -u)" ]; then
         echo "refusing to append to plugin log owned by another user: $log_file" >&2
         exit 1

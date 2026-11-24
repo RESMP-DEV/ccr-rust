@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 
+use super::plugins::{PluginOnError, PluginStages, PluginsConfig};
 use super::types::{ModelAliasTarget, Provider, ProviderProtocol, RouterConfig};
 use super::ConfigFile;
 
@@ -208,11 +209,39 @@ pub(super) fn validate_retry_budget(router: &RouterConfig) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_hedging(router: &RouterConfig) -> Result<()> {
+/// Names of plugins that fail the request stage.
+///
+/// A hedge is built from the request before the primary's request stage has
+/// finished, and it runs its own tier chain. A fail-mode request plugin
+/// therefore cannot be honoured on the hedge path: the hedge tier may omit the
+/// plugin and send the untransformed payload.
+pub(super) fn fail_mode_request_plugins(plugins: &PluginsConfig) -> Vec<String> {
+    plugins
+        .plugins
+        .iter()
+        .filter(|(_, spec)| {
+            matches!(spec.on_error, PluginOnError::Fail)
+                && matches!(spec.stages, PluginStages::Request | PluginStages::Both)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+pub(super) fn validate_hedging(router: &RouterConfig, plugins: &PluginsConfig) -> Result<()> {
     anyhow::ensure!(
         !(router.hedging.enabled && router.hedging.ttft_threshold_ms == 0),
         "Router.hedging.ttftThresholdMs must be > 0 when hedging is enabled"
     );
+    if router.hedging.enabled {
+        let conflicting = fail_mode_request_plugins(plugins);
+        anyhow::ensure!(
+            conflicting.is_empty(),
+            "Router.hedging cannot be enabled with a fail-mode request plugin ({}): \
+             a hedge is built from the untransformed request and could send it to a tier \
+             whose chain omits the plugin",
+            conflicting.join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -275,4 +304,27 @@ pub(super) fn validate_model_aliases(router: &RouterConfig, providers: &[Provide
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugins(value: serde_json::Value) -> PluginsConfig {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn fail_mode_request_plugins_are_detected() {
+        let config = plugins(serde_json::json!({
+            "plugins": {
+                "redact": {"command": "/bin/cat", "on_error": "fail"},
+                "shape": {"command": "/bin/cat", "on_error": "fail", "stages": "response"},
+                "optional": {"command": "/bin/cat"}
+            }
+        }));
+        let mut names = fail_mode_request_plugins(&config);
+        names.sort();
+        assert_eq!(names, vec!["redact".to_string()]);
+    }
 }
