@@ -64,6 +64,8 @@ pub async fn stream_anthropic_response_with_tracking(
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string)
                 });
+                // Empty frames were already skipped above, so only a payload
+                // that parses as JSON can vouch for a clean stop.
                 let stop_payload_valid = parsed_event.is_some();
                 saw_message_stop |= frame.event.as_deref() == Some("message_stop")
                     && stop_payload_valid
