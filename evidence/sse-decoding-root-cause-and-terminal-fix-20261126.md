@@ -102,9 +102,14 @@ conforming client discard its accumulated `partial_json`.
 | --- | --- | --- |
 | Format | `cargo fmt --check` | exit 0 |
 | Lint | `cargo clippy --all-features --locked -- -D warnings` | exit 0 |
-| Tests | `cargo test --all-features --locked` | exit 0, 963 passed, 0 failed, 1 ignored |
-| Ratchet | `python3 scripts/check_sloc.py` | exit 0, 45992/45992 on `fix/sse-tail-loss` |
+| Tests | `cargo test --all-features --locked` | exit 0, 971 passed, 0 failed, 1 ignored |
+| Ratchet | `python3 scripts/check_sloc.py` | exit 0, 46485/46485 at `3634d7f`; `main` at `cb5f0d2` carries the identical tree |
 | Harness gate | `cargo run --release -- --gate` in `build/reports/sse-audit/harness` | exit 1 both before and after; 5 data-losing divergences before, 4 after, 0 on real captures both times |
+
+## Merge state
+
+- PR #86 `fix/sse-decoder-foundation` merged as `2601f59`.
+- PR #87 `fix/sse-tail-loss` merged as `cb5f0d2`; its merge tree is byte-identical to the reviewed head `3634d7f`.
 
 ## Review round
 
@@ -123,9 +128,22 @@ conforming client discard its accumulated `partial_json`.
 - Decoder resync: an empty push keeps `SwallowLf` pending, a trailing bare CR
   during resync stays in `SwallowLf`, and a trailing bare CR is excluded from a
   parsed field value; three `src/sse/tests.rs` cases cover them.
-- The Kilo duplicate-tool-index warning is stale: the push sits behind the
-  `!state.active_tool_indices.contains(&tool_index)` guard and
+- The Kilo duplicate-tool-index warning is stale: a tool block starts once per
+  upstream index through `tool_index_map`, and
   `a_repeated_tool_identity_does_not_start_the_block_twice` passes.
+- A tool block starts only once both `id` and `name` are known; a block that
+  never completes its identity opens at the terminal flush with the
+  placeholder, and the fragments are replayed in front of it.
+- Anthropic block indices are assigned in block-start order through
+  `tool_index_map`, so a buffered tool cannot leave a gap that makes the
+  client's block list shorter than the index its later events use.
+- Block closure moved to the terminal flush, so a late argument frame can no
+  longer follow its own `content_block_stop`, and the `{}` fallback cannot
+  precede a late fragment.
+- A transport error closes the emitted blocks before the body error, and an
+  idle timeout closes the blocks without a success-shaped `message_stop`.
+- Tool arguments are validated as JSON objects, and a stream with invalid
+  arguments no longer clears the route's 429 backoff.
 
 Worker evidence: decoder hardening `20261126-162033-rnx9xdn6`, chat-stage fix
 `20261126-163908-c1ec4oj4`, terminal path `20261126-163937-5n0fymzj`,
