@@ -103,7 +103,7 @@ conforming client discard its accumulated `partial_json`.
 | Format | `cargo fmt --check` | exit 0 |
 | Lint | `cargo clippy --all-features --locked -- -D warnings` | exit 0 |
 | Tests | `cargo test --all-features --locked` | exit 0, 662 lib tests and every integration binary ok, 0 failed |
-| Ratchet | `python3 scripts/check_sloc.py` | exit 0, 42393/42393 |
+| Ratchet | `python3 scripts/check_sloc.py` | exit 0, 42393/42393 on the pre-rebase base; re-measured 45862/45862 on origin/main 60574af |
 | Harness gate | `cargo run --release -- --gate` in `build/reports/sse-audit/harness` | exit 1 both before and after; 5 data-losing divergences before, 4 after, 0 on real captures both times |
 
 Worker evidence: decoder hardening `20261126-162033-rnx9xdn6`, chat-stage fix

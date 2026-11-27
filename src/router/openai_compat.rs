@@ -368,7 +368,13 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                             Ok(bytes) => pending_frames.extend(decoder.push(&bytes)),
                             Err(e) => {
                                 error!("Stream read error: {}", e);
-                                break;
+                                // A transport error can follow a complete,
+                                // newline-terminated frame whose blank-line
+                                // separator never arrived. Flush it before the
+                                // stream ends so the tail is not lost.
+                                pending_frames.extend(decoder.finish());
+                                upstream_ended = true;
+                                continue;
                             }
                         }
                     }
@@ -737,6 +743,27 @@ mod tests {
         let response = Response::builder()
             .status(StatusCode::OK)
             .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert_eq!(tool_call_arguments(&output), "{\"blob\":\"alpha-42\"}");
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
+        assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn read_error_after_newline_terminated_tail_forwards_tail() {
+        let body = tool_stream_body("\n");
+        let stream = futures::stream::iter([
+            Ok::<Bytes, std::io::Error>(Bytes::from(body)),
+            Err(std::io::Error::other("upstream read failed")),
+        ]);
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from_stream(stream))
             .unwrap();
 
         let converted = convert_anthropic_stream_response_to_openai(response).await;
