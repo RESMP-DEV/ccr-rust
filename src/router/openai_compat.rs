@@ -348,6 +348,7 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         let mut response_model = None;
         let mut pending_frames = VecDeque::new();
         let mut upstream_ended = false;
+        let mut transport_error: Option<String> = None;
 
         loop {
             if pending_frames.is_empty() {
@@ -371,8 +372,10 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                                 // A transport error can follow a complete,
                                 // newline-terminated frame whose blank-line
                                 // separator never arrived. Flush it before the
-                                // stream ends so the tail is not lost.
+                                // stream ends so the tail is not lost, then
+                                // surface the failure instead of [DONE].
                                 pending_frames.extend(decoder.finish());
+                                transport_error = Some(e.to_string());
                                 upstream_ended = true;
                                 continue;
                             }
@@ -507,6 +510,15 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                     return; // Receiver closed
                 }
             }
+        }
+
+        if let Some(message) = transport_error {
+            let _ = tx
+                .send(Err(std::io::Error::other(format!(
+                    "upstream stream read error: {message}"
+                ))))
+                .await;
+            return;
         }
 
         // One terminal, emitted after every upstream frame was forwarded.
@@ -755,7 +767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_error_after_newline_terminated_tail_forwards_tail() {
+    async fn read_error_after_newline_terminated_tail_forwards_tail_then_fails() {
         let body = tool_stream_body("\n");
         let stream = futures::stream::iter([
             Ok::<Bytes, std::io::Error>(Bytes::from(body)),
@@ -767,12 +779,28 @@ mod tests {
             .unwrap();
 
         let converted = convert_anthropic_stream_response_to_openai(response).await;
-        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
-        let output = String::from_utf8(bytes.to_vec()).unwrap();
+        let mut data = converted.into_body().into_data_stream();
+        let mut output = String::new();
+        let mut failed = false;
+        while let Some(item) = data.next().await {
+            match item {
+                Ok(bytes) => output.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(error) => {
+                    assert!(
+                        error.to_string().contains("upstream read failed"),
+                        "unexpected error: {error}"
+                    );
+                    failed = true;
+                }
+            }
+        }
 
+        assert!(failed, "a transport error must reach the client");
         assert_eq!(tool_call_arguments(&output), "{\"blob\":\"alpha-42\"}");
-        assert_eq!(output.matches("data: [DONE]").count(), 1);
-        assert!(output.ends_with("data: [DONE]\n\n"));
+        assert!(
+            !output.contains("data: [DONE]"),
+            "no clean terminal after a transport error: {output}"
+        );
     }
 
     #[tokio::test]

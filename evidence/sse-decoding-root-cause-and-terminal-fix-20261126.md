@@ -102,9 +102,30 @@ conforming client discard its accumulated `partial_json`.
 | --- | --- | --- |
 | Format | `cargo fmt --check` | exit 0 |
 | Lint | `cargo clippy --all-features --locked -- -D warnings` | exit 0 |
-| Tests | `cargo test --all-features --locked` | exit 0, 662 lib tests and every integration binary ok, 0 failed |
-| Ratchet | `python3 scripts/check_sloc.py` | exit 0, 42393/42393 on the pre-rebase base; re-measured 45862/45862 on origin/main 60574af |
+| Tests | `cargo test --all-features --locked` | exit 0, 963 passed, 0 failed, 1 ignored |
+| Ratchet | `python3 scripts/check_sloc.py` | exit 0, 45992/45992 on `fix/sse-tail-loss` |
 | Harness gate | `cargo run --release -- --gate` in `build/reports/sse-audit/harness` | exit 1 both before and after; 5 data-losing divergences before, 4 after, 0 on real captures both times |
+
+## Review round
+
+- `openai_compat.rs` now records the transport error and sends it to the body
+  channel after the flushed tail, so a network failure is no longer reported as
+  a clean `data: [DONE]`; the terminal marker is suppressed on that path and
+  `read_error_after_newline_terminated_tail_forwards_tail_then_fails` covers it.
+- `streaming/openai_translated.rs` keeps `transport_error` and skips the
+  success terminal events after an error item was forwarded.
+- A `message_stop` whose payload is not valid JSON no longer counts as a clean
+  completion (`stop_payload_valid`), so a cut stop frame cannot clear
+  route backoff; `malformed_message_stop_does_not_clear_route_backoff` covers it.
+- Recovered multi-line payloads are serialized through `SseFrame::to_sse_string`,
+  which prefixes every line with `data: `;
+  `recovered_multiline_anthropic_payload_uses_one_data_field_per_line` covers it.
+- Decoder resync: an empty push keeps `SwallowLf` pending, a trailing bare CR
+  during resync stays in `SwallowLf`, and a trailing bare CR is excluded from a
+  parsed field value; three `src/sse/tests.rs` cases cover them.
+- The Kilo duplicate-tool-index warning is stale: the push sits behind the
+  `!state.active_tool_indices.contains(&tool_index)` guard and
+  `a_repeated_tool_identity_does_not_start_the_block_twice` passes.
 
 Worker evidence: decoder hardening `20261126-162033-rnx9xdn6`, chat-stage fix
 `20261126-163908-c1ec4oj4`, terminal path `20261126-163937-5n0fymzj`,
