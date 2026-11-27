@@ -243,6 +243,55 @@ async fn flush_recovers_final_openai_tool_call_without_blank_line() {
 }
 
 #[tokio::test]
+async fn malformed_message_stop_does_not_clear_route_backoff() {
+    let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+    tracker.record_429("provider,model", Some(std::time::Duration::from_secs(30)));
+    let (context, _admission) = tracked_context(&tracker);
+    // The event header says message_stop, but the JSON payload is cut.
+    let payload = "event: message_stop\ndata: {\"type\":\n\n";
+    let byte_stream: BoxByteStream =
+        Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+            Bytes::from(payload),
+        )]));
+
+    let response =
+        stream_anthropic_response_with_tracking(byte_stream, 8, context, TransformerChain::new())
+            .await;
+    let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
+
+    assert!(
+        tracker.has_backoff("provider,model"),
+        "a malformed stop payload must not count as a clean completion"
+    );
+}
+
+#[tokio::test]
+async fn recovered_multiline_anthropic_payload_uses_one_data_field_per_line() {
+    let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+    let (context, _admission) = tracked_context(&tracker);
+    let payload = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\ndata: \"delta\":{\"text\":\"ok\"}}\n";
+    let byte_stream: BoxByteStream =
+        Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+            Bytes::from(payload),
+        )]));
+
+    let response =
+        stream_anthropic_response_with_tracking(byte_stream, 8, context, TransformerChain::new())
+            .await;
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(
+        body.contains(
+            "data: {\"type\":\"content_block_delta\",\ndata: \"delta\":{\"text\":\"ok\"}}"
+        ),
+        "each recovered data line needs its own data field: {body}"
+    );
+}
+
+#[tokio::test]
 async fn flush_recovers_final_anthropic_tool_call_without_blank_line() {
     // The terminal message_delta is followed by the final tool-call delta,
     // whose blank-line separator never arrives.

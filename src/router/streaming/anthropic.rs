@@ -5,7 +5,7 @@ use crate::metrics::{
     record_cost, record_failure, record_stream_backpressure, record_throughput, record_ttft,
     record_usage, verify_token_usage, ActiveStreamGuard,
 };
-use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
+use crate::sse::{SseFrame, SseFrameDecoder, StreamVerifyCtx};
 use crate::transformer::TransformerChain;
 use axum::body::Body;
 use axum::http::StatusCode;
@@ -57,15 +57,16 @@ pub async fn stream_anthropic_response_with_tracking(
                     continue;
                 }
 
-                let event_kind = serde_json::from_str::<serde_json::Value>(json_str)
-                    .ok()
-                    .and_then(|event| {
-                        event
-                            .get("type")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    });
+                let parsed_event = serde_json::from_str::<serde_json::Value>(json_str).ok();
+                let event_kind = parsed_event.as_ref().and_then(|event| {
+                    event
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
+                let stop_payload_valid = json_str.is_empty() || parsed_event.is_some();
                 saw_message_stop |= frame.event.as_deref() == Some("message_stop")
+                    && stop_payload_valid
                     || event_kind.as_deref() == Some("message_stop");
 
                 // Parse Anthropic SSE events to extract usage.
@@ -75,7 +76,7 @@ pub async fn stream_anthropic_response_with_tracking(
                 // (cumulative output, and input or cache fields
                 // on some providers). Positive values win so a
                 // later event never zeroes an earlier report.
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(json_str) {
+                if let Some(event) = parsed_event.as_ref() {
                     let usage_sources = [
                         event.get("usage"),
                         event.get("message").and_then(|m| m.get("usage")),
@@ -152,12 +153,14 @@ pub async fn stream_anthropic_response_with_tracking(
                     json_str.to_string()
                 };
 
-                // Reconstruct SSE frame
-                let sse_data = if let Some(event_type) = &frame.event {
-                    format!("event: {}\ndata: {}\n\n", event_type, output_frame)
-                } else {
-                    format!("data: {}\n\n", output_frame)
-                };
+                // Reconstruct SSE frame. `to_sse_string` prefixes every line
+                // of a multi-line payload with `data: `, so a recovered
+                // multi-line tool argument is not silently truncated.
+                let sse_data = SseFrame {
+                    event: frame.event.clone(),
+                    data: output_frame,
+                }
+                .to_sse_string();
 
                 if tx.capacity() == 0 {
                     record_stream_backpressure();
