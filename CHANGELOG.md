@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The SSE decoder now flushes a buffered final frame on every end-of-stream
+  branch, including idle timeout and upstream read error, instead of dropping
+  a frame whose blank-line separator never arrived. A malformed `message_stop`
+  payload no longer counts as a clean completion, recovered multi-line
+  payloads keep one `data:` field per line, and decoder resync handles empty
+  pushes and bare-CR terminators without corrupting the next frame.
+  `src/sse.rs` became the `src/sse/` directory module with unchanged public
+  paths. Evidence: `evidence/sse-decoder-terminal-flush-20261126.md`.
+
 - Added runtime transformer plugins. The `Plugins` config section declares
   external executable transformers (`command`, `args`, `timeout_ms`, `env`,
   `stages`, `on_error`) and `~/.claude-code-router/plugins` is scanned for
