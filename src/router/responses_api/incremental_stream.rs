@@ -63,6 +63,176 @@ pub(super) struct ResponsesStreamConverter {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod tool_argument_tests {
+    use super::*;
+
+    fn data_events(output: &str) -> Vec<serde_json::Value> {
+        output
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str(data).ok())
+            .collect()
+    }
+
+    fn tool_call_frame(arguments: &str) -> String {
+        serde_json::json!({
+            "id": "resp_tool_args",
+            "choices": [{
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_blob", "arguments": arguments}
+                }]}
+            }]
+        })
+        .to_string()
+    }
+
+    fn function_call_done(events: &[serde_json::Value]) -> Option<&serde_json::Value> {
+        events.iter().find(|event| {
+            event["type"] == "response.output_item.done" && event["item"]["type"] == "function_call"
+        })
+    }
+
+    #[test]
+    fn truncated_tool_arguments_fail_instead_of_completing() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        converter.push_frame(None, &tool_call_frame("{\"blob\":\"alpha-42\""));
+        let output = converter.finish();
+
+        let events = data_events(&output);
+        let failed = events
+            .iter()
+            .find(|event| event["type"] == "response.failed")
+            .expect("truncated arguments must fail the response");
+        assert_eq!(failed["response"]["status"], "failed");
+        let message = failed["response"]["error"]["message"]
+            .as_str()
+            .expect("failed event carries an error message");
+        assert!(
+            message.contains("invalid arguments for function call get_blob"),
+            "message must name the function: {message}"
+        );
+        assert!(
+            message.contains("EOF while parsing an object"),
+            "message must name the parse failure: {message}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["type"] != "response.completed"),
+            "a failed stream must not also complete: {output}"
+        );
+        assert!(
+            function_call_done(&events).is_none(),
+            "the truncated function call must not be emitted as done: {output}"
+        );
+    }
+
+    #[test]
+    fn valid_tool_arguments_keep_the_completed_item_unchanged() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        let arguments = "{\"blob\":\"alpha-42\"}";
+        converter.push_frame(None, &tool_call_frame(arguments));
+        let output = converter.finish();
+
+        let events = data_events(&output);
+        let done = function_call_done(&events).expect("valid function call must complete");
+        assert_eq!(done["output_index"], 0);
+        assert_eq!(
+            done["item"],
+            serde_json::json!({
+                "id": "call_1",
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "get_blob",
+                "arguments": arguments
+            })
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "response.completed"),
+            "valid arguments must still complete the response: {output}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["type"] != "response.failed"),
+            "valid arguments must not fail: {output}"
+        );
+    }
+
+    #[test]
+    fn empty_tool_arguments_emit_an_empty_object_delta() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        converter.push_frame(None, &tool_call_frame(""));
+        let output = converter.finish();
+
+        let events = data_events(&output);
+        let delta = events
+            .iter()
+            .find(|event| event["type"] == "response.function_call_arguments.delta")
+            .expect("empty arguments must emit a delta");
+        assert_eq!(delta["delta"], "{}");
+        let done = function_call_done(&events).expect("empty arguments must complete the item");
+        let arguments = done["item"]["arguments"]
+            .as_str()
+            .expect("completed item carries arguments");
+        assert_eq!(arguments, "{}");
+        serde_json::from_str::<serde_json::Value>(arguments)
+            .expect("completed item arguments must be valid JSON");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "response.completed"),
+            "empty arguments must complete the response: {output}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["type"] != "response.failed"),
+            "empty arguments must not fail: {output}"
+        );
+    }
+
+    #[test]
+    fn non_function_items_are_unaffected_by_argument_validation() {
+        let mut converter = ResponsesStreamConverter::new(None);
+        converter.push_frame(
+            None,
+            &serde_json::json!({
+                "id": "resp_message",
+                "choices": [{"delta": {"content": "hello"}}]
+            })
+            .to_string(),
+        );
+        let output = converter.finish();
+
+        let events = data_events(&output);
+        let done = events
+            .iter()
+            .find(|event| event["type"] == "response.output_item.done")
+            .expect("message item must complete");
+        assert_eq!(done["item"]["type"], "message");
+        assert_eq!(done["item"]["content"][0]["text"], "hello");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "response.completed"),
+            "message output must still complete the response: {output}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["type"] != "response.failed"),
+            "message output must not fail: {output}"
+        );
+    }
+}
+
 fn is_quote_prefix_candidate(text: &str) -> bool {
     text.chars()
         .all(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '“' | '”' | '‘' | '’'))
@@ -949,49 +1119,84 @@ impl ResponsesStreamConverter {
         }
 
         let mut next_output_index = self.next_output_index;
-        for tool in self
-            .tools
-            .values()
-            .filter(|_| self.preserved_response.is_none())
-        {
-            let call_id = if tool.id.is_empty() {
-                "call_unknown"
-            } else {
-                &tool.id
-            };
-            let name = if tool.name.is_empty() {
-                "tool"
-            } else {
-                &tool.name
-            };
-            let item = serde_json::json!({
-                "id": call_id,
-                "type": "function_call",
-                "call_id": call_id,
-                "name": name,
-                "arguments": tool.arguments
-            });
-            let output_index = tool.output_index.unwrap_or_else(|| {
-                let output_index = next_output_index;
-                next_output_index += 1;
-                let added = serde_json::json!({
-                    "type": "response.output_item.added",
-                    "output_index": output_index,
-                    "item": {
-                        "id": call_id,
-                        "type": "function_call",
-                        "call_id": call_id,
-                        "name": name,
-                        "arguments": ""
-                    }
+        if self.preserved_response.is_none() {
+            for tool in self.tools.values_mut() {
+                let call_id = if tool.id.is_empty() {
+                    "call_unknown".to_string()
+                } else {
+                    tool.id.clone()
+                };
+                let name = if tool.name.is_empty() {
+                    "tool".to_string()
+                } else {
+                    tool.name.clone()
+                };
+                let output_index = tool.output_index.unwrap_or_else(|| {
+                    let output_index = next_output_index;
+                    next_output_index += 1;
+                    let added = serde_json::json!({
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "id": call_id,
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": ""
+                        }
+                    });
+                    output.push_str("event: response.output_item.added\ndata: ");
+                    output.push_str(&added.to_string());
+                    output.push_str("\n\n");
+                    output_index
                 });
-                output.push_str("event: response.output_item.added\ndata: ");
-                output.push_str(&added.to_string());
-                output.push_str("\n\n");
-                output_index
-            });
-            indexed_output_items.push((output_index, item.clone()));
-            append_output_item_done(&mut output, output_index, &item);
+                if tool.arguments.is_empty() {
+                    tool.arguments.push_str("{}");
+                    let identity = ResponseOutputItemIdentity {
+                        output_index,
+                        item_id: Some(call_id.clone()),
+                        content_index: None,
+                    };
+                    append_response_delta(
+                        &mut output,
+                        "response.function_call_arguments.delta",
+                        "{}",
+                        Some(identity),
+                    );
+                }
+                // A stream that ends mid-argument leaves invalid JSON here.
+                // Emitting the item as done would make the client fail while
+                // the stream claims success, so fail the response instead.
+                if let Err(error) = serde_json::from_str::<serde_json::Value>(&tool.arguments) {
+                    let failed = serde_json::json!({
+                        "type": "response.failed",
+                        "response": {
+                            "id": self.response_id,
+                            "object": "response",
+                            "status": "failed",
+                            "error": {
+                                "message": format!(
+                                    "invalid arguments for function call {name}: {error}"
+                                ),
+                                "code": "invalid_tool_arguments"
+                            }
+                        }
+                    });
+                    output.push_str("event: response.failed\ndata: ");
+                    output.push_str(&failed.to_string());
+                    output.push_str("\n\n");
+                    return output;
+                }
+                let item = serde_json::json!({
+                    "id": call_id,
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": tool.arguments
+                });
+                indexed_output_items.push((output_index, item.clone()));
+                append_output_item_done(&mut output, output_index, &item);
+            }
         }
 
         indexed_output_items.sort_by_key(|(output_index, _)| *output_index);
