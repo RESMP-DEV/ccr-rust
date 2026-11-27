@@ -9,7 +9,7 @@ use super::translate_response::{
 };
 use super::types::*;
 use crate::metrics::{record_cost, record_failure, record_usage, verify_token_usage};
-use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
+use crate::sse::{SseFrame, SseFrameDecoder, StreamVerifyCtx};
 use crate::transformer::TransformerChain;
 
 // ============================================================================
@@ -88,6 +88,107 @@ pub async fn stream_response_translated(
         let mut ended_with_timeout = false;
         let mut saw_openai_terminal = false;
         let mut upstream_completed_cleanly = true;
+        let mut transport_error = false;
+
+        macro_rules! handle_openai_frame {
+            ($frame:expr, $forwarded:ident) => {{
+                let frame = $frame;
+                let json_str = frame.data.trim();
+                if json_str == "[DONE]" {
+                    saw_openai_terminal = true;
+                    continue;
+                }
+                if json_str.is_empty() {
+                    continue;
+                }
+
+                // Try to parse as OpenAI stream chunk
+                if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(json_str) {
+                    // Accumulate usage info
+                    if let Some(ref usage) = chunk.usage {
+                        input_tokens = usage.prompt_tokens;
+                        output_tokens = usage.completion_tokens;
+                        cache_read_input_tokens = usage
+                            .prompt_tokens_details
+                            .as_ref()
+                            .and_then(|details| details.get("cached_tokens"))
+                            .and_then(|value| value.as_u64())
+                            .or(cache_read_input_tokens);
+                        reasoning_tokens = usage
+                            .completion_tokens_details
+                            .as_ref()
+                            .and_then(|details| details.get("reasoning_tokens"))
+                            .and_then(|value| value.as_u64())
+                            .or(reasoning_tokens);
+                    }
+
+                    let was_first = translation_state.is_first;
+                    let events =
+                        translate_stream_chunk_to_anthropic(&chunk, &mut translation_state);
+                    saw_openai_terminal |= translation_state.finish_reason.is_some();
+                    if was_first {
+                        first_token_time = Some(std::time::Instant::now());
+                    }
+                    last_token_time = Some(std::time::Instant::now());
+
+                    for event in events {
+                        let event_json = serde_json::to_string(&event).unwrap_or_default();
+                        let sse_data =
+                            format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
+
+                        if tx.capacity() == 0 {
+                            record_stream_backpressure();
+                        }
+                        if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                            upstream_completed_cleanly = false;
+                            break;
+                        }
+                        $forwarded = true;
+                    }
+
+                    if let Some(choice) = chunk.choices.first() {
+                        if let Some(ref content) = choice.delta.content {
+                            accumulated_content.push_str(content);
+                        }
+                        if let Some(ref reasoning) = choice.delta.reasoning_content {
+                            accumulated_reasoning.push_str(reasoning);
+                            _has_reasoning = true;
+                        }
+                        if let Some(ref tool_calls) = choice.delta.tool_calls {
+                            for tc in tool_calls {
+                                let idx = tc.index;
+                                while accumulated_tool_calls.len() <= idx {
+                                    accumulated_tool_calls.push((
+                                        String::new(),
+                                        String::new(),
+                                        String::new(),
+                                    ));
+                                }
+                                if let Some(ref id) = tc.id {
+                                    accumulated_tool_calls[idx].0.clone_from(id);
+                                }
+                                if let Some(ref func) = tc.function {
+                                    if let Some(ref name) = func.name {
+                                        accumulated_tool_calls[idx].1.clone_from(name);
+                                    }
+                                    if let Some(ref args) = func.arguments {
+                                        accumulated_tool_calls[idx].2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Pass through frames that don't parse as OpenAI chunks.
+                    let sse_data = frame.to_sse_string();
+                    if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                        upstream_completed_cleanly = false;
+                        break;
+                    }
+                    $forwarded = true;
+                }
+            }};
+        }
 
         loop {
             tokio::select! {
@@ -98,129 +199,36 @@ pub async fn stream_response_translated(
                         "CCR stream idle timeout"
                     );
                     record_failure(&tier_name, "stream_idle_timeout");
-                    send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
                     ended_with_timeout = true;
                     break;
                 }
                 chunk = stream.next() => {
                     let Some(chunk) = chunk else {
-                        upstream_completed_cleanly &= saw_openai_terminal;
                         break;
                     };
                     match chunk {
                         Ok(bytes) => {
                             let mut forwarded = false;
                             for frame in decoder.push(&bytes) {
-                                let json_str = frame.data.trim();
-                                if json_str == "[DONE]" {
-                                    saw_openai_terminal = true;
-                                    continue;
-                                }
-                                if json_str.is_empty() {
-                                    continue;
-                                }
-
-                                // Try to parse as OpenAI stream chunk
-                                if let Ok(chunk) =
-                                    serde_json::from_str::<OpenAIStreamChunk>(json_str)
-                                {
-                                    // Accumulate usage info
-                                    if let Some(ref usage) = chunk.usage {
-                                        input_tokens = usage.prompt_tokens;
-                                        output_tokens = usage.completion_tokens;
-                                        cache_read_input_tokens = usage
-                                            .prompt_tokens_details
-                                            .as_ref()
-                                            .and_then(|details| details.get("cached_tokens"))
-                                            .and_then(|value| value.as_u64())
-                                            .or(cache_read_input_tokens);
-                                        reasoning_tokens = usage
-                                            .completion_tokens_details
-                                            .as_ref()
-                                            .and_then(|details| details.get("reasoning_tokens"))
-                                            .and_then(|value| value.as_u64())
-                                            .or(reasoning_tokens);
-                                    }
-
-                                    let was_first = translation_state.is_first;
-                                    let events =
-                                        translate_stream_chunk_to_anthropic(&chunk, &mut translation_state);
-                                    saw_openai_terminal |= translation_state.finish_reason.is_some();
-                                    if was_first {
-                                        first_token_time = Some(std::time::Instant::now());
-                                    }
-                                    last_token_time = Some(std::time::Instant::now());
-
-                                    for event in events {
-                                        let event_json =
-                                            serde_json::to_string(&event).unwrap_or_default();
-                                        let sse_data = format!(
-                                            "event: {}\ndata: {}\n\n",
-                                            event.event_type, event_json
-                                        );
-
-                                        if tx.capacity() == 0 {
-                                            record_stream_backpressure();
-                                        }
-                                        if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
-                                            upstream_completed_cleanly = false;
-                                            break;
-                                        }
-                                        forwarded = true;
-                                    }
-
-                                    if let Some(choice) = chunk.choices.first() {
-                                        if let Some(ref content) = choice.delta.content {
-                                            accumulated_content.push_str(content);
-                                        }
-                                        if let Some(ref reasoning) = choice.delta.reasoning_content
-                                        {
-                                            accumulated_reasoning.push_str(reasoning);
-                                            _has_reasoning = true;
-                                        }
-                                        if let Some(ref tool_calls) = choice.delta.tool_calls {
-                                            for tc in tool_calls {
-                                                let idx = tc.index;
-                                                while accumulated_tool_calls.len() <= idx {
-                                                    accumulated_tool_calls.push((
-                                                        String::new(),
-                                                        String::new(),
-                                                        String::new(),
-                                                    ));
-                                                }
-                                                if let Some(ref id) = tc.id {
-                                                    accumulated_tool_calls[idx].0.clone_from(id);
-                                                }
-                                                if let Some(ref func) = tc.function {
-                                                    if let Some(ref name) = func.name {
-                                                        accumulated_tool_calls[idx].1.clone_from(name);
-                                                    }
-                                                    if let Some(ref args) = func.arguments {
-                                                        accumulated_tool_calls[idx].2.push_str(args);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // Pass through frames that don't parse as OpenAI chunks.
-                                    let sse_data = frame.to_sse_string();
-                                    if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
-                                        upstream_completed_cleanly = false;
-                                        break;
-                                    }
-                                    forwarded = true;
-                                }
+                                handle_openai_frame!(frame, forwarded);
                             }
                             if forwarded {
                                 idle_deadline = tokio::time::Instant::now() + idle_timeout;
                             }
                         }
                         Err(e) => {
+                            upstream_completed_cleanly = false;
+                            // Recover the pending final frame before the
+                            // transport error reaches the client.
+                            let mut finish_forwarded = false;
+                            for frame in decoder.finish() {
+                                handle_openai_frame!(frame, finish_forwarded);
+                            }
+                            let _ = finish_forwarded;
                             let _ = tx
                                 .send(Err(std::io::Error::other(e.to_string())))
                                 .await;
-                            upstream_completed_cleanly = false;
+                            transport_error = true;
                             break;
                         }
                     }
@@ -233,9 +241,21 @@ pub async fn stream_response_translated(
             }
         }
 
+        // The macro requires a forwarding place; the value is intentionally
+        // unused in the terminal flush.
+        #[allow(unused_assignments)]
+        let mut finish_forwarded = false;
+        for frame in decoder.finish() {
+            handle_openai_frame!(frame, finish_forwarded);
+            let _ = finish_forwarded;
+        }
+
         if ended_with_timeout {
+            send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
             return;
         }
+
+        upstream_completed_cleanly &= saw_openai_terminal;
 
         // Send final stop events
         let mut usage = if input_tokens > 0 || output_tokens > 0 {
@@ -307,12 +327,16 @@ pub async fn stream_response_translated(
             }
         }
 
-        let stop_events =
-            create_stream_stop_events(usage.clone(), translation_state.finish_reason.as_deref());
-        for event in stop_events {
-            let event_json = serde_json::to_string(&event).unwrap_or_default();
-            let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
-            let _ = tx.send(Ok(Bytes::from(sse_data))).await;
+        if !transport_error {
+            let stop_events = create_stream_stop_events(
+                usage.clone(),
+                translation_state.finish_reason.as_deref(),
+            );
+            for event in stop_events {
+                let event_json = serde_json::to_string(&event).unwrap_or_default();
+                let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
+                let _ = tx.send(Ok(Bytes::from(sse_data))).await;
+            }
         }
 
         // Record usage and verify token drift if we have context
@@ -434,6 +458,130 @@ pub async fn stream_anthropic_response_with_tracking(
         let mut saw_message_stop = false;
         let mut upstream_completed_cleanly = true;
 
+        macro_rules! handle_anthropic_frame {
+            ($frame:expr, $forwarded:ident) => {{
+                let frame = $frame;
+                let json_str = frame.data.trim();
+                if json_str == "[DONE]" || json_str.is_empty() {
+                    continue;
+                }
+
+                let parsed_event = serde_json::from_str::<serde_json::Value>(json_str).ok();
+                let event_kind = parsed_event.as_ref().and_then(|event| {
+                    event
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
+                let stop_payload_valid = json_str.is_empty() || parsed_event.is_some();
+                saw_message_stop |= frame.event.as_deref() == Some("message_stop")
+                    && stop_payload_valid
+                    || event_kind.as_deref() == Some("message_stop");
+
+                // Parse Anthropic SSE events to extract usage.
+                // message_start reports usage under
+                // `message.usage` (input plus cache splits);
+                // message_delta reports a top-level `usage`
+                // (cumulative output, and input or cache fields
+                // on some providers). Positive values win so a
+                // later event never zeroes an earlier report.
+                if let Some(event) = parsed_event.as_ref() {
+                    let usage_sources = [
+                        event.get("usage"),
+                        event.get("message").and_then(|m| m.get("usage")),
+                    ];
+                    for usage in usage_sources.into_iter().flatten() {
+                        if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                            if input > 0 {
+                                input_tokens = input;
+                            }
+                        }
+                        if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                            if output > 0 {
+                                output_tokens = output;
+                            }
+                        }
+                        if let Some(read) = usage
+                            .get("cache_read_input_tokens")
+                            .and_then(|v| v.as_u64())
+                        {
+                            if read > 0 {
+                                cache_read_tokens = read;
+                            }
+                        }
+                        if let Some(creation) = usage
+                            .get("cache_creation_input_tokens")
+                            .and_then(|v| v.as_u64())
+                        {
+                            if creation > 0 {
+                                cache_creation_tokens = creation;
+                            }
+                        }
+                    }
+
+                    // Also track content length for estimation fallback
+                    if let Some(delta) = event.get("delta") {
+                        if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                            if first_token_time.is_none() && !text.is_empty() {
+                                first_token_time = Some(std::time::Instant::now());
+                            }
+                            if !text.is_empty() {
+                                last_token_time = Some(std::time::Instant::now());
+                            }
+                            accumulated_content_len += text.len();
+                        }
+                    }
+                    if let Some(content_block) = event.get("content_block") {
+                        if let Some(text) = content_block.get("text").and_then(|v| v.as_str()) {
+                            if first_token_time.is_none() && !text.is_empty() {
+                                first_token_time = Some(std::time::Instant::now());
+                            }
+                            if !text.is_empty() {
+                                last_token_time = Some(std::time::Instant::now());
+                            }
+                            accumulated_content_len += text.len();
+                        }
+                    }
+                }
+
+                // Apply in-process response transformers if the
+                // chain is not empty. External plugins are
+                // skipped per frame; see `apply_response_frame`.
+                let output_frame = if !chain.is_empty() {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Ok(transformed) = chain.apply_response_frame(value) {
+                            serde_json::to_string(&transformed)
+                                .unwrap_or_else(|_| json_str.to_string())
+                        } else {
+                            json_str.to_string()
+                        }
+                    } else {
+                        json_str.to_string()
+                    }
+                } else {
+                    json_str.to_string()
+                };
+
+                // Reconstruct SSE frame. `to_sse_string` prefixes every line
+                // of a multi-line payload with `data: `, so a recovered
+                // multi-line tool argument is not silently truncated.
+                let sse_data = SseFrame {
+                    event: frame.event.clone(),
+                    data: output_frame,
+                }
+                .to_sse_string();
+
+                if tx.capacity() == 0 {
+                    record_stream_backpressure();
+                }
+                if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
+                    upstream_completed_cleanly = false;
+                    break;
+                }
+                $forwarded = true;
+            }};
+        }
+
         loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(idle_deadline) => {
@@ -443,137 +591,33 @@ pub async fn stream_anthropic_response_with_tracking(
                         "CCR stream idle timeout"
                     );
                     record_failure(&tier_name, "stream_idle_timeout");
-                    send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
                     ended_with_timeout = true;
                     break;
                 }
                 chunk = stream.next() => {
                     let Some(chunk) = chunk else {
-                        upstream_completed_cleanly &= saw_message_stop;
                         break;
                     };
                     match chunk {
                         Ok(bytes) => {
                             let mut forwarded = false;
                             for frame in decoder.push(&bytes) {
-                                let json_str = frame.data.trim();
-                                if json_str == "[DONE]" || json_str.is_empty() {
-                                    continue;
-                                }
-
-                                let event_kind = serde_json::from_str::<serde_json::Value>(
-                                    json_str,
-                                )
-                                .ok()
-                                .and_then(|event| {
-                                    event
-                                        .get("type")
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::to_string)
-                                });
-                                saw_message_stop |= frame.event.as_deref() == Some("message_stop")
-                                    || event_kind.as_deref() == Some("message_stop");
-
-                                // Parse Anthropic SSE events to extract usage.
-                                // message_start reports usage under
-                                // `message.usage` (input plus cache splits);
-                                // message_delta reports a top-level `usage`
-                                // (cumulative output, and input or cache fields
-                                // on some providers). Positive values win so a
-                                // later event never zeroes an earlier report.
-                                if let Ok(event) = serde_json::from_str::<serde_json::Value>(json_str) {
-                                    let usage_sources = [
-                                        event.get("usage"),
-                                        event.get("message").and_then(|m| m.get("usage")),
-                                    ];
-                                    for usage in usage_sources.into_iter().flatten() {
-                                        if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                                            if input > 0 {
-                                                input_tokens = input;
-                                            }
-                                        }
-                                        if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                                            if output > 0 {
-                                                output_tokens = output;
-                                            }
-                                        }
-                                        if let Some(read) = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
-                                            if read > 0 {
-                                                cache_read_tokens = read;
-                                            }
-                                        }
-                                        if let Some(creation) = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
-                                            if creation > 0 {
-                                                cache_creation_tokens = creation;
-                                            }
-                                        }
-                                    }
-
-                                    // Also track content length for estimation fallback
-                                    if let Some(delta) = event.get("delta") {
-                                        if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                                            if first_token_time.is_none() && !text.is_empty() {
-                                                first_token_time = Some(std::time::Instant::now());
-                                            }
-                                            if !text.is_empty() {
-                                                last_token_time = Some(std::time::Instant::now());
-                                            }
-                                            accumulated_content_len += text.len();
-                                        }
-                                    }
-                                    if let Some(content_block) = event.get("content_block") {
-                                        if let Some(text) = content_block.get("text").and_then(|v| v.as_str()) {
-                                            if first_token_time.is_none() && !text.is_empty() {
-                                                first_token_time = Some(std::time::Instant::now());
-                                            }
-                                            if !text.is_empty() {
-                                                last_token_time = Some(std::time::Instant::now());
-                                            }
-                                            accumulated_content_len += text.len();
-                                        }
-                                    }
-                                }
-
-                                // Apply in-process response transformers if the
-                                // chain is not empty. External plugins are
-                                // skipped per frame; see `apply_response_frame`.
-                                let output_frame = if !chain.is_empty() {
-                                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
-                                        if let Ok(transformed) = chain.apply_response_frame(value) {
-                                            serde_json::to_string(&transformed).unwrap_or_else(|_| json_str.to_string())
-                                        } else {
-                                            json_str.to_string()
-                                        }
-                                    } else {
-                                        json_str.to_string()
-                                    }
-                                } else {
-                                    json_str.to_string()
-                                };
-
-                                // Reconstruct SSE frame
-                                let sse_data = if let Some(event_type) = &frame.event {
-                                    format!("event: {}\ndata: {}\n\n", event_type, output_frame)
-                                } else {
-                                    format!("data: {}\n\n", output_frame)
-                                };
-
-                                if tx.capacity() == 0 {
-                                    record_stream_backpressure();
-                                }
-                                if tx.send(Ok(Bytes::from(sse_data))).await.is_err() {
-                                    upstream_completed_cleanly = false;
-                                    break;
-                                }
-                                forwarded = true;
+                                handle_anthropic_frame!(frame, forwarded);
                             }
                             if forwarded {
                                 idle_deadline = tokio::time::Instant::now() + idle_timeout;
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                             upstream_completed_cleanly = false;
+                            // Recover the pending final frame before the
+                            // transport error reaches the client.
+                            let mut finish_forwarded = false;
+                            for frame in decoder.finish() {
+                                handle_anthropic_frame!(frame, finish_forwarded);
+                            }
+                            let _ = finish_forwarded;
+                            let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                             break;
                         }
                     }
@@ -586,9 +630,21 @@ pub async fn stream_anthropic_response_with_tracking(
             }
         }
 
+        // The macro requires a forwarding place; the value is intentionally
+        // unused in the terminal flush.
+        #[allow(unused_assignments)]
+        let mut finish_forwarded = false;
+        for frame in decoder.finish() {
+            handle_anthropic_frame!(frame, finish_forwarded);
+            let _ = finish_forwarded;
+        }
+
         if ended_with_timeout {
+            send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
             return;
         }
+
+        upstream_completed_cleanly &= saw_message_stop;
 
         // Anthropic-style usage reports the uncached prompt slice in
         // input_tokens with cache reads and writes as separate fields.
@@ -1148,6 +1204,306 @@ data: [DONE]
         let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
 
         assert!(!tracker.has_backoff("provider,model"));
+    }
+
+    #[tokio::test]
+    async fn flush_recovers_final_openai_tool_call_without_blank_line() {
+        let final_chunk = serde_json::json!({
+            "id": "chatcmpl-flush",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_flush",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"Paris\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        // The data line is complete, but the blank-line separator never arrives.
+        let payload = format!("data: {final_chunk}\n");
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response =
+            stream_response_translated(byte_stream, 8, None, "model", TransformerChain::new())
+                .await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let events: Vec<serde_json::Value> = body
+            .split("\n\n")
+            .filter_map(|frame| {
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            })
+            .collect();
+
+        let partial_json = events
+            .iter()
+            .find_map(|event| {
+                event
+                    .get("delta")
+                    .and_then(|delta| delta.get("partial_json"))
+                    .and_then(|value| value.as_str())
+            })
+            .expect("flushed tool-call delta should be forwarded");
+        assert_eq!(partial_json, "{\"city\":\"Paris\"}");
+
+        let stop_reason = events
+            .iter()
+            .find(|event| event["type"] == "message_delta")
+            .and_then(|event| event["delta"]["stop_reason"].as_str())
+            .expect("flushed finish_reason should set stop_reason");
+        assert_eq!(stop_reason, "tool_use");
+    }
+
+    #[tokio::test]
+    async fn read_error_flushes_the_pending_frame_before_the_error() {
+        let final_chunk = serde_json::json!({
+            "id": "chatcmpl-read-error",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_read_error",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"Paris\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        // The data line is complete, but the blank-line separator never
+        // arrives before the transport fails.
+        let payload = format!("data: {final_chunk}\n");
+        let error = reqwest::Client::builder()
+            .build()
+            .expect("http client")
+            .get("http://[::1")
+            .send()
+            .await
+            .expect_err("an unparsable URL fails without touching the network");
+        let byte_stream: BoxByteStream = Box::pin(futures::stream::iter([
+            Ok(Bytes::from(payload)),
+            Err(error),
+        ]));
+
+        let response =
+            stream_response_translated(byte_stream, 8, None, "model", TransformerChain::new())
+                .await;
+        let mut body = String::new();
+        let mut saw_error = false;
+        {
+            let mut stream = response.into_body().into_data_stream();
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(bytes) => body.push_str(&String::from_utf8_lossy(&bytes)),
+                    Err(_) => {
+                        saw_error = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(saw_error, "the transport error must still reach the client");
+        let events: Vec<serde_json::Value> = body
+            .split("\n\n")
+            .filter_map(|frame| {
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            })
+            .collect();
+        let partial_json = events
+            .iter()
+            .find_map(|event| {
+                event
+                    .get("delta")
+                    .and_then(|delta| delta.get("partial_json"))
+                    .and_then(|value| value.as_str())
+            })
+            .expect("the pending final frame must be flushed before the transport error");
+        assert_eq!(partial_json, "{\"city\":\"Paris\"}");
+        assert!(
+            !body.contains("event: message_stop"),
+            "no successful terminal after a transport error: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_flushes_the_pending_frame_before_the_error() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        let (mut context, _admission) = tracked_context(&tracker);
+        context.stream_idle_timeout = std::time::Duration::from_millis(20);
+        let payload = "data: {\"id\":\"idle-flush\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tail\"},\"finish_reason\":null}]}\n";
+        let byte_stream: BoxByteStream = Box::pin(
+            futures::stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from(payload))])
+                .chain(futures::stream::pending::<Result<Bytes, reqwest::Error>>()),
+        );
+
+        let response = stream_response_translated(
+            byte_stream,
+            8,
+            Some(context),
+            "model",
+            TransformerChain::new(),
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            body.contains("tail"),
+            "the pending final frame must be flushed before the idle timeout: {body}"
+        );
+        assert!(
+            body.contains("timeout_error"),
+            "the idle timeout must still be reported: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_message_stop_does_not_clear_route_backoff() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        tracker.record_429("provider,model", Some(std::time::Duration::from_secs(30)));
+        let (context, _admission) = tracked_context(&tracker);
+        // The event header says message_stop, but the JSON payload is cut.
+        let payload = "event: message_stop\ndata: {\"type\":\n\n";
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response = stream_anthropic_response_with_tracking(
+            byte_stream,
+            8,
+            context,
+            TransformerChain::new(),
+        )
+        .await;
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
+
+        assert!(
+            tracker.has_backoff("provider,model"),
+            "a malformed stop payload must not count as a clean completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_multiline_anthropic_payload_uses_one_data_field_per_line() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        let (context, _admission) = tracked_context(&tracker);
+        let payload = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\ndata: \"delta\":{\"text\":\"ok\"}}\n";
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response = stream_anthropic_response_with_tracking(
+            byte_stream,
+            8,
+            context,
+            TransformerChain::new(),
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            body.contains(
+                "data: {\"type\":\"content_block_delta\",\ndata: \"delta\":{\"text\":\"ok\"}}"
+            ),
+            "each recovered data line needs its own data field: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_recovers_final_anthropic_tool_call_without_blank_line() {
+        // The terminal message_delta is followed by the final tool-call delta,
+        // whose blank-line separator never arrives.
+        let payload = concat!(
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},",
+            "\"usage\":{\"output_tokens\":7}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,",
+            "\"delta\":{\"type\":\"input_json_delta\",",
+            "\"partial_json\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}\n"
+        );
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response = stream_anthropic_response_with_tracking(
+            byte_stream,
+            8,
+            tracked_context(&std::sync::Arc::new(
+                crate::ratelimit::RateLimitTracker::new(),
+            ))
+            .0,
+            TransformerChain::new(),
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let events: Vec<serde_json::Value> = body
+            .split("\n\n")
+            .filter_map(|frame| {
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            })
+            .collect();
+
+        let partial_json = events
+            .iter()
+            .find_map(|event| {
+                event
+                    .get("delta")
+                    .and_then(|delta| delta.get("partial_json"))
+                    .and_then(|value| value.as_str())
+            })
+            .expect("flushed tool-call delta should be forwarded");
+        assert_eq!(partial_json, "{\"city\":\"Paris\"}");
+
+        let stop_reason = events
+            .iter()
+            .find(|event| event["type"] == "message_delta")
+            .and_then(|event| event["delta"]["stop_reason"].as_str())
+            .expect("preserved terminal frame should carry stop_reason");
+        assert_eq!(stop_reason, "tool_use");
     }
 
     #[tokio::test]
