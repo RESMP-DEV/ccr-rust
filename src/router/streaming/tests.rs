@@ -742,6 +742,10 @@ async fn idle_timeout_flushes_the_pending_final_frame() {
         body.contains("\"type\":\"content_block_stop\""),
         "open content blocks must be closed on idle timeout: {body}"
     );
+    assert!(
+        !body.contains("event: message_stop"),
+        "an idle timeout must not emit a success terminal: {body}"
+    );
 }
 
 #[tokio::test]
@@ -825,8 +829,54 @@ async fn upstream_read_error_flushes_the_pending_frame_before_the_error() {
         "no successful terminal before a transport error: {body_before_error}"
     );
     assert!(
+        body_before_error.contains("event: content_block_stop"),
+        "open blocks must close before the transport error: {body_before_error}"
+    );
+    assert!(
         !body_after_error.contains("event: message_stop"),
         "no successful terminal after a transport error: {body_after_error}"
+    );
+}
+
+#[tokio::test]
+async fn truncated_tool_arguments_do_not_clear_route_backoff() {
+    // A clean transport EOF with a finish reason but cut tool arguments is
+    // not a route success: the client gets an error, and the 429 backoff must
+    // survive.
+    let payload = concat!(
+        "data: {\"id\":\"trunc-success\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_trunc\",\"type\":\"function\",",
+        "\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\",\\\"content\\\":\\\"abc\"}}]},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n"
+    );
+    let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+    tracker.record_429("provider,model", Some(std::time::Duration::from_secs(30)));
+    let (context, _admission) = tracked_context(&tracker);
+    let byte_stream: BoxByteStream =
+        Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+            Bytes::from(payload),
+        )]));
+
+    let response = stream_response_translated(
+        byte_stream,
+        8,
+        Some(context),
+        "model",
+        TransformerChain::new(),
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(
+        body.contains("invalid_request_error"),
+        "truncated arguments must be reported: {body}"
+    );
+    assert!(
+        tracker.has_backoff("provider,model"),
+        "truncated tool arguments must not count as a route success"
     );
 }
 

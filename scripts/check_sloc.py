@@ -48,7 +48,7 @@ SOURCE_ROOT = ROOT / "src"
 # day for the review round: CR resync handling, per-line serialization of
 # recovered multi-line payloads, and validated message_stop framing.
 # Hotspots are pinned at measured values.
-TOTAL_CEILING = 46_435
+TOTAL_CEILING = 46_482
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
 # baseline. They may shrink or be split, but cannot grow while the ratchet is
@@ -64,7 +64,7 @@ HOTSPOT_CEILINGS: dict[str, int] = {
     "config/mod.rs": 1_172,
     "router/streaming/anthropic.rs": 529,
     "router/streaming/openai_translated.rs": 447,
-    "router/streaming/tests.rs": 838,
+    "router/streaming/tests.rs": 885,
     "router/streaming/mod.rs": 84,
     "sse/decoder.rs": 329,
     "sse/tests.rs": 306,
