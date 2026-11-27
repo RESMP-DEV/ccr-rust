@@ -40,27 +40,36 @@ SOURCE_ROOT = ROOT / "src"
 # Re-pinned again the same day for the follow-up review round: the hedging
 # guard against fail-mode request plugins, the fail-mode refusal of invalid
 # transformed responses, and the plugin exit wait. Measured total 44373.
-# Re-pinned 2026-11-26 for the SSE decoder split: src/sse.rs became the
-# src/sse/ directory module and streaming.rs gained the terminal decoder
-# flush on idle-timeout and read-error branches, plus their regression
-# tests. Re-pinned again the same day for the review round: CR resync
-# handling, per-line serialization of recovered multi-line payloads, and
-# validated message_stop framing. Measured total on this branch is 45142;
-# hotspots are pinned at measured values.
-TOTAL_CEILING = 45_142
+# Re-pinned 2026-11-26 for the SSE truncation fix: src/sse.rs and
+# src/router/streaming.rs became directory modules, and the decoder gained
+# dropped-frame accounting, exact resync, bare-CR final terminators, and
+# multi-line tail refusal, plus the read-error tail-flush and
+# transport-error terminal-guard regression tests. Re-pinned again the same
+# day for the review round: CR resync handling, per-line serialization of
+# recovered multi-line payloads, and validated message_stop framing.
+# Hotspots are pinned at measured values.
+TOTAL_CEILING = 46_485
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
 # baseline. They may shrink or be split, but cannot grow while the ratchet is
-# being established.
+# being established. The split module files below are pinned the same way:
+# they are the new boundaries created by the 2026-11-26 split and are already
+# at their measured values, with no spare lines. One added import or statement
+# fails the per-file check even when the total is under its ceiling; growth
+# must be offset elsewhere in the file or follow the ratchet's re-pin policy.
 HOTSPOT_CEILINGS: dict[str, int] = {
     "router/responses_api.rs": 2_419,
-    "router/mod.rs": 1_940,
+    "router/mod.rs": 1_942,
     "router/dispatch.rs": 1_920,
     "config/mod.rs": 1_172,
-    "router/streaming.rs": 1_708,
+    "router/streaming/anthropic.rs": 529,
+    "router/streaming/openai_translated.rs": 447,
+    "router/streaming/tests.rs": 888,
+    "router/streaming/mod.rs": 84,
     "sse/decoder.rs": 329,
     "sse/tests.rs": 306,
     "sse/mod.rs": 57,
+    "router/responses_api/incremental_stream.rs": 1_262,
 }
 
 

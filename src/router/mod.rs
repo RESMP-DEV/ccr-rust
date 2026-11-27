@@ -1686,13 +1686,20 @@ mod tests {
             usage: None,
         };
         let events = translate_stream_chunk_to_anthropic(&finish_chunk, &mut state);
-        // Should have content_block_stop for text (index 0) and tool (index 1)
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].event_type, "content_block_stop");
-        assert_eq!(events[0].index, Some(0));
-        assert_eq!(events[1].event_type, "content_block_stop");
-        assert_eq!(events[1].index, Some(1));
+        // A finish chunk leaves blocks open so late argument frames are still
+        // emitted; the terminal flush closes each block exactly once.
+        assert!(
+            events.is_empty(),
+            "a finish chunk must not close blocks before the terminal: {events:?}"
+        );
         assert_eq!(state.finish_reason.as_deref(), Some("tool_calls"));
+
+        let stops = close_open_content_blocks(&mut state);
+        assert_eq!(stops.len(), 2);
+        assert_eq!(stops[0].event_type, "content_block_stop");
+        assert_eq!(stops[0].index, Some(0));
+        assert_eq!(stops[1].event_type, "content_block_stop");
+        assert_eq!(stops[1].index, Some(1));
     }
 
     #[test]

@@ -13,14 +13,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- The SSE decoder now flushes a buffered final frame on every end-of-stream
-  branch, including idle timeout and upstream read error, instead of dropping
-  a frame whose blank-line separator never arrived. A malformed `message_stop`
-  payload no longer counts as a clean completion, recovered multi-line
-  payloads keep one `data:` field per line, and decoder resync handles empty
-  pushes and bare-CR terminators without corrupting the next frame.
-  `src/sse.rs` became the `src/sse/` directory module with unchanged public
-  paths. Evidence: `evidence/sse-decoder-terminal-flush-20261126.md`.
+- Stopped dropping the tail of a streamed tool call. The Anthropic-upstream to
+  chat-completions translation discarded every frame that arrived after the
+  upstream `message_stop` or a `[DONE]` marker, and never called the decoder's
+  end-of-stream flush, so a final `input_json_delta` carrying the closing brace
+  was thrown away while the stream still reported success. Measured live on the
+  Responses path: 22 of 36 requests returned arguments that did not parse, and
+  all 22 had lost the upstream usage event, while all 7 requests that parsed
+  had kept it. The translation now separates "terminal seen" from "done
+  emitted", forwards late argument frames, emits `[DONE]` once at stream end,
+  and flushes the decoder at every end-of-stream branch including idle timeout
+  and upstream read error. Anthropic clients now get a `content_block_stop` for
+  every open block, a null `stop_reason` instead of a fabricated `end_turn` when
+  no finish reason arrived, a single `content_block_start` per tool index, and
+  an `event: error` when accumulated arguments are not valid JSON. A Responses
+  client now gets `response.failed` with
+  `invalid arguments for function call <name>: <error>` instead of a
+  `response.completed` carrying truncated arguments. The SSE decoder also
+  reports discarded frames, resynchronises exactly after the next blank line,
+  accepts a bare-CR final terminator, and refuses to emit a truncated
+  multi-line tail. `src/sse.rs` and `src/router/streaming.rs` became directory
+  modules with unchanged public paths. Evidence:
+  `evidence/sse-decoding-root-cause-and-terminal-fix-20261126.md`, harness
+  `build/reports/sse-audit/harness`.
 
 - Added runtime transformer plugins. The `Plugins` config section declares
   external executable transformers (`command`, `args`, `timeout_ms`, `env`,

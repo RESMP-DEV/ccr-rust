@@ -13,7 +13,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::error;
 
@@ -333,7 +333,11 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         let mut stream = body.into_data_stream();
         let mut decoder = SseFrameDecoder::new();
         let transformer = AnthropicToOpenAiResponseTransformer;
-        let mut sent_done = false;
+        // The upstream terminal marker and the OpenAI terminal are separate
+        // facts. A terminal upstream frame can still be followed by frames
+        // that carry the closing fragment of a tool argument, so the terminal
+        // is recorded here and `data: [DONE]` is emitted once, at stream end.
+        let mut message_stop_seen = false;
         let mut prompt_tokens = None;
         let mut completion_tokens = None;
         let mut cached_tokens = None;
@@ -342,155 +346,188 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         let mut next_tool_index = 0;
         let mut response_id = None;
         let mut response_model = None;
+        let mut pending_frames = VecDeque::new();
+        let mut upstream_ended = false;
+        let mut transport_error: Option<String> = None;
 
         loop {
-            tokio::select! {
-                chunk = stream.next() => {
-                    let Some(chunk_res) = chunk else { break; };
-                    match chunk_res {
-                        Ok(bytes) => {
-                            for frame in decoder.push(&bytes) {
-                                let data = frame.data;
-                                let event_type = frame.event;
+            if pending_frames.is_empty() {
+                if upstream_ended {
+                    break;
+                }
 
-                                // The first terminal marker closes the OpenAI stream. Ignore
-                                // duplicate or trailing Anthropic frames rather than emitting
-                                // data after [DONE].
-                                if sent_done {
-                                    continue;
-                                }
-
-                                if data.trim() == "[DONE]" {
-                                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
-                                    sent_done = true;
-                                    continue;
-                                }
-
-                                let mut event_json: serde_json::Value = match serde_json::from_str(&data) {
-                                    Ok(value) => value,
-                                    Err(_) => {
-                                        // Pass through raw data if parsing fails
-                                        let msg = format!("data: {}\n\n", data);
-                                        let _ = tx.send(Ok(Bytes::from(msg))).await;
-                                        continue;
-                                    }
-                                };
-
-                                if event_json.get("type").is_none() {
-                                    if let Some(t) = event_type.as_deref() {
-                                        event_json["type"] = serde_json::Value::String(t.to_string());
-                                    }
-                                }
-
-                                remap_anthropic_tool_call_index(
-                                    &mut event_json,
-                                    &mut tool_indices,
-                                    &mut next_tool_index,
-                                );
-
-                                let event_kind = event_json
-                                    .get("type")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_string);
-                                if event_kind.as_deref() == Some("message_start") {
-                                    response_id = event_json["message"]
-                                        .get("id")
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::to_string);
-                                    response_model = event_json["message"]
-                                        .get("model")
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::to_string);
-                                }
-                                let event_usage = match event_kind.as_deref() {
-                                    Some("message_start") => Some(&event_json["message"]["usage"]),
-                                    Some("message_delta" | "message_stop") => {
-                                        Some(&event_json["usage"])
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(event_usage) = event_usage {
-                                    prompt_tokens = event_usage
-                                        .get("input_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .or(prompt_tokens);
-                                    completion_tokens = event_usage
-                                        .get("output_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .or(completion_tokens);
-                                    cached_tokens = event_usage
-                                        .get("cache_read_input_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .or(cached_tokens);
-                                    reasoning_tokens = event_usage
-                                        .get("reasoning_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .or(reasoning_tokens);
-                                }
-
-                                let mut transformed: serde_json::Value = match transformer.transform_response(event_json) {
-                                    Ok(value) => value,
-                                    Err(_) => {
-                                        let msg = format!("data: {}\n\n", data);
-                                        let _ = tx.send(Ok(Bytes::from(msg))).await;
-                                        continue;
-                                    }
-                                };
-
-                                if let Some(id) = response_id.as_deref() {
-                                    transformed["id"] = serde_json::Value::String(id.to_string());
-                                }
-                                if let Some(model) = response_model.as_deref() {
-                                    transformed["model"] = serde_json::Value::String(model.to_string());
-                                }
-
-                                if event_kind.as_deref() == Some("message_stop") && !sent_done {
-                                    if let (Some(prompt), Some(completion)) =
-                                        (prompt_tokens, completion_tokens)
-                                    {
-                                        let mut usage = serde_json::json!({
-                                            "prompt_tokens": prompt,
-                                            "completion_tokens": completion,
-                                            "total_tokens": prompt.saturating_add(completion)
-                                        });
-                                        if let Some(cached) = cached_tokens {
-                                            usage["prompt_tokens_details"] = serde_json::json!({
-                                                "cached_tokens": cached
-                                            });
-                                        }
-                                        if let Some(reasoning) = reasoning_tokens {
-                                            usage["completion_tokens_details"] = serde_json::json!({
-                                                "reasoning_tokens": reasoning
-                                            });
-                                        }
-                                        transformed["usage"] = usage;
-                                    }
-                                }
-
-                                let msg = format!("data: {}\n\n", serde_json::to_string(&transformed).unwrap_or_default());
-                                if tx.send(Ok(Bytes::from(msg))).await.is_err() {
-                                    return; // Receiver closed
-                                }
-
-                                if event_kind.as_deref() == Some("message_stop") && !sent_done {
-                                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
-                                    sent_done = true;
-                                }
+                tokio::select! {
+                    chunk = stream.next() => {
+                        let Some(chunk_res) = chunk else {
+                            // Recover a final frame that ended without its
+                            // blank-line terminator before the body ends.
+                            pending_frames.extend(decoder.finish());
+                            upstream_ended = true;
+                            continue;
+                        };
+                        match chunk_res {
+                            Ok(bytes) => pending_frames.extend(decoder.push(&bytes)),
+                            Err(e) => {
+                                error!("Stream read error: {}", e);
+                                // A transport error can follow a complete,
+                                // newline-terminated frame whose blank-line
+                                // separator never arrived. Flush it before the
+                                // stream ends so the tail is not lost, then
+                                // surface the failure instead of [DONE].
+                                pending_frames.extend(decoder.finish());
+                                transport_error = Some(e.to_string());
+                                upstream_ended = true;
+                                continue;
                             }
                         }
-                        Err(e) => {
-                            error!("Stream read error: {}", e);
-                            break;
-                        }
+                    }
+                    _ = tx.closed() => break,
+                }
+            }
+
+            for frame in pending_frames.drain(..) {
+                let data = frame.data;
+                let event_type = frame.event;
+
+                // The upstream `[DONE]` marker ends the upstream stream, not
+                // this one: later frames can still carry tool arguments, so
+                // the marker is dropped and the OpenAI terminal is emitted
+                // once at stream end.
+                if data.trim() == "[DONE]" {
+                    continue;
+                }
+
+                let mut event_json: serde_json::Value = match serde_json::from_str(&data) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        // Pass through raw data if parsing fails
+                        let msg = format!("data: {}\n\n", data);
+                        let _ = tx.send(Ok(Bytes::from(msg))).await;
+                        continue;
+                    }
+                };
+
+                if event_json.get("type").is_none() {
+                    if let Some(t) = event_type.as_deref() {
+                        event_json["type"] = serde_json::Value::String(t.to_string());
                     }
                 }
-                _ = tx.closed() => break,
+
+                remap_anthropic_tool_call_index(
+                    &mut event_json,
+                    &mut tool_indices,
+                    &mut next_tool_index,
+                );
+
+                let event_kind = event_json
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+
+                // A repeated terminal must not produce a second usage chunk.
+                // This is tracked separately from `[DONE]`: a `[DONE]` that
+                // precedes the first `message_stop` must not discard that
+                // stop's usage.
+                if event_kind.as_deref() == Some("message_stop") {
+                    if message_stop_seen {
+                        continue;
+                    }
+                    message_stop_seen = true;
+                }
+
+                if event_kind.as_deref() == Some("message_start") {
+                    response_id = event_json["message"]
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    response_model = event_json["message"]
+                        .get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                }
+                let event_usage = match event_kind.as_deref() {
+                    Some("message_start") => Some(&event_json["message"]["usage"]),
+                    Some("message_delta" | "message_stop") => Some(&event_json["usage"]),
+                    _ => None,
+                };
+                if let Some(event_usage) = event_usage {
+                    prompt_tokens = event_usage
+                        .get("input_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .or(prompt_tokens);
+                    completion_tokens = event_usage
+                        .get("output_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .or(completion_tokens);
+                    cached_tokens = event_usage
+                        .get("cache_read_input_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .or(cached_tokens);
+                    reasoning_tokens = event_usage
+                        .get("reasoning_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .or(reasoning_tokens);
+                }
+
+                let mut transformed: serde_json::Value =
+                    match transformer.transform_response(event_json) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            let msg = format!("data: {}\n\n", data);
+                            let _ = tx.send(Ok(Bytes::from(msg))).await;
+                            continue;
+                        }
+                    };
+
+                if let Some(id) = response_id.as_deref() {
+                    transformed["id"] = serde_json::Value::String(id.to_string());
+                }
+                if let Some(model) = response_model.as_deref() {
+                    transformed["model"] = serde_json::Value::String(model.to_string());
+                }
+
+                if event_kind.as_deref() == Some("message_stop") {
+                    if let (Some(prompt), Some(completion)) = (prompt_tokens, completion_tokens) {
+                        let mut usage = serde_json::json!({
+                            "prompt_tokens": prompt,
+                            "completion_tokens": completion,
+                            "total_tokens": prompt.saturating_add(completion)
+                        });
+                        if let Some(cached) = cached_tokens {
+                            usage["prompt_tokens_details"] = serde_json::json!({
+                                "cached_tokens": cached
+                            });
+                        }
+                        if let Some(reasoning) = reasoning_tokens {
+                            usage["completion_tokens_details"] = serde_json::json!({
+                                "reasoning_tokens": reasoning
+                            });
+                        }
+                        transformed["usage"] = usage;
+                    }
+                }
+
+                let msg = format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&transformed).unwrap_or_default()
+                );
+                if tx.send(Ok(Bytes::from(msg))).await.is_err() {
+                    return; // Receiver closed
+                }
             }
         }
 
-        if !sent_done {
-            let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
+        if let Some(message) = transport_error {
+            let _ = tx
+                .send(Err(std::io::Error::other(format!(
+                    "upstream stream read error: {message}"
+                ))))
+                .await;
+            return;
         }
+
+        // One terminal, emitted after every upstream frame was forwarded.
+        let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
     });
 
     Response::from_parts(parts, Body::from_stream(ReceiverStream::new(rx)))
@@ -655,8 +692,212 @@ mod tests {
         assert!(ids.iter().all(|id| id == "resp_original"));
     }
 
+    fn data_chunks(output: &str) -> Vec<serde_json::Value> {
+        output
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .map(|data| serde_json::from_str::<serde_json::Value>(data).unwrap())
+            .collect()
+    }
+
+    fn tool_call_arguments(output: &str) -> String {
+        let mut arguments = String::new();
+        for chunk in data_chunks(output) {
+            let Some(tool_calls) = chunk["choices"][0]["delta"]["tool_calls"].as_array() else {
+                continue;
+            };
+            for call in tool_calls {
+                if let Some(fragment) = call["function"]["arguments"].as_str() {
+                    arguments.push_str(fragment);
+                }
+            }
+        }
+        arguments
+    }
+
+    fn tool_stream_body(last_frame_terminator: &str) -> String {
+        [
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"id":"msg_1","model":"minimax","usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            "\n\n",
+            "event: content_block_start\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"record_blob","input":{}}}"#,
+            "\n\n",
+            "event: content_block_delta\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"blob\":\"alpha-42\""}}"#,
+            "\n\n",
+            "event: message_stop\n",
+            r#"data: {"type":"message_stop"}"#,
+            "\n\n",
+            "event: content_block_delta\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"}"}}"#,
+            last_frame_terminator,
+        ]
+        .concat()
+    }
+
     #[tokio::test]
-    async fn json_only_message_stop_terminates_before_later_frames() {
+    async fn late_input_json_delta_after_message_stop_is_forwarded() {
+        let body = tool_stream_body("\n\n");
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert_eq!(tool_call_arguments(&output), "{\"blob\":\"alpha-42\"}");
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
+        assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn final_frame_without_blank_line_terminator_is_recovered() {
+        let body = tool_stream_body("\n");
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert_eq!(tool_call_arguments(&output), "{\"blob\":\"alpha-42\"}");
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
+        assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn read_error_after_newline_terminated_tail_forwards_tail_then_fails() {
+        let body = tool_stream_body("\n");
+        let stream = futures::stream::iter([
+            Ok::<Bytes, std::io::Error>(Bytes::from(body)),
+            Err(std::io::Error::other("upstream read failed")),
+        ]);
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from_stream(stream))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let mut data = converted.into_body().into_data_stream();
+        let mut output = String::new();
+        let mut failed = false;
+        while let Some(item) = data.next().await {
+            match item {
+                Ok(bytes) => output.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(error) => {
+                    assert!(
+                        error.to_string().contains("upstream read failed"),
+                        "unexpected error: {error}"
+                    );
+                    failed = true;
+                }
+            }
+        }
+
+        assert!(failed, "a transport error must reach the client");
+        assert_eq!(tool_call_arguments(&output), "{\"blob\":\"alpha-42\"}");
+        assert!(
+            !output.contains("data: [DONE]"),
+            "no clean terminal after a transport error: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_message_stop_events_emit_one_terminal() {
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+            "data: {\"type\":\"message_stop\",\"usage\":{\"output_tokens\":2}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"record_blob\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+            "data: {\"type\":\"message_stop\",\"usage\":{\"output_tokens\":2}}\n\n",
+        );
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
+        assert_eq!(output.matches("\"total_tokens\":3").count(), 1);
+        assert!(output.contains("\"arguments\":\"{}\""));
+        assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn done_marker_before_message_stop_preserves_usage() {
+        let body = concat!(
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":3,"output_tokens":0}}}"#,
+            "\n\n",
+            "data: [DONE]\n\n",
+            "event: message_stop\n",
+            r#"data: {"type":"message_stop","usage":{"input_tokens":3,"output_tokens":5}}"#,
+            "\n\n",
+        );
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+
+        let chunks = data_chunks(&output);
+        let usage = chunks
+            .iter()
+            .filter_map(|chunk| chunk.get("usage"))
+            .last()
+            .expect("the message_stop usage chunk is emitted");
+        assert_eq!(usage["prompt_tokens"], 3);
+        assert_eq!(usage["completion_tokens"], 5);
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn done_marker_before_trailing_delta_forwards_delta_first() {
+        let body = concat!(
+            "event: content_block_start\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"record_blob","input":{}}}"#,
+            "\n\n",
+            "event: content_block_delta\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"blob\":\"alpha-42\""}}"#,
+            "\n\n",
+            "data: [DONE]\n\n",
+            "event: content_block_delta\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"}"}}"#,
+            "\n\n",
+        );
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert_eq!(tool_call_arguments(&output), "{\"blob\":\"alpha-42\"}");
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
+        assert!(output.ends_with("data: [DONE]\n\n"));
+        let last_chunk = data_chunks(&output).pop().unwrap();
+        assert_eq!(
+            last_chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "}"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_only_message_stop_forwards_later_frames() {
         let body = concat!(
             "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
             "data: {\"type\":\"message_stop\",\"usage\":{\"output_tokens\":2}}\n\n",
@@ -672,7 +913,7 @@ mod tests {
         let output = String::from_utf8(bytes.to_vec()).unwrap();
 
         assert_eq!(output.matches("data: [DONE]").count(), 1);
-        assert!(!output.contains("late"));
+        assert!(output.contains("late"));
         assert!(output.ends_with("data: [DONE]\n\n"));
     }
 
