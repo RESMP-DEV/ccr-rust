@@ -353,7 +353,17 @@ pub(super) fn translate_stream_chunk_to_anthropic(
                         .as_ref()
                         .and_then(|f| f.name.as_ref())
                         .is_some();
-                if has_tool_identity && !state.active_tool_indices.contains(&tool_index) {
+                let arguments = tool_call
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.arguments.as_ref())
+                    .filter(|a| !a.is_empty());
+                // Open the block before any argument fragment, even when the
+                // provider omits `id`/`name`. A repeated identity still must
+                // not restart the block.
+                if !state.active_tool_indices.contains(&tool_index)
+                    && (has_tool_identity || arguments.is_some())
+                {
                     events.push(AnthropicStreamEvent {
                         event_type: "content_block_start".to_string(),
                         message: None,
@@ -379,12 +389,7 @@ pub(super) fn translate_stream_chunk_to_anthropic(
                     state.active_tool_indices.push(tool_index);
                 }
 
-                if let Some(arguments) = tool_call
-                    .function
-                    .as_ref()
-                    .and_then(|f| f.arguments.as_ref())
-                    .filter(|a| !a.is_empty())
-                {
+                if let Some(arguments) = arguments {
                     state
                         .tool_arguments
                         .entry(tool_index)
@@ -647,6 +652,30 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "content_block_delta");
+        assert_eq!(state.active_tool_indices, vec![1]);
+    }
+
+    #[test]
+    fn an_argument_only_tool_call_still_starts_its_content_block() {
+        let mut state = StreamTranslationState::new();
+        let events = translate_stream_chunk_to_anthropic(
+            &chunk(
+                tool_delta(vec![tool_call(0, None, None, Some("{\"path\":"))]),
+                None,
+            ),
+            &mut state,
+        );
+
+        let tool_event_types: Vec<&str> = events
+            .iter()
+            .filter(|event| event.index == Some(1))
+            .map(|event| event.event_type.as_str())
+            .collect();
+        assert_eq!(
+            tool_event_types,
+            vec!["content_block_start", "content_block_delta"],
+            "an argument fragment without id/name must open the block first"
+        );
         assert_eq!(state.active_tool_indices, vec![1]);
     }
 

@@ -48,7 +48,7 @@ SOURCE_ROOT = ROOT / "src"
 # day for the review round: CR resync handling, per-line serialization of
 # recovered multi-line payloads, and validated message_stop framing.
 # Hotspots are pinned at measured values.
-TOTAL_CEILING = 45_992
+TOTAL_CEILING = 46_019
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
 # baseline. They may shrink or be split, but cannot grow while the ratchet is
