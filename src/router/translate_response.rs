@@ -175,20 +175,50 @@ pub(super) struct StreamTranslationState {
     pub closed_block_indices: Vec<usize>,
     /// Accumulated `input_json_delta.partial_json` per Anthropic tool block index.
     pub tool_arguments: BTreeMap<usize, String>,
-    /// Argument fragments that arrived before the tool identity. They are
-    /// replayed once the identity arrives, or at end of stream with a
-    /// placeholder identity, so `content_block_start` always precedes the
-    /// first `input_json_delta`.
+    /// Upstream tool index -> Anthropic block index, assigned in block-start
+    /// order so the client never sees a gap.
+    pub tool_index_map: BTreeMap<usize, usize>,
+    /// Next Anthropic index for a tool block; the text block owns index 0.
+    pub next_tool_block_index: usize,
+    /// Identity fragments per upstream tool index. A block starts only once
+    /// both `id` and `name` are known, unless the stream ends first.
+    pub tool_identities: BTreeMap<usize, ToolIdentity>,
+    /// Argument fragments that arrived before the tool identity, keyed by
+    /// upstream tool index. They are replayed once the identity arrives, or
+    /// at end of stream with a placeholder identity, so
+    /// `content_block_start` always precedes the first `input_json_delta`.
     pub pending_tool_fragments: BTreeMap<usize, Vec<String>>,
+}
+
+/// The `id` and `name` of one tool call, accumulated across chunks.
+#[derive(Debug, Default, Clone)]
+pub(super) struct ToolIdentity {
+    pub id: Option<String>,
+    pub name: Option<String>,
 }
 
 impl StreamTranslationState {
     pub fn new() -> Self {
         Self {
             is_first: true,
+            next_tool_block_index: 1,
             ..Default::default()
         }
     }
+}
+
+/// Assign the Anthropic block index for an upstream tool index. Indices are
+/// handed out in the order blocks actually start, not in upstream order, so a
+/// buffered tool cannot leave a hole that makes the client's block list
+/// shorter than the index used by its later events.
+fn assign_tool_block_index(state: &mut StreamTranslationState, upstream_index: usize) -> usize {
+    if let Some(anthropic_index) = state.tool_index_map.get(&upstream_index) {
+        return *anthropic_index;
+    }
+    let anthropic_index = state.next_tool_block_index;
+    state.next_tool_block_index += 1;
+    state.tool_index_map.insert(upstream_index, anthropic_index);
+    anthropic_index
 }
 
 /// Build a `content_block_stop` event for one Anthropic block index.
@@ -249,12 +279,19 @@ fn tool_block_start_event(
 /// Replay argument fragments that were buffered before the tool identity.
 fn replay_pending_tool_fragments(
     state: &mut StreamTranslationState,
-    index: usize,
+    upstream_index: usize,
+    anthropic_index: usize,
 ) -> Vec<AnthropicStreamEvent> {
     let mut events = Vec::new();
-    if let Some(fragments) = state.pending_tool_fragments.remove(&index) {
+    if let Some(fragments) = state.pending_tool_fragments.remove(&upstream_index) {
         if !fragments.is_empty() {
-            events.push(input_json_delta_event(index, &fragments.concat()));
+            let arguments = fragments.concat();
+            state
+                .tool_arguments
+                .entry(anthropic_index)
+                .or_default()
+                .push_str(&arguments);
+            events.push(input_json_delta_event(anthropic_index, &arguments));
         }
     }
     events
@@ -267,30 +304,40 @@ pub(super) fn flush_pending_tool_fragments(
     state: &mut StreamTranslationState,
 ) -> Vec<AnthropicStreamEvent> {
     let mut events = Vec::new();
-    for index in state
+    for upstream_index in state
         .pending_tool_fragments
         .keys()
         .cloned()
         .collect::<Vec<_>>()
     {
-        if state.active_tool_indices.contains(&index) {
+        if state.tool_index_map.contains_key(&upstream_index) {
             continue;
         }
-        events.push(tool_block_start_event(index, None, None));
-        state.active_tool_indices.push(index);
-        events.extend(replay_pending_tool_fragments(state, index));
+        let anthropic_index = assign_tool_block_index(state, upstream_index);
+        let identity = state.tool_identities.get(&upstream_index);
+        events.push(tool_block_start_event(
+            anthropic_index,
+            identity.and_then(|identity| identity.id.as_deref()),
+            identity.and_then(|identity| identity.name.as_deref()),
+        ));
+        state.active_tool_indices.push(anthropic_index);
+        events.extend(replay_pending_tool_fragments(
+            state,
+            upstream_index,
+            anthropic_index,
+        ));
     }
     events
 }
 
 /// Close every content block that is still open.
 ///
-/// Called when a finish reason arrives and again at end of stream. Blocks that
-/// are already closed are remembered, so each block is stopped exactly once
-/// whether the stream ended with a finish reason, without one, on idle
-/// timeout, or on an upstream read error. A tool block that never received
-/// arguments gets a `{}` delta first, so its accumulated input stays valid
-/// JSON for the client.
+/// Called at end of stream, after the decoder drain, so late argument frames
+/// are emitted before any stop. Blocks that are already closed are
+/// remembered, so each block is stopped exactly once whether the stream
+/// ended with a finish reason, without one, on idle timeout, or on an
+/// upstream read error. A tool block that never received arguments gets a
+/// `{}` delta first, so its accumulated input stays valid JSON for the client.
 pub(super) fn close_open_content_blocks(
     state: &mut StreamTranslationState,
 ) -> Vec<AnthropicStreamEvent> {
@@ -320,21 +367,26 @@ pub(super) fn close_open_content_blocks(
     events
 }
 
-/// Started tool blocks whose accumulated `partial_json` is not valid JSON.
+/// Started tool blocks whose accumulated `partial_json` is not a JSON object.
 ///
 /// A stream that loses its final frames leaves the tool arguments cut at
 /// container depth 1, which the client reports as `EOF while parsing an
-/// object`. Terminal-time validation surfaces the truncation instead of
-/// closing the message as if it succeeded.
+/// object`. Anthropic also requires `tool_use.input` to be an object, so an
+/// array or scalar is refused as well. Terminal-time validation surfaces the
+/// problem instead of closing the message as if it succeeded.
 pub(super) fn invalid_tool_arguments(state: &StreamTranslationState) -> Vec<(usize, String)> {
     state
         .active_tool_indices
         .iter()
         .filter_map(|index| {
             let arguments = state.tool_arguments.get(index)?;
-            if arguments.is_empty() || serde_json::from_str::<serde_json::Value>(arguments).is_ok()
-            {
+            if arguments.is_empty() {
                 return None;
+            }
+            match serde_json::from_str::<serde_json::Value>(arguments) {
+                Ok(serde_json::Value::Object(_)) => return None,
+                Ok(_) => {}
+                Err(_) => {}
             }
             Some((*index, arguments.clone()))
         })
@@ -409,36 +461,41 @@ pub(super) fn translate_stream_chunk_to_anthropic(
 
         if let Some(tool_calls) = &choice.delta.tool_calls {
             for tool_call in tool_calls {
-                let tool_index = tool_call.index + 1;
-
-                // `content_block_start` is emitted at most once per tool
-                // index. A provider that repeats `id`/`name` on every chunk
-                // must not make the client reset the block and lose the
-                // accumulated `partial_json`.
-                let has_tool_identity = tool_call.id.is_some()
-                    || tool_call
-                        .function
-                        .as_ref()
-                        .and_then(|f| f.name.as_ref())
-                        .is_some();
+                let upstream_index = tool_call.index;
+                // Identity fields can arrive in separate chunks; accumulate
+                // them so the block starts once with both id and name.
+                let identity = state.tool_identities.entry(upstream_index).or_default();
+                if let Some(id) = &tool_call.id {
+                    identity.id = Some(id.clone());
+                }
+                if let Some(name) = tool_call.function.as_ref().and_then(|f| f.name.as_ref()) {
+                    identity.name = Some(name.clone());
+                }
+                let has_complete_identity = identity.id.is_some() && identity.name.is_some();
                 let arguments = tool_call
                     .function
                     .as_ref()
                     .and_then(|f| f.arguments.as_ref())
                     .filter(|a| !a.is_empty());
-                let block_open = state.active_tool_indices.contains(&tool_index);
-                if !block_open && has_tool_identity {
+                let block_open = state.tool_index_map.contains_key(&upstream_index);
+                if !block_open && has_complete_identity {
                     // `content_block_start` is emitted at most once per tool
-                    // index. A provider that repeats `id`/`name` on every
-                    // chunk must not make the client reset the block and lose
-                    // the accumulated `partial_json`.
+                    // index, in block-start order. A provider that repeats
+                    // `id`/`name` on every chunk must not make the client
+                    // reset the block and lose the accumulated `partial_json`.
+                    let anthropic_index = assign_tool_block_index(state, upstream_index);
+                    let identity = state.tool_identities.get(&upstream_index);
                     events.push(tool_block_start_event(
-                        tool_index,
-                        tool_call.id.as_deref(),
-                        tool_call.function.as_ref().and_then(|f| f.name.as_deref()),
+                        anthropic_index,
+                        identity.and_then(|identity| identity.id.as_deref()),
+                        identity.and_then(|identity| identity.name.as_deref()),
                     ));
-                    state.active_tool_indices.push(tool_index);
-                    events.extend(replay_pending_tool_fragments(state, tool_index));
+                    state.active_tool_indices.push(anthropic_index);
+                    events.extend(replay_pending_tool_fragments(
+                        state,
+                        upstream_index,
+                        anthropic_index,
+                    ));
                 } else if !block_open {
                     // Arguments can arrive before the identity. Buffer them so
                     // the block opens with its real id/name; if the identity
@@ -446,33 +503,28 @@ pub(super) fn translate_stream_chunk_to_anthropic(
                     // placeholder.
                     if let Some(arguments) = arguments {
                         state
-                            .tool_arguments
-                            .entry(tool_index)
-                            .or_default()
-                            .push_str(arguments);
-                        state
                             .pending_tool_fragments
-                            .entry(tool_index)
+                            .entry(upstream_index)
                             .or_default()
                             .push(arguments.to_string());
                     }
                     continue;
                 }
 
+                let anthropic_index = state.tool_index_map[&upstream_index];
                 if let Some(arguments) = arguments {
                     state
                         .tool_arguments
-                        .entry(tool_index)
+                        .entry(anthropic_index)
                         .or_default()
                         .push_str(arguments);
-                    events.push(input_json_delta_event(tool_index, arguments));
+                    events.push(input_json_delta_event(anthropic_index, arguments));
                 }
             }
         }
 
         if let Some(ref reason) = choice.finish_reason {
             state.finish_reason = Some(reason.clone());
-            events.extend(close_open_content_blocks(state));
         }
     }
 
@@ -644,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn a_finish_reason_closes_every_block_once() {
+    fn a_finish_reason_defers_block_closure_to_the_terminal() {
         let mut state = StreamTranslationState::new();
         translate_stream_chunk_to_anthropic(&chunk(text_delta("hi"), None), &mut state);
         translate_stream_chunk_to_anthropic(
@@ -659,15 +711,24 @@ mod tests {
             &chunk(OpenAIDelta::default(), Some("tool_calls")),
             &mut state,
         );
-        let stops: Vec<usize> = events
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "content_block_stop"),
+            "a finish chunk must leave blocks open for late arguments: {events:?}"
+        );
+        assert_eq!(state.finish_reason.as_deref(), Some("tool_calls"));
+
+        let stops = close_open_content_blocks(&mut state);
+        let stopped_indices: Vec<usize> = stops
             .iter()
             .filter(|event| event.event_type == "content_block_stop")
             .filter_map(|event| event.index)
             .collect();
-        assert_eq!(stops, vec![0, 1]);
+        assert_eq!(stopped_indices, vec![0, 1]);
         // The tool block never received arguments, so it gets a `{}`
         // placeholder delta before its stop.
-        assert!(events.iter().any(|event| {
+        assert!(stops.iter().any(|event| {
             event.event_type == "content_block_delta"
                 && event
                     .delta
@@ -808,6 +869,176 @@ mod tests {
             "a tool call that never gets an identity must still start, carry its arguments, and stop"
         );
         assert_eq!(state.active_tool_indices, vec![1]);
+    }
+
+    #[test]
+    fn an_identity_split_across_chunks_starts_the_block_once() {
+        let mut state = StreamTranslationState::new();
+        let events = translate_stream_chunk_to_anthropic(
+            &chunk(
+                tool_delta(vec![tool_call(0, Some("call_split"), None, None)]),
+                None,
+            ),
+            &mut state,
+        );
+        assert!(
+            events.iter().all(|event| event.index != Some(1)),
+            "an id without a name must not open the block: {events:?}"
+        );
+
+        let events = translate_stream_chunk_to_anthropic(
+            &chunk(
+                tool_delta(vec![tool_call(0, None, Some("read_file"), None)]),
+                None,
+            ),
+            &mut state,
+        );
+        let started = events
+            .iter()
+            .find(|event| event.index == Some(1) && event.event_type == "content_block_start")
+            .and_then(|event| event.content_block.as_ref());
+        assert_eq!(
+            started.map(|block| block["id"].as_str().unwrap()),
+            Some("call_split"),
+            "the accumulated id must be used once the name arrives"
+        );
+        assert_eq!(
+            started.map(|block| block["name"].as_str().unwrap()),
+            Some("read_file")
+        );
+
+        let events = translate_stream_chunk_to_anthropic(
+            &chunk(
+                tool_delta(vec![tool_call(0, None, None, Some("{\"path\":"))]),
+                None,
+            ),
+            &mut state,
+        );
+        let delta = events
+            .iter()
+            .find(|event| event.index == Some(1) && event.event_type == "content_block_delta")
+            .and_then(|event| event.delta.as_ref())
+            .and_then(|delta| delta["partial_json"].as_str());
+        assert_eq!(delta, Some("{\"path\":"));
+    }
+
+    #[test]
+    fn block_indices_follow_start_order_not_upstream_order() {
+        let mut state = StreamTranslationState::new();
+        // Tool 0 has arguments but no identity, so it stays buffered.
+        translate_stream_chunk_to_anthropic(
+            &chunk(
+                tool_delta(vec![tool_call(0, None, None, Some("{\"a\":1}"))]),
+                None,
+            ),
+            &mut state,
+        );
+        // Tool 1 has a complete identity, so it starts at Anthropic index 1.
+        let events = translate_stream_chunk_to_anthropic(
+            &chunk(
+                tool_delta(vec![tool_call(
+                    1,
+                    Some("call_second"),
+                    Some("read_file"),
+                    Some("{\"path\":\"a\"}"),
+                )]),
+                None,
+            ),
+            &mut state,
+        );
+        let started_indices: Vec<Option<usize>> = events
+            .iter()
+            .filter(|event| event.event_type == "content_block_start")
+            .map(|event| event.index)
+            .collect();
+        assert_eq!(started_indices, vec![Some(1)]);
+
+        // The buffered tool 0 opens at the next index during the terminal flush.
+        let stops = close_open_content_blocks(&mut state);
+        let flushed_start = stops
+            .iter()
+            .find(|event| event.event_type == "content_block_start")
+            .expect("the buffered tool opens at terminal time");
+        assert_eq!(flushed_start.index, Some(2));
+        assert_eq!(
+            stops
+                .iter()
+                .filter(|event| event.event_type == "content_block_stop")
+                .map(|event| event.index)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn a_finish_chunk_does_not_stop_tool_blocks_before_late_arguments() {
+        let mut state = StreamTranslationState::new();
+        let events = translate_stream_chunk_to_anthropic(
+            &chunk(
+                tool_delta(vec![tool_call(
+                    0,
+                    Some("call_late"),
+                    Some("write_file"),
+                    Some("{\"content\":\"abc"),
+                )]),
+                Some("tool_calls"),
+            ),
+            &mut state,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "content_block_stop"),
+            "a finish chunk must not close tool blocks before late arguments: {events:?}"
+        );
+
+        let events = translate_stream_chunk_to_anthropic(
+            &chunk(
+                tool_delta(vec![tool_call(0, None, None, Some("def\"}"))]),
+                None,
+            ),
+            &mut state,
+        );
+        let late_delta = events
+            .iter()
+            .find(|event| event.event_type == "content_block_delta")
+            .and_then(|event| event.delta.as_ref())
+            .and_then(|delta| delta["partial_json"].as_str());
+        assert_eq!(late_delta, Some("def\"}"));
+        assert_eq!(
+            state.tool_arguments.get(&1).map(String::as_str),
+            Some("{\"content\":\"abcdef\"}")
+        );
+
+        let stops = close_open_content_blocks(&mut state);
+        assert!(
+            stops
+                .iter()
+                .any(|event| event.event_type == "content_block_stop" && event.index == Some(1)),
+            "the tool block closes at terminal time: {stops:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_tool_arguments_rejects_non_object_json() {
+        let mut state = StreamTranslationState::new();
+        translate_stream_chunk_to_anthropic(
+            &chunk(
+                tool_delta(vec![tool_call(
+                    0,
+                    Some("call_array"),
+                    Some("list_files"),
+                    Some("[]"),
+                )]),
+                None,
+            ),
+            &mut state,
+        );
+
+        let invalid = invalid_tool_arguments(&state);
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].0, 1);
+        assert_eq!(invalid[0].1, "[]");
     }
 
     #[test]

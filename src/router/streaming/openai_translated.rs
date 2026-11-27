@@ -23,18 +23,15 @@ use tracing::{trace, warn};
 // Streaming Response Translation
 // ============================================================================
 
-/// Emit the terminal Anthropic events for a translated OpenAI stream.
+/// Close every open content block and report truncated tool arguments.
 ///
-/// Every content block that is still open is closed exactly once, truncated
-/// tool arguments are reported before the terminal `message_stop`, and the
-/// message ends with `message_delta` plus `message_stop`. A stream that never
-/// saw a finish reason reports `stop_reason: null`, so a conforming client can
-/// tell the message did not complete normally.
-async fn send_translated_terminal_events(
+/// Returns true when at least one tool block had invalid arguments. The
+/// caller uses that outcome to decide whether the message may report a
+/// normal terminal and whether the attempt counts as a route success.
+async fn close_translated_blocks(
     tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
     state: &mut StreamTranslationState,
-    usage: AnthropicUsage,
-) {
+) -> bool {
     for event in close_open_content_blocks(state) {
         let event_json = serde_json::to_string(&event).unwrap_or_default();
         let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
@@ -56,13 +53,29 @@ async fn send_translated_terminal_events(
         let sse_data = format!("event: error\ndata: {}\n\n", payload);
         let _ = tx.send(Ok(Bytes::from(sse_data))).await;
     }
+    !invalid_arguments.is_empty()
+}
 
+/// Emit the terminal Anthropic events for a translated OpenAI stream.
+///
+/// Every content block that is still open is closed exactly once, truncated
+/// tool arguments are reported before the terminal `message_stop`, and the
+/// message ends with `message_delta` plus `message_stop`. A stream that never
+/// saw a finish reason reports `stop_reason: null`, so a conforming client can
+/// tell the message did not complete normally. Returns whether invalid tool
+/// arguments were reported.
+async fn send_translated_terminal_events(
+    tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+    state: &mut StreamTranslationState,
+    usage: AnthropicUsage,
+) -> bool {
+    let has_invalid_arguments = close_translated_blocks(tx, state).await;
     // Tool arguments that never formed valid JSON mean the message did not
     // complete normally, so the terminal never reports a mapped stop reason.
-    let finish_reason = if invalid_arguments.is_empty() {
-        state.finish_reason.as_deref()
-    } else {
+    let finish_reason = if has_invalid_arguments {
         None
+    } else {
+        state.finish_reason.as_deref()
     };
 
     for event in create_stream_stop_events(Some(usage), finish_reason) {
@@ -70,6 +83,7 @@ async fn send_translated_terminal_events(
         let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
         let _ = tx.send(Ok(Bytes::from(sse_data))).await;
     }
+    has_invalid_arguments
 }
 
 /// Stream response with OpenAI -> Anthropic translation.
@@ -249,6 +263,12 @@ pub async fn stream_response_translated(
                                 handle_openai_frame!(frame, finish_forwarded);
                                 let _ = finish_forwarded;
                             }
+                            // Close the blocks the tail opened before the
+                            // body error, so the client does not keep a tool
+                            // block open across a failed stream. The message
+                            // terminal stays unsent: this stream did not
+                            // complete.
+                            close_translated_blocks(&tx, &mut translation_state).await;
                             let _ = tx
                                 .send(Err(std::io::Error::other(e.to_string())))
                                 .await;
@@ -352,19 +372,17 @@ pub async fn stream_response_translated(
 
         if ended_with_timeout {
             // An idle timeout is not a clean completion: close the open
-            // content blocks and report the terminal, but do not record usage
-            // or route success for a stream that never finished.
-            send_translated_terminal_events(
-                &tx,
-                &mut translation_state,
-                usage.clone().unwrap_or_default(),
-            )
-            .await;
+            // content blocks and report truncated tool arguments, but do not
+            // emit a success-shaped `message_delta`/`message_stop` terminal,
+            // and do not record usage or route success for a stream that
+            // never finished.
+            close_translated_blocks(&tx, &mut translation_state).await;
             return;
         }
 
+        let mut has_invalid_arguments = false;
         if !transport_error {
-            send_translated_terminal_events(
+            has_invalid_arguments = send_translated_terminal_events(
                 &tx,
                 &mut translation_state,
                 usage.clone().unwrap_or_default(),
@@ -421,7 +439,7 @@ pub async fn stream_response_translated(
 
             // Clear rate limit backoff and update rate limit state on successful stream completion.
             // A mid-stream upstream error or client disconnect is not a success signal for the route.
-            if upstream_completed_cleanly {
+            if upstream_completed_cleanly && !has_invalid_arguments {
                 if let Some(permit) = ctx.admission_permit.as_ref() {
                     permit.record_success();
                 }

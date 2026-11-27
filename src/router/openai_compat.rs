@@ -337,7 +337,7 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
         // facts. A terminal upstream frame can still be followed by frames
         // that carry the closing fragment of a tool argument, so the terminal
         // is recorded here and `data: [DONE]` is emitted once, at stream end.
-        let mut terminal_seen = false;
+        let mut message_stop_seen = false;
         let mut prompt_tokens = None;
         let mut completion_tokens = None;
         let mut cached_tokens = None;
@@ -391,9 +391,9 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
 
                 // The upstream `[DONE]` marker ends the upstream stream, not
                 // this one: later frames can still carry tool arguments, so
-                // the marker only records that a terminal was seen.
+                // the marker is dropped and the OpenAI terminal is emitted
+                // once at stream end.
                 if data.trim() == "[DONE]" {
-                    terminal_seen = true;
                     continue;
                 }
 
@@ -425,8 +425,14 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                     .map(str::to_string);
 
                 // A repeated terminal must not produce a second usage chunk.
-                if event_kind.as_deref() == Some("message_stop") && terminal_seen {
-                    continue;
+                // This is tracked separately from `[DONE]`: a `[DONE]` that
+                // precedes the first `message_stop` must not discard that
+                // stop's usage.
+                if event_kind.as_deref() == Some("message_stop") {
+                    if message_stop_seen {
+                        continue;
+                    }
+                    message_stop_seen = true;
                 }
 
                 if event_kind.as_deref() == Some("message_start") {
@@ -481,7 +487,6 @@ async fn convert_anthropic_stream_response_to_openai(response: Response) -> Resp
                 }
 
                 if event_kind.as_deref() == Some("message_stop") {
-                    terminal_seen = true;
                     if let (Some(prompt), Some(completion)) = (prompt_tokens, completion_tokens) {
                         let mut usage = serde_json::json!({
                             "prompt_tokens": prompt,
@@ -825,6 +830,37 @@ mod tests {
         assert_eq!(output.matches("\"total_tokens\":3").count(), 1);
         assert!(output.contains("\"arguments\":\"{}\""));
         assert!(output.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn done_marker_before_message_stop_preserves_usage() {
+        let body = concat!(
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":3,"output_tokens":0}}}"#,
+            "\n\n",
+            "data: [DONE]\n\n",
+            "event: message_stop\n",
+            r#"data: {"type":"message_stop","usage":{"input_tokens":3,"output_tokens":5}}"#,
+            "\n\n",
+        );
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(body))
+            .unwrap();
+
+        let converted = convert_anthropic_stream_response_to_openai(response).await;
+        let bytes = to_bytes(converted.into_body(), usize::MAX).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+
+        let chunks = data_chunks(&output);
+        let usage = chunks
+            .iter()
+            .filter_map(|chunk| chunk.get("usage"))
+            .last()
+            .expect("the message_stop usage chunk is emitted");
+        assert_eq!(usage["prompt_tokens"], 3);
+        assert_eq!(usage["completion_tokens"], 5);
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
     }
 
     #[tokio::test]

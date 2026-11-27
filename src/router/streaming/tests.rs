@@ -792,29 +792,41 @@ async fn upstream_read_error_flushes_the_pending_frame_before_the_error() {
 
     let response =
         stream_response_translated(byte_stream, 8, None, "model", TransformerChain::new()).await;
-    let mut body = String::new();
+    let mut body_before_error = String::new();
+    let mut body_after_error = String::new();
     let mut saw_error = false;
-    {
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut stream = response.into_body().into_data_stream();
         while let Some(item) = stream.next().await {
             match item {
-                Ok(bytes) => body.push_str(&String::from_utf8_lossy(&bytes)),
-                Err(_) => {
-                    saw_error = true;
-                    break;
+                Ok(bytes) => {
+                    let chunk = String::from_utf8_lossy(&bytes);
+                    if saw_error {
+                        body_after_error.push_str(&chunk);
+                    } else {
+                        body_before_error.push_str(&chunk);
+                    }
                 }
+                Err(_) => saw_error = true,
             }
         }
-    }
+    })
+    .await
+    .is_ok();
 
+    assert!(drained, "the body must close after the transport error");
     assert!(saw_error, "the transport error must still reach the client");
     assert!(
-        body.contains("tail"),
-        "the pending final frame must be flushed before the transport error: {body}"
+        body_before_error.contains("tail"),
+        "the pending final frame must be flushed before the transport error: {body_before_error}"
     );
     assert!(
-        !body.contains("event: message_stop"),
-        "no successful terminal after a transport error: {body}"
+        !body_before_error.contains("event: message_stop"),
+        "no successful terminal before a transport error: {body_before_error}"
+    );
+    assert!(
+        !body_after_error.contains("event: message_stop"),
+        "no successful terminal after a transport error: {body_after_error}"
     );
 }
 
