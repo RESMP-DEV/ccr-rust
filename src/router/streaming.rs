@@ -88,6 +88,7 @@ pub async fn stream_response_translated(
         let mut ended_with_timeout = false;
         let mut saw_openai_terminal = false;
         let mut upstream_completed_cleanly = true;
+        let mut transport_error = false;
 
         macro_rules! handle_openai_frame {
             ($frame:expr, $forwarded:ident) => {{
@@ -198,7 +199,6 @@ pub async fn stream_response_translated(
                         "CCR stream idle timeout"
                     );
                     record_failure(&tier_name, "stream_idle_timeout");
-                    send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
                     ended_with_timeout = true;
                     break;
                 }
@@ -217,10 +217,18 @@ pub async fn stream_response_translated(
                             }
                         }
                         Err(e) => {
+                            upstream_completed_cleanly = false;
+                            // Recover the pending final frame before the
+                            // transport error reaches the client.
+                            let mut finish_forwarded = false;
+                            for frame in decoder.finish() {
+                                handle_openai_frame!(frame, finish_forwarded);
+                            }
+                            let _ = finish_forwarded;
                             let _ = tx
                                 .send(Err(std::io::Error::other(e.to_string())))
                                 .await;
-                            upstream_completed_cleanly = false;
+                            transport_error = true;
                             break;
                         }
                     }
@@ -233,15 +241,20 @@ pub async fn stream_response_translated(
             }
         }
 
-        if ended_with_timeout {
-            return;
-        }
-
-        let mut finish_forwarded;
+        // The macro requires a forwarding place; the value is intentionally
+        // unused in the terminal flush.
+        #[allow(unused_assignments)]
+        let mut finish_forwarded = false;
         for frame in decoder.finish() {
             handle_openai_frame!(frame, finish_forwarded);
             let _ = finish_forwarded;
         }
+
+        if ended_with_timeout {
+            send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
+            return;
+        }
+
         upstream_completed_cleanly &= saw_openai_terminal;
 
         // Send final stop events
@@ -314,12 +327,16 @@ pub async fn stream_response_translated(
             }
         }
 
-        let stop_events =
-            create_stream_stop_events(usage.clone(), translation_state.finish_reason.as_deref());
-        for event in stop_events {
-            let event_json = serde_json::to_string(&event).unwrap_or_default();
-            let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
-            let _ = tx.send(Ok(Bytes::from(sse_data))).await;
+        if !transport_error {
+            let stop_events = create_stream_stop_events(
+                usage.clone(),
+                translation_state.finish_reason.as_deref(),
+            );
+            for event in stop_events {
+                let event_json = serde_json::to_string(&event).unwrap_or_default();
+                let sse_data = format!("event: {}\ndata: {}\n\n", event.event_type, event_json);
+                let _ = tx.send(Ok(Bytes::from(sse_data))).await;
+            }
         }
 
         // Record usage and verify token drift if we have context
@@ -571,7 +588,6 @@ pub async fn stream_anthropic_response_with_tracking(
                         "CCR stream idle timeout"
                     );
                     record_failure(&tier_name, "stream_idle_timeout");
-                    send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
                     ended_with_timeout = true;
                     break;
                 }
@@ -590,8 +606,15 @@ pub async fn stream_anthropic_response_with_tracking(
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                             upstream_completed_cleanly = false;
+                            // Recover the pending final frame before the
+                            // transport error reaches the client.
+                            let mut finish_forwarded = false;
+                            for frame in decoder.finish() {
+                                handle_anthropic_frame!(frame, finish_forwarded);
+                            }
+                            let _ = finish_forwarded;
+                            let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                             break;
                         }
                     }
@@ -604,15 +627,20 @@ pub async fn stream_anthropic_response_with_tracking(
             }
         }
 
-        if ended_with_timeout {
-            return;
-        }
-
-        let mut finish_forwarded;
+        // The macro requires a forwarding place; the value is intentionally
+        // unused in the terminal flush.
+        #[allow(unused_assignments)]
+        let mut finish_forwarded = false;
         for frame in decoder.finish() {
             handle_anthropic_frame!(frame, finish_forwarded);
             let _ = finish_forwarded;
         }
+
+        if ended_with_timeout {
+            send_stream_timeout_error(&tx, &tier_name, idle_timeout).await;
+            return;
+        }
+
         upstream_completed_cleanly &= saw_message_stop;
 
         // Anthropic-style usage reports the uncached prompt slice in
@@ -1239,6 +1267,122 @@ data: [DONE]
             .and_then(|event| event["delta"]["stop_reason"].as_str())
             .expect("flushed finish_reason should set stop_reason");
         assert_eq!(stop_reason, "tool_use");
+    }
+
+    #[tokio::test]
+    async fn read_error_flushes_the_pending_frame_before_the_error() {
+        let final_chunk = serde_json::json!({
+            "id": "chatcmpl-read-error",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_read_error",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"Paris\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        // The data line is complete, but the blank-line separator never
+        // arrives before the transport fails.
+        let payload = format!("data: {final_chunk}\n");
+        let error = reqwest::Client::builder()
+            .build()
+            .expect("http client")
+            .get("http://[::1")
+            .send()
+            .await
+            .expect_err("an unparsable URL fails without touching the network");
+        let byte_stream: BoxByteStream = Box::pin(futures::stream::iter([
+            Ok(Bytes::from(payload)),
+            Err(error),
+        ]));
+
+        let response =
+            stream_response_translated(byte_stream, 8, None, "model", TransformerChain::new())
+                .await;
+        let mut body = String::new();
+        let mut saw_error = false;
+        {
+            let mut stream = response.into_body().into_data_stream();
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(bytes) => body.push_str(&String::from_utf8_lossy(&bytes)),
+                    Err(_) => {
+                        saw_error = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(saw_error, "the transport error must still reach the client");
+        let events: Vec<serde_json::Value> = body
+            .split("\n\n")
+            .filter_map(|frame| {
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            })
+            .collect();
+        let partial_json = events
+            .iter()
+            .find_map(|event| {
+                event
+                    .get("delta")
+                    .and_then(|delta| delta.get("partial_json"))
+                    .and_then(|value| value.as_str())
+            })
+            .expect("the pending final frame must be flushed before the transport error");
+        assert_eq!(partial_json, "{\"city\":\"Paris\"}");
+        assert!(
+            !body.contains("event: message_stop"),
+            "no successful terminal after a transport error: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_flushes_the_pending_frame_before_the_error() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        let (mut context, _admission) = tracked_context(&tracker);
+        context.stream_idle_timeout = std::time::Duration::from_millis(20);
+        let payload = "data: {\"id\":\"idle-flush\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tail\"},\"finish_reason\":null}]}\n";
+        let byte_stream: BoxByteStream = Box::pin(
+            futures::stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from(payload))])
+                .chain(futures::stream::pending::<Result<Bytes, reqwest::Error>>()),
+        );
+
+        let response = stream_response_translated(
+            byte_stream,
+            8,
+            Some(context),
+            "model",
+            TransformerChain::new(),
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            body.contains("tail"),
+            "the pending final frame must be flushed before the idle timeout: {body}"
+        );
+        assert!(
+            body.contains("timeout_error"),
+            "the idle timeout must still be reported: {body}"
+        );
     }
 
     #[tokio::test]
