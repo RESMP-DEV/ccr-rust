@@ -159,6 +159,19 @@ suites reported permission failures that do not reproduce here.
   `~/.cargo/bin/ccr-rust.bak-20261127`.
 - `ccr-service-restart main --wait 5m` exited 0: pid 72570 to 75653, idle wait
   4.8 s, health true.
+- The merged `main` tree replaced that binary on 2026-11-26 at 22:37 PST:
+  `cargo install --path . --force --locked` from a clean worktree at `373da89`
+  exited 0, installing a 46,096,384-byte `~/.cargo/bin/ccr-rust`.
+- `ccr-service-restart main --wait 5m` exited 0: pid 75653 to 8788, idle wait
+  38.0 s, health true. `auth` restarted from pid 25522 to 12900 and `worker`
+  from 74057 to 20026 (idle wait 9.2 s), both health true.
+- `ocr` (3458) was deferred while it served a live Claude Code turn of roughly
+  90,000 message tokens: the idle gate timed out twice at 2 minutes rather than
+  interrupt the turn. It restarted from pid 15718 to 28709 once idle, health
+  true.
+- Smoke on the deployed binary: streaming `POST /v1/chat/completions` for
+  `zai,glm-5.4` returned a complete chunk sequence ending in
+  `finish_reason:"stop"`, a usage chunk, and `[DONE]`; curl exited 0.
 
 ## Post-fix measurement
 
