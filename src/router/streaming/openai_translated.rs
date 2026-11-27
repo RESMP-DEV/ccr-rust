@@ -111,6 +111,7 @@ pub async fn stream_response_translated(
         let mut ended_with_timeout = false;
         let mut saw_openai_terminal = false;
         let mut upstream_completed_cleanly = true;
+        let mut transport_error = false;
 
         macro_rules! handle_openai_frame {
             ($frame:expr, $forwarded:ident) => {{
@@ -251,6 +252,7 @@ pub async fn stream_response_translated(
                             let _ = tx
                                 .send(Err(std::io::Error::other(e.to_string())))
                                 .await;
+                            transport_error = true;
                             break;
                         }
                     }
@@ -361,12 +363,14 @@ pub async fn stream_response_translated(
             return;
         }
 
-        send_translated_terminal_events(
-            &tx,
-            &mut translation_state,
-            usage.clone().unwrap_or_default(),
-        )
-        .await;
+        if !transport_error {
+            send_translated_terminal_events(
+                &tx,
+                &mut translation_state,
+                usage.clone().unwrap_or_default(),
+            )
+            .await;
+        }
 
         // Record usage and verify token drift if we have context
         if let Some(ctx) = &verify_ctx {

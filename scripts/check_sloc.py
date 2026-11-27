@@ -43,10 +43,11 @@ SOURCE_ROOT = ROOT / "src"
 # Re-pinned 2026-11-26 for the SSE truncation fix: src/sse.rs and
 # src/router/streaming.rs became directory modules, and the decoder gained
 # dropped-frame accounting, exact resync, bare-CR final terminators, and
-# multi-line tail refusal, plus the read-error tail-flush regression test.
-# Re-pinned again the same day for the review round: CR resync handling,
-# per-line serialization of recovered multi-line payloads, and validated
-# message_stop framing. Hotspots are pinned at measured values.
+# multi-line tail refusal, plus the read-error tail-flush and
+# transport-error terminal-guard regression tests. Re-pinned again the same
+# day for the review round: CR resync handling, per-line serialization of
+# recovered multi-line payloads, and validated message_stop framing.
+# Hotspots are pinned at measured values.
 TOTAL_CEILING = 45_900
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
@@ -60,8 +61,8 @@ HOTSPOT_CEILINGS: dict[str, int] = {
     "router/dispatch.rs": 1_920,
     "config/mod.rs": 1_172,
     "router/streaming/anthropic.rs": 524,
-    "router/streaming/openai_translated.rs": 425,
-    "router/streaming/tests.rs": 779,
+    "router/streaming/openai_translated.rs": 429,
+    "router/streaming/tests.rs": 783,
     "router/streaming/mod.rs": 84,
     "sse/decoder.rs": 329,
     "sse/tests.rs": 306,

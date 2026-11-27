@@ -763,6 +763,10 @@ async fn upstream_read_error_flushes_the_pending_frame_before_the_error() {
         body.contains("tail"),
         "the pending final frame must be flushed before the transport error: {body}"
     );
+    assert!(
+        !body.contains("event: message_stop"),
+        "no successful terminal after a transport error: {body}"
+    );
 }
 
 #[tokio::test]
