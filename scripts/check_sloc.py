@@ -40,7 +40,11 @@ SOURCE_ROOT = ROOT / "src"
 # Re-pinned again the same day for the follow-up review round: the hedging
 # guard against fail-mode request plugins, the fail-mode refusal of invalid
 # transformed responses, and the plugin exit wait. Measured total 44373.
-TOTAL_CEILING = 44_450
+# Re-pinned 2026-11-26 for the SSE decoder split: src/sse.rs became the
+# src/sse/ directory module and streaming.rs gained the terminal decoder
+# flush on idle-timeout and read-error branches. Measured total on
+# origin/main (60574af) is 44903; hotspots are pinned at measured values.
+TOTAL_CEILING = 44_903
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
 # baseline. They may shrink or be split, but cannot grow while the ratchet is
@@ -50,8 +54,10 @@ HOTSPOT_CEILINGS: dict[str, int] = {
     "router/mod.rs": 1_940,
     "router/dispatch.rs": 1_920,
     "config/mod.rs": 1_172,
-    "router/streaming.rs": 1_380,
-    "sse.rs": 294,
+    "router/streaming.rs": 1_518,
+    "sse/decoder.rs": 314,
+    "sse/tests.rs": 272,
+    "sse/mod.rs": 57,
 }
 
 
