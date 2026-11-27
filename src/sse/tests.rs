@@ -298,6 +298,51 @@ fn resync_resumes_after_bare_cr_blank_line_at_buffer_end() {
 }
 
 #[test]
+fn resync_empty_push_keeps_swallow_lf_pending() {
+    let mut decoder = SseFrameDecoder::new();
+
+    let mut malformed = vec![b'x'; MAX_PENDING_BYTES];
+    malformed.push(b'\r');
+    assert!(decoder.push(&malformed).is_empty());
+
+    // An empty push has no byte to inspect and must not reset the pending
+    // CR state. Without that, the next LF is read as a blank line and the
+    // discarded frame's tail is parsed as a new frame.
+    assert!(decoder.push(b"").is_empty());
+    assert!(decoder.push(b"\n").is_empty());
+    assert!(decoder.push(b"data: dropped\n\n").is_empty());
+    let frames = decoder.push(b"data: recovered\n\n");
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].data, "recovered");
+}
+
+#[test]
+fn resync_preserves_bare_cr_terminated_nonempty_line() {
+    let mut decoder = SseFrameDecoder::new();
+
+    let mut malformed = vec![b'x'; MAX_PENDING_BYTES];
+    malformed.extend_from_slice(b"\nignored\r");
+    assert!(decoder.push(&malformed).is_empty());
+
+    let frames = decoder.push(b"\rdata: recovered\n\n");
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].data, "recovered");
+}
+
+#[test]
+fn parse_frame_excludes_trailing_bare_cr_from_field_value() {
+    let mut decoder = SseFrameDecoder::new();
+
+    let frames = decoder.push(b"data: one\r\rdata: two\n\n");
+
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].data, "one");
+    assert_eq!(frames[1].data, "two");
+}
+
+#[test]
 fn finish_recovers_frame_terminated_by_bare_carriage_return() {
     let mut decoder = SseFrameDecoder::new();
 

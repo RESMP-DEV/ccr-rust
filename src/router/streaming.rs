@@ -9,7 +9,7 @@ use super::translate_response::{
 };
 use super::types::*;
 use crate::metrics::{record_cost, record_failure, record_usage, verify_token_usage};
-use crate::sse::{SseFrameDecoder, StreamVerifyCtx};
+use crate::sse::{SseFrame, SseFrameDecoder, StreamVerifyCtx};
 use crate::transformer::TransformerChain;
 
 // ============================================================================
@@ -466,15 +466,16 @@ pub async fn stream_anthropic_response_with_tracking(
                     continue;
                 }
 
-                let event_kind = serde_json::from_str::<serde_json::Value>(json_str)
-                    .ok()
-                    .and_then(|event| {
-                        event
-                            .get("type")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    });
+                let parsed_event = serde_json::from_str::<serde_json::Value>(json_str).ok();
+                let event_kind = parsed_event.as_ref().and_then(|event| {
+                    event
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
+                let stop_payload_valid = json_str.is_empty() || parsed_event.is_some();
                 saw_message_stop |= frame.event.as_deref() == Some("message_stop")
+                    && stop_payload_valid
                     || event_kind.as_deref() == Some("message_stop");
 
                 // Parse Anthropic SSE events to extract usage.
@@ -484,7 +485,7 @@ pub async fn stream_anthropic_response_with_tracking(
                 // (cumulative output, and input or cache fields
                 // on some providers). Positive values win so a
                 // later event never zeroes an earlier report.
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(json_str) {
+                if let Some(event) = parsed_event.as_ref() {
                     let usage_sources = [
                         event.get("usage"),
                         event.get("message").and_then(|m| m.get("usage")),
@@ -561,12 +562,14 @@ pub async fn stream_anthropic_response_with_tracking(
                     json_str.to_string()
                 };
 
-                // Reconstruct SSE frame
-                let sse_data = if let Some(event_type) = &frame.event {
-                    format!("event: {}\ndata: {}\n\n", event_type, output_frame)
-                } else {
-                    format!("data: {}\n\n", output_frame)
-                };
+                // Reconstruct SSE frame. `to_sse_string` prefixes every line
+                // of a multi-line payload with `data: `, so a recovered
+                // multi-line tool argument is not silently truncated.
+                let sse_data = SseFrame {
+                    event: frame.event.clone(),
+                    data: output_frame,
+                }
+                .to_sse_string();
 
                 if tx.capacity() == 0 {
                     record_stream_backpressure();
@@ -1382,6 +1385,63 @@ data: [DONE]
         assert!(
             body.contains("timeout_error"),
             "the idle timeout must still be reported: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_message_stop_does_not_clear_route_backoff() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        tracker.record_429("provider,model", Some(std::time::Duration::from_secs(30)));
+        let (context, _admission) = tracked_context(&tracker);
+        // The event header says message_stop, but the JSON payload is cut.
+        let payload = "event: message_stop\ndata: {\"type\":\n\n";
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response = stream_anthropic_response_with_tracking(
+            byte_stream,
+            8,
+            context,
+            TransformerChain::new(),
+        )
+        .await;
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
+
+        assert!(
+            tracker.has_backoff("provider,model"),
+            "a malformed stop payload must not count as a clean completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_multiline_anthropic_payload_uses_one_data_field_per_line() {
+        let tracker = std::sync::Arc::new(crate::ratelimit::RateLimitTracker::new());
+        let (context, _admission) = tracked_context(&tracker);
+        let payload = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\ndata: \"delta\":{\"text\":\"ok\"}}\n";
+        let byte_stream: BoxByteStream =
+            Box::pin(futures::stream::iter([Ok::<Bytes, reqwest::Error>(
+                Bytes::from(payload),
+            )]));
+
+        let response = stream_anthropic_response_with_tracking(
+            byte_stream,
+            8,
+            context,
+            TransformerChain::new(),
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            body.contains(
+                "data: {\"type\":\"content_block_delta\",\ndata: \"delta\":{\"text\":\"ok\"}}"
+            ),
+            "each recovered data line needs its own data field: {body}"
         );
     }
 

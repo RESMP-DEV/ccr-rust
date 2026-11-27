@@ -43,9 +43,11 @@ SOURCE_ROOT = ROOT / "src"
 # Re-pinned 2026-11-26 for the SSE decoder split: src/sse.rs became the
 # src/sse/ directory module and streaming.rs gained the terminal decoder
 # flush on idle-timeout and read-error branches, plus their regression
-# tests. Measured total on origin/main (60574af) is 45039; hotspots are
-# pinned at measured values.
-TOTAL_CEILING = 45_039
+# tests. Re-pinned again the same day for the review round: CR resync
+# handling, per-line serialization of recovered multi-line payloads, and
+# validated message_stop framing. Measured total on this branch is 45142;
+# hotspots are pinned at measured values.
+TOTAL_CEILING = 45_142
 FILE_CEILING = 2_500
 # Files already above 1,200 lines get individual ceilings at their measured
 # baseline. They may shrink or be split, but cannot grow while the ratchet is
@@ -55,9 +57,9 @@ HOTSPOT_CEILINGS: dict[str, int] = {
     "router/mod.rs": 1_940,
     "router/dispatch.rs": 1_920,
     "config/mod.rs": 1_172,
-    "router/streaming.rs": 1_654,
-    "sse/decoder.rs": 314,
-    "sse/tests.rs": 272,
+    "router/streaming.rs": 1_708,
+    "sse/decoder.rs": 329,
+    "sse/tests.rs": 306,
     "sse/mod.rs": 57,
 }
 

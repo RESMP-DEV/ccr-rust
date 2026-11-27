@@ -118,6 +118,9 @@ impl SseFrameDecoder {
         }
 
         if self.discard_state == DiscardState::SwallowLf {
+            if self.buf.is_empty() {
+                return false;
+            }
             if self.buf.first() == Some(&b'\n') {
                 cursor = 1;
             }
@@ -164,8 +167,13 @@ impl SseFrameDecoder {
                         self.finish_resync();
                         return true;
                     }
+                    let ends_with_cr = self.buf.last() == Some(&b'\r');
                     self.buf.clear();
-                    self.discard_state = DiscardState::MidLine;
+                    self.discard_state = if ends_with_cr {
+                        DiscardState::SwallowLf
+                    } else {
+                        DiscardState::MidLine
+                    };
                     return false;
                 }
             }
@@ -280,7 +288,14 @@ fn parse_frame(frame_bytes: &[u8]) -> Option<SseFrame> {
         let line_start = cursor;
         let (line_end, next_cursor) = match read_next_line(frame_bytes, cursor) {
             Some(bounds) => bounds,
-            None => (frame_bytes.len(), frame_bytes.len()),
+            None => {
+                let line_end = if frame_bytes.last() == Some(&b'\r') {
+                    frame_bytes.len() - 1
+                } else {
+                    frame_bytes.len()
+                };
+                (line_end, frame_bytes.len())
+            }
         };
 
         let line = &frame_bytes[line_start..line_end];
